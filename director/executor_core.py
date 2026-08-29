@@ -79,6 +79,7 @@ from .segment_mp4_export import (
     new_segment_mp4_run_dir,
 )
 from .segment_continuity import (
+    concat_chunks_lazy,
     concat_continuous_chunks,
     is_continuity_active,
     resolve_prev_segment_output,
@@ -1305,6 +1306,18 @@ def execute_director_plan_core(
         patched_pre = completed_pre_refine.get(seg.index)
         if patched_pre is not None and i < len(export_pre_chunks):
             export_pre_chunks[i] = patched_pre
+
+    # Free intermediate dictionaries — they only served segment-to-segment
+    # phase alignment and are no longer needed.  export_chunks / export_pre_chunks
+    # already hold the authoritative references for the merge.
+    completed_outputs.clear()
+    completed_pre_refine.clear()
+    completed_av_latents.clear()
+    completed_av_handoff.clear()
+    completed_refine_passes.clear()
+    import gc as _gc
+    _gc.collect()
+
     # Aligned to export_chunks only (skipped slots are already omitted).
     export_audios: list[dict[str, Any]] = []
     missing_audio: list[int] = []
@@ -1321,29 +1334,28 @@ def execute_director_plan_core(
             f"{missing_audio} — those slots are silent in the merge. "
             "Re-run them once (or run all) to refresh audio cache."
         )
-    export_frame_counts = [int(c.shape[0]) for c in export_chunks]
     # segment_outputs path (分段导出 / image batch): keep run-order audios.
     if plan.export_mode == "all" and output_chunks:
         segment_audios = export_audios
+        export_frame_counts = [int(c.shape[0]) for c in export_chunks]
     else:
         segment_audios = [
             completed_audios.get(idx) or (segment_audios[pos] if pos < len(segment_audios) else {})
             for pos, idx in enumerate(run_list)
         ]
         export_frame_counts = [int(t.shape[0]) for t in segment_outputs]
-    combined = concat_continuous_chunks(export_chunks, export_segments, plan)
+    # Free completed_audios — export_audios / segment_audios now hold what we need.
+    completed_audios.clear()
+    # --- Main merge: lazy-load from disk (peak ≈ result + one chunk) ---
+    combined = concat_chunks_lazy(node_id, plan, export_segments)
+    # Free all in-memory chunk lists — merge read from disk.
+    export_chunks.clear()
+    # --- Pre-refine merge: must use in-memory chunks (different data) ---
     pre_source = export_pre_chunks if export_pre_chunks else segment_pre_refine
     if not pre_source:
         pre_source = list(segment_outputs)
-    same_as_final = (
-        len(pre_source) == len(export_chunks)
-        and all(a is b for a, b in zip(pre_source, export_chunks))
-    )
-    pre_combined = (
-        combined
-        if same_as_final
-        else concat_continuous_chunks(pre_source, export_segments, plan)
-    )
+    pre_combined = concat_continuous_chunks(pre_source, export_segments, plan)
+    export_pre_chunks.clear()
     return (
         combined,
         segment_outputs,

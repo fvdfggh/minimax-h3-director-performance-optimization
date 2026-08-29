@@ -1567,6 +1567,61 @@ def concat_continuous_chunks(
     return cat_frames_variable_size(fixed)
 
 
+def concat_chunks_lazy(
+    node_id: int,
+    plan: DirectorPlan,
+    export_segments: list,
+) -> torch.Tensor:
+    """Lazy-loading merge: read segments from disk one by one, concat
+    incrementally.  Peak memory ≈ result + one chunk (vs all chunks).
+
+    Continuity seam fix is applied at each join.  Each ``del chunk`` frees
+    the previous input before loading the next.
+    """
+    from .segment_cache import load_segment_cache as _load_seg
+
+    if not export_segments:
+        raise ValueError("concat_chunks_lazy: no export_segments")
+    first = _load_seg(node_id, export_segments[0], plan)
+    if first is None:
+        raise RuntimeError(
+            f"concat_chunks_lazy: segment 0 cache miss (node {node_id})"
+        )
+    result = first.float()
+    del first
+    continuity = getattr(plan, "continuity_enabled", False)
+    for i, seg in enumerate(export_segments[1:], start=1):
+        chunk = _load_seg(node_id, seg, plan)
+        if chunk is None:
+            raise RuntimeError(
+                f"concat_chunks_lazy: segment {i} cache miss (node {node_id})"
+            )
+        chunk = chunk.float()
+        if continuity:
+            left = _unfreeze_held_tail(result)
+            if CONTINUITY_HOLD_POP_ON_TAIL:
+                left = _break_hold_pop_window(left, from_end=True)
+            body = _break_hold_pop_window(chunk, from_end=False)
+            if float(CONTINUITY_SPIKE_WEIGHT) > 0:
+                body = _ease_opening_spikes(body)
+            body = _soften_body0_toward_prev(body, left)
+            body = _additive_opening_luma(body, left)
+            left, body = _micro_seam_bridge(left, body)
+            # ``left`` = seam-fixed tail, ``body`` = seam-fixed opening.
+            # ``result[:-left.shape[0]]`` is a view (zero-copy).
+            new_result = cat_frames_variable_size(
+                [result[:-left.shape[0]], left, body]
+            )
+            del result, left, body
+            result = new_result
+        else:
+            new_result = cat_frames_variable_size([result, chunk])
+            del result
+            result = new_result
+        del chunk
+    return result
+
+
 def apply_cached_segment_continuity(
     chunk: torch.Tensor,
     seg: SegmentPlan,

@@ -10,6 +10,12 @@ import torch
 from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from ..nodes.conditioning import run_minimax_conditioning
+from .conditioning_cache import (
+    clear_conditioning_cache,
+    get_cache_stats,
+    load_conditioning_cache,
+    save_conditioning_cache,
+)
 from .core_sampling import sample_single_stage
 from .refine_pack import (
     confirm_first_pass_enabled,
@@ -259,6 +265,8 @@ def execute_director_plan_core(
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
     clear_vram_between_segments: bool = True,
+    use_conditioning_cache: bool = False,
+    clear_conditioning_cache_on_run: bool = False,
 ) -> tuple[
     torch.Tensor,
     list[torch.Tensor],
@@ -282,6 +290,24 @@ def execute_director_plan_core(
     # UI toggle on the player bar (timeline.liveTaePreview); default on.
     raw_live = (plan.raw or {}).get("liveTaePreview", (plan.raw or {}).get("live_tae_preview", True))
     live_tae_preview = False if raw_live in (False, 0, "0", "false", "False", "off") else True
+
+    # Conditioning cache management
+    if clear_conditioning_cache_on_run:
+        cleared = clear_conditioning_cache(node_id)
+        if cleared > 0:
+            reports_init = [f"Conditioning cache: cleared {cleared} files."]
+        else:
+            reports_init = ["Conditioning cache: no files to clear."]
+    else:
+        reports_init = []
+    
+    if use_conditioning_cache:
+        cache_stats = get_cache_stats(node_id)
+        if cache_stats["exists"]:
+            reports_init.append(
+                f"Conditioning cache: {cache_stats['files']} files, "
+                f"{cache_stats['total_size_mb']} MB"
+            )
 
     all_segments = plan.segments
     # Drop caches for deleted/shortened timelines. Use every segment index (not
@@ -311,6 +337,10 @@ def execute_director_plan_core(
     segment_audios: list[dict[str, Any]] = []
     skipped_no_cache: list[int] = []
     reports: list[str] = [plan_summary(plan), "", "Execution path: ComfyUI official MiniMax H3"]
+    # Add conditioning cache reports
+    reports.extend(reports_init)
+    if use_conditioning_cache:
+        reports.append("Conditioning cache: ENABLED — skip CLIP encoding for cached segments.")
     # One timestamp folder per execute so all segments of this run stay together.
     mp4_run_dir = new_segment_mp4_run_dir(plan)
     if mp4_run_dir is not None:
@@ -578,24 +608,69 @@ def execute_director_plan_core(
         ) and audio_vae is None:
             raise ValueError("r2v/v2v/rv2v / reference conditioning requires audio_vae input.")
 
-        # Always build via official MiniMaxH3ImageToVideo / ReferenceToVideo.
-        positive, negative, latent, task_hint = run_minimax_conditioning(
-            clip=clip,
-            vae=vae,
-            audio_vae=audio_vae,
-            prompt=positive_prompt,
-            width=ctx_w,
-            height=ctx_h,
-            length=sample_len,
-            task_key=seg.task_key,
-            first_frame=first_frame,
-            last_frame=last_frame,
-            ref_images=ref_images,
-            ref_videos=ref_videos,
-            ref_video_audios=ref_video_audios,
-            ref_audios=ref_audios,
-            ref_image_size=resolve_ref_image_size(seg, plan),
-        )
+        # Conditioning cache: try to load from cache first
+        cached_conditioning = None
+        if use_conditioning_cache and not skip_first_sample:
+            cached_conditioning = load_conditioning_cache(
+                node_id=node_id,
+                segment_index=seg.index,
+                prompt=positive_prompt,
+                width=ctx_w,
+                height=ctx_h,
+                length=sample_len,
+                task_key=seg.task_key,
+                ref_image_size=resolve_ref_image_size(seg, plan),
+                ref_images=ref_images,
+            )
+
+        if cached_conditioning is not None:
+            # Cache hit: use cached conditioning, skip CLIP encoding
+            positive = cached_conditioning["positive"]
+            negative = cached_conditioning["negative"]
+            latent = cached_conditioning["latent"]
+            task_hint = f"{seg.task_key} (cached)"
+            reports.append(
+                f"Seg #{seg.index + 1}: conditioning CACHE HIT — skip CLIP encoding"
+            )
+        else:
+            # Cache miss: run full conditioning pipeline
+            positive, negative, latent, task_hint = run_minimax_conditioning(
+                clip=clip,
+                vae=vae,
+                audio_vae=audio_vae,
+                prompt=positive_prompt,
+                width=ctx_w,
+                height=ctx_h,
+                length=sample_len,
+                task_key=seg.task_key,
+                first_frame=first_frame,
+                last_frame=last_frame,
+                ref_images=ref_images,
+                ref_videos=ref_videos,
+                ref_video_audios=ref_video_audios,
+                ref_audios=ref_audios,
+                ref_image_size=resolve_ref_image_size(seg, plan),
+            )
+            
+            # Save to cache for next run
+            if use_conditioning_cache:
+                save_conditioning_cache(
+                    node_id=node_id,
+                    segment_index=seg.index,
+                    positive=positive,
+                    negative=negative,
+                    latent=latent,
+                    prompt=positive_prompt,
+                    width=ctx_w,
+                    height=ctx_h,
+                    length=sample_len,
+                    task_key=seg.task_key,
+                    ref_image_size=resolve_ref_image_size(seg, plan),
+                    ref_images=ref_images,
+                )
+                reports.append(
+                    f"Seg #{seg.index + 1}: conditioning SAVED to cache"
+                )
 
         trim_frames = 0
         if use_motion_context:

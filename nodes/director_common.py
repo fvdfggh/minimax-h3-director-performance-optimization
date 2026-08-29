@@ -98,6 +98,37 @@ def director_perf_inputs() -> dict:
                 ),
             },
         ),
+        "use_conditioning_cache": (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": (
+                    "Conditioning 缓存：首次运行时将 CLIP 编码结果缓存到磁盘，"
+                    "后续运行相同 prompt 时直接读取缓存，跳过 CLIP 编码。"
+                    "适用于多段视频、prompt 不变的场景。"
+                ),
+            },
+        ),
+        "clear_conditioning_cache_on_run": (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": (
+                    "清除 Conditioning 缓存：运行时清空所有缓存文件，"
+                    "强制重新编码所有 prompt。"
+                ),
+            },
+        ),
+        "clear_conditioning_cache_button": (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": (
+                    "立即清除磁盘上所有 conditioning 缓存文件。"
+                    "点击后会在下次运行时自动重置为 False。"
+                ),
+            },
+        ),
     }
 
 

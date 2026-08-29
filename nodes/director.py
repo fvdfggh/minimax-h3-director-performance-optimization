@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import comfy.samplers
 
 from ..director.executor_core import execute_director_plan_core
@@ -207,9 +209,21 @@ class MiniMaxH3Director:
         shift_audio=3.0,
         clear_vram_between_segments=True,
         export_source_images=False,
+        use_conditioning_cache=False,
+        clear_conditioning_cache_on_run=False,
+        clear_conditioning_cache_button=False,
         **kwargs,
     ):
         del kwargs
+
+        # Handle clear cache button click
+        from ..director.conditioning_cache import clear_all_conditioning_cache
+        if clear_conditioning_cache_button:
+            cleared = clear_all_conditioning_cache()
+            if cleared > 0:
+                logging.info(f"Conditioning cache: manually cleared {cleared} files.")
+            else:
+                logging.info("Conditioning cache: no files to clear.")
 
         plan = prepare_director_plan(
             timeline_data=timeline_data,
@@ -242,6 +256,8 @@ class MiniMaxH3Director:
                 shift_video=shift_video,
                 shift_audio=shift_audio,
                 clear_vram_between_segments=clear_vram_between_segments,
+                use_conditioning_cache=use_conditioning_cache,
+                clear_conditioning_cache_on_run=clear_conditioning_cache_on_run,
             )
         )
 

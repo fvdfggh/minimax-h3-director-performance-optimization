@@ -109,23 +109,29 @@ def director_perf_inputs() -> dict:
                 ),
             },
         ),
-        "clear_conditioning_cache_on_run": (
+        "batch_mode": (
             "BOOLEAN",
             {
                 "default": False,
                 "tooltip": (
-                    "清除 Conditioning 缓存：运行时清空所有缓存文件，"
-                    "强制重新编码所有 prompt。"
+                    "分阶段批量处理模式：\n"
+                    "Phase 1: 预编码所有文本/音频/参考图到磁盘\n"
+                    "Phase 2: UNet 常驻内存，逐段采样存 latent\n"
+                    "Phase 3: VAE 常驻内存，逐段解码导出\n\n"
+                    "优势：避免模型反复装卸，减少磁盘读写。\n"
+                    "代价：总显存占用略高（模型常驻），无 refine passes。"
                 ),
             },
         ),
-        "clear_conditioning_cache_button": (
-            "BOOLEAN",
+        "workflow_name": (
+            "STRING",
             {
-                "default": False,
+                "default": "",
+                "hidden": True,
                 "tooltip": (
-                    "立即清除磁盘上所有 conditioning 缓存文件。"
-                    "点击后会在下次运行时自动重置为 False。"
+                    "只读：前端自动填入当前工作流名称。文本缓存与 batch 中间缓存"
+                    "按工作流名分目录存放，同名工作流的缓存互不干扰。"
+                    "清除缓存请使用节点上的「清空缓存」按钮。"
                 ),
             },
         ),

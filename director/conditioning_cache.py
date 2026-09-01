@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,52 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director-Cached.conditioning_cache")
 # Cache directory relative to ComfyUI output
 CACHE_SUBDIR = "minimax_conditioning_cache"
 
+# Windows-illegal path characters, Windows reserved device names.
+_WIN_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+_WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$", re.I)
 
-def _get_cache_dir(node_id: str | None = None) -> Path:
-    """Get or create the conditioning cache directory."""
+# Cache file prefix. The name carries NO segment index on purpose: two segments
+# with identical text inputs must resolve to the same file so the second one is
+# served from disk instead of being encoded again.
+_TEXT_PREFIX = "cond"
+
+
+def slugify_workflow_name(name: str) -> str:
+    """Turn a workflow name into a single safe path component.
+
+    CJK names are kept as-is because the directory names are user-facing —
+    someone with several workflows wants to recognise them in Explorer. Only
+    path separators and Windows-illegal characters are stripped, and the result
+    is capped so the full path stays well inside Windows' 260-char limit.
+
+    Returns "" when nothing usable remains, which means "no workflow namespace".
+    """
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    text = os.path.basename(text.replace("\\", "/"))
+    text = _WIN_ILLEGAL.sub("_", text)
+    text = re.sub(r"\s+", " ", text).strip(" .")
+    # Keep it short: this nests under output/ and above node_<id>/.
+    text = text[:60]
+    if not text or _WIN_RESERVED.match(text):
+        return ""
+    return text
+
+
+def _get_cache_dir(node_id: str | None = None, workflow_name: str | None = None) -> Path:
+    """Get or create the conditioning cache directory.
+
+    Layout is ``<cache>/[<workflow slug>/]node_<id>/``. The workflow layer keeps
+    caches from differently named workflows from colliding on the same
+    ``node_<id>`` — node ids are per-graph and routinely reused across files.
+    """
     from folder_paths import output_directory
-    
+
     base = Path(output_directory) / CACHE_SUBDIR
+    slug = slugify_workflow_name(workflow_name)
+    if slug:
+        base = base / slug
     if node_id:
         base = base / f"node_{node_id}"
     base.mkdir(parents=True, exist_ok=True)
@@ -75,6 +116,23 @@ def _hash_ref_images(ref_images: Any) -> str:
         return f"error:{hash(str(ref_images))}"
 
 
+def text_cache_key(
+    prompt: str,
+    width: int,
+    height: int,
+    length: int,
+    task_key: str,
+    ref_image_size: str = "match",
+    ref_images: Any = None,
+) -> str:
+    """Public cache key for a text encoding, shared by save/load/dedupe.
+
+    Exposed so the batch path can group segments that would produce byte-identical
+    text encodings and encode each distinct key exactly once.
+    """
+    return _prompt_hash(prompt, width, height, length, task_key, ref_image_size, ref_images)
+
+
 def _prompt_hash(prompt: str, width: int, height: int, length: int, task_key: str, 
                  ref_image_size: str = "match", ref_images: Any = None) -> str:
     """Generate a hash key for the prompt + dimensions + reference images.
@@ -99,15 +157,16 @@ def save_conditioning_cache(
     task_key: str,
     ref_image_size: str = "match",
     ref_images: Any = None,
+    workflow_name: str | None = None,
 ) -> Path | None:
     """Save conditioning tensors to disk cache.
     
     Returns the cache file path, or None if saving failed.
     """
     try:
-        cache_dir = _get_cache_dir(node_id)
+        cache_dir = _get_cache_dir(node_id, workflow_name)
         prompt_key = _prompt_hash(prompt, width, height, length, task_key, ref_image_size, ref_images)
-        cache_file = cache_dir / f"seg_{segment_index:03d}_{prompt_key}.pt"
+        cache_file = cache_dir / f"{_TEXT_PREFIX}_{prompt_key}.pt"
         
         # Prepare conditioning for serialization
         # ComfyUI conditioning is a list of [tensor, dict] pairs
@@ -163,22 +222,23 @@ def load_conditioning_cache(
     task_key: str,
     ref_image_size: str = "match",
     ref_images: Any = None,
+    workflow_name: str | None = None,
 ) -> dict | None:
     """Load cached conditioning tensors from disk.
-    
+
+    ``segment_index`` is accepted for call-site compatibility but takes no part in
+    the lookup: files are named by text hash alone, so any segment whose text
+    inputs hash the same resolves to the same file.
+
     Returns dict with 'positive', 'negative', 'latent' keys, or None if cache miss.
     Tensors are moved to CUDA (GPU) for use by the model.
     """
     try:
-        cache_dir = _get_cache_dir(node_id)
+        cache_dir = _get_cache_dir(node_id, workflow_name)
         prompt_key = _prompt_hash(prompt, width, height, length, task_key, ref_image_size, ref_images)
-        
-        # Search for matching cache file
-        pattern = f"seg_{segment_index:03d}_{prompt_key}.pt"
-        cache_file = cache_dir / pattern
-        
+        cache_file = cache_dir / f"{_TEXT_PREFIX}_{prompt_key}.pt"
+
         if not cache_file.exists():
-            # Try to find any cache file for this segment (prompt might have changed)
             log.debug("No cache hit for seg #%d (key=%s)", segment_index + 1, prompt_key)
             return None
         
@@ -222,27 +282,28 @@ def load_conditioning_cache(
         return None
 
 
-def clear_conditioning_cache(node_id: str | None = None, segment_index: int | None = None) -> int:
+def clear_conditioning_cache(
+    node_id: str | None = None,
+    segment_index: int | None = None,
+    workflow_name: str | None = None,
+) -> int:
     """Clear conditioning cache files.
     
     Returns number of files deleted.
+
+    ``segment_index`` used to select a filename prefix; files are now named by
+    text hash alone, so it no longer selects anything and is ignored. Clearing
+    is per node directory.
     """
     try:
-        cache_dir = _get_cache_dir(node_id)
+        cache_dir = _get_cache_dir(node_id, workflow_name)
         if not cache_dir.exists():
             return 0
         
         deleted = 0
-        if segment_index is not None:
-            # Clear specific segment
-            for f in cache_dir.glob(f"seg_{segment_index:03d}_*.pt"):
-                f.unlink()
-                deleted += 1
-        else:
-            # Clear all
-            for f in cache_dir.glob("seg_*.pt"):
-                f.unlink()
-                deleted += 1
+        for f in cache_dir.glob(f"{_TEXT_PREFIX}_*.pt"):
+            f.unlink()
+            deleted += 1
         
         log.info("Cleared %d conditioning cache files", deleted)
         return deleted
@@ -252,14 +313,14 @@ def clear_conditioning_cache(node_id: str | None = None, segment_index: int | No
         return 0
 
 
-def get_cache_stats(node_id: str | None = None) -> dict:
+def get_cache_stats(node_id: str | None = None, workflow_name: str | None = None) -> dict:
     """Get statistics about the conditioning cache."""
     try:
-        cache_dir = _get_cache_dir(node_id)
+        cache_dir = _get_cache_dir(node_id, workflow_name)
         if not cache_dir.exists():
             return {"exists": False, "files": 0, "total_size_mb": 0}
         
-        files = list(cache_dir.glob("seg_*.pt"))
+        files = list(cache_dir.glob(f"{_TEXT_PREFIX}_*.pt"))
         total_size = sum(f.stat().st_size for f in files)
         
         return {
@@ -272,31 +333,110 @@ def get_cache_stats(node_id: str | None = None) -> dict:
         return {"exists": False, "files": 0, "total_size_mb": 0}
 
 
-def clear_all_conditioning_cache() -> int:
+def clear_all_conditioning_cache(keep_newer_than: float | None = None) -> int:
     """Clear ALL conditioning cache files across all nodes.
-    
+
     Returns total number of files deleted.
+
+    ``keep_newer_than`` (epoch seconds) spares anything written at or after that
+    instant. The clear now runs *after* a successful run, so without it the run
+    would delete the very conditioning files it just produced — emptying the
+    cache and forcing a re-encode next time, the opposite of the intent. Pass
+    the run's start timestamp to mean "drop stale entries, keep what this run
+    just built".
     """
     try:
         from folder_paths import output_directory
-        
+
         base = Path(output_directory) / CACHE_SUBDIR
         if not base.exists():
             return 0
-        
+
         deleted = 0
-        for node_dir in base.iterdir():
-            if node_dir.is_dir():
-                for f in node_dir.glob("seg_*.pt"):
-                    f.unlink()
-                    deleted += 1
-        
+        # rglob, not iterdir: a workflow-name layer may sit between the cache
+        # root and node_<id>/, so the files are no longer all one level deep.
+        for f in base.rglob(f"{_TEXT_PREFIX}_*.pt"):
+            if not f.is_file():
+                continue
+            if keep_newer_than is not None:
+                try:
+                    if f.stat().st_mtime >= keep_newer_than:
+                        continue
+                except OSError:
+                    pass
+            try:
+                f.unlink()
+                deleted += 1
+            except OSError:
+                pass
+
         log.info("Cleared ALL conditioning cache files: %d total", deleted)
         return deleted
-        
+
     except Exception as exc:
         log.warning("Failed to clear all conditioning cache: %s", exc)
         return 0
+
+
+# --- Edge-triggered clear ------------------------------------------------
+# The「清除缓存」widget is a BOOLEAN (checkbox), not a real button: once ticked
+# it stays True, so a naive ``if flag: clear()`` wipes the cache on *every* run
+# and every run re-encodes every segment from scratch. Its tooltip promises
+# "click 后会在下次运行时自动重置为 False", but the backend cannot do that —
+# widget state lives in the browser, and no JS handles this widget.
+#
+# So remember the last-seen value on disk and fire only on a False -> True
+# transition. Ticking it then behaves like pressing a button: one clear, then
+# quiet until you untick and tick again.
+
+_CLEAR_STATE_PREFIX = ".clear_button_state"
+
+
+def _clear_state_path(node_id: str | None, workflow_name: str | None = None) -> Path:
+    """Marker file beside the per-node cache dirs — never inside one.
+
+    Living outside means a ``cond_*.pt`` wipe cannot remove the edge marker.
+    Namespaced by workflow slug so two workflows sharing a node id do not
+    fight over the same marker.
+    """
+    from folder_paths import output_directory
+
+    base = Path(output_directory) / CACHE_SUBDIR
+    base.mkdir(parents=True, exist_ok=True)
+    slug = slugify_workflow_name(workflow_name)
+    tag = f"{slug}." if slug else ""
+    return base / f"{_CLEAR_STATE_PREFIX}.{tag}node_{node_id}"
+
+
+def check_clear_edge(node_id: str | None, flag: bool, workflow_name: str | None = None) -> bool:
+    """Read-only edge test: True only on a False -> True transition.
+
+    Deliberately writes nothing. The caller must pair this with
+    ``mark_clear_state`` **after** the run succeeds, so a run that raises leaves
+    the marker at its old value and the pending clear is retried next time
+    instead of having thrown the cache away for nothing.
+    """
+    path = _clear_state_path(node_id, workflow_name)
+    previous = False
+    try:
+        if path.exists():
+            previous = path.read_text(encoding="utf-8").strip().lower() == "true"
+    except OSError:
+        previous = False
+
+    return bool(flag) and not previous
+
+
+def mark_clear_state(node_id: str | None, flag: bool, workflow_name: str | None = None) -> None:
+    """Record the flag value for the next run's edge test.
+
+    Call only on a fully successful run — see ``check_clear_edge``.
+    """
+    path = _clear_state_path(node_id, workflow_name)
+    try:
+        path.write_text("true" if flag else "false", encoding="utf-8")
+    except OSError as exc:
+        log.warning("Failed to persist clear-button state: %s", exc)
 
 
 def get_all_cache_stats() -> dict:
@@ -312,13 +452,11 @@ def get_all_cache_stats() -> dict:
         total_size = 0
         node_count = 0
         
-        for node_dir in base.iterdir():
-            if node_dir.is_dir():
-                files = list(node_dir.glob("seg_*.pt"))
-                total_files += len(files)
-                total_size += sum(f.stat().st_size for f in files)
-                if files:
-                    node_count += 1
+        # rglob: workflow-name layer may sit between the root and node_<id>/.
+        files = [f for f in base.rglob(f"{_TEXT_PREFIX}_*.pt") if f.is_file()]
+        total_files = len(files)
+        total_size = sum(f.stat().st_size for f in files)
+        node_count = len({f.parent for f in files})
         
         return {
             "exists": True,
@@ -329,3 +467,60 @@ def get_all_cache_stats() -> dict:
         }
     except Exception:
         return {"exists": False, "files": 0, "total_size_mb": 0, "nodes": 0}
+
+
+def prune_unused_conditioning_cache(
+    node_id: str | None,
+    workflow_name: str | None,
+    keep_keys: set[str],
+    keep_newer_than: float | None = None,
+) -> int:
+    """Delete cached text encodings this run did not use.
+
+    After a run finishes encoding, every ``cond_<hash>.pt`` whose hash is absent
+    from ``keep_keys`` belongs to a prompt, resolution or reference set that is no
+    longer part of this timeline — leftovers from an edited prompt, or segments
+    that were deleted from a longer timeline. Without this they accumulate
+    forever, one ~140 MB file per prompt revision.
+
+    ``keep_keys`` must contain every hash the run actually consumed: both the ones
+    served from cache and the ones freshly encoded.
+
+    Returns the number of files deleted. Never raises — a cleanup failure must not
+    fail an expensive run.
+    """
+    try:
+        cache_dir = _get_cache_dir(node_id, workflow_name)
+        if not cache_dir.exists():
+            return 0
+
+        keep = set(keep_keys or ())
+        prefix_len = len(_TEXT_PREFIX) + 1
+        deleted = 0
+        for f in cache_dir.glob(f"{_TEXT_PREFIX}_*.pt"):
+            if not f.is_file():
+                continue
+            key = f.stem[prefix_len:]
+            if key in keep:
+                continue
+            if keep_newer_than is not None:
+                try:
+                    if f.stat().st_mtime >= keep_newer_than:
+                        continue
+                except OSError:
+                    pass
+            try:
+                f.unlink()
+                deleted += 1
+            except OSError as exc:
+                log.warning("Could not delete stale conditioning cache %s: %s", f.name, exc)
+
+        if deleted:
+            log.info(
+                "Conditioning cache: pruned %d unused file(s), kept %d", deleted, len(keep)
+            )
+        return deleted
+
+    except Exception as exc:
+        log.warning("Failed to prune conditioning cache: %s", exc)
+        return 0

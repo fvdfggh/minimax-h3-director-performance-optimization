@@ -33,8 +33,12 @@ VIDEO_RUN_GRID = (124, 107, 90, 73, 56, 39, 22, 5, 1)
 
 CONTINUITY_TASK_KEYS = frozenset({"t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v"})
 # v8: v7 + export audio cache + fps in fingerprint + trim hydrate on partial re-run.
+# v9: v8 + export length snapped down onto the 17-frame VAE cycle grid, so the
+#     next segment's pin window ends exactly on the last exported frame and
+#     gap_after_pin is always 0 (no trimmed frames, no seam echo). Cached
+#     exports from v8 and earlier hold 17k+5 frames and must not be reused.
 # Single source of truth — imported by segment_cache.segment_cache_fingerprint.
-CONTINUITY_PIPELINE_ID = "minimax_h3_motion_context_v8"
+CONTINUITY_PIPELINE_ID = "minimax_h3_motion_context_v9"
 # Example workflow tested value (NikoDemon80): audio_context_length=24 with video=22.
 DEFAULT_AUDIO_CONTEXT_FRAMES = 24
 
@@ -589,6 +593,11 @@ def generation_frame_budget(visible_frames: int, context_frames: int) -> tuple[i
        absolute end, which includes align overshoot beyond the export)
     5. If phase-align places the pin a few frames before that export end,
        drop those frames from the previous export before concat (v7)
+    6. The caller exports ``minimax_phase_aligned_export_frames(visible)`` —
+       17k instead of 17k+5 — so the next pin window ends exactly on the last
+       exported frame and step 5 never fires: no lost frames, no seam echo.
+       (Every context length in ``VIDEO_RUN_GRID`` is 17k+5, which is what makes
+       this exact fit possible.)
     """
     from .frame_align import minimax_align_frame_count
 

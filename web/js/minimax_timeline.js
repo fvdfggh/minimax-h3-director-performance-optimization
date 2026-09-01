@@ -11101,6 +11101,27 @@ class MiniMaxH3DirectorEditor {
     }
 }
 
+/** Resolve the currently active workflow's display name for cache namespacing.
+
+ * Modern ComfyUI exposes it on the workflow manager; fall back to the graph's
+ * ``extra`` metadata (used by older versions). Empty string means "no workflow
+ * namespace" — the server then falls back to the node-id-only directory.
+ */
+function getActiveWorkflowName() {
+    try {
+        const wfManager = app.workflowManager;
+        const wf = wfManager?.activeWorkflow;
+        const name = wf?.name || wf?.title || wf?.workflow_name;
+        if (name) return String(name);
+    } catch (_) { /* ignore */ }
+    try {
+        const graph = app.graph ?? app.canvas?.graph;
+        const extraName = graph?.extra?.workflow?.name || graph?.extra?.ds?.workflow_name;
+        if (extraName) return String(extraName);
+    } catch (_) { /* ignore */ }
+    return "";
+}
+
 function findDirectorNode(nodeId) {
     const id = String(nodeId);
     const graph = app.graph ?? app.canvas?.graph;
@@ -11833,6 +11854,69 @@ app.registerExtension({
             queueMicrotask(() => applyDirectorWidgetLabels(this));
             setTimeout(() => applyDirectorWidgetLabels(this), 0);
             this.size = [1000, 680];
+
+            // Backend cache layout is keyed on the workflow name: the conditioning
+            // and batch caches live under <workflow>/node_<id>. Sync that name into
+            // the hidden `workflow_name` widget so the server picks the right dir.
+            const syncWorkflowName = () => {
+                const wfName = getActiveWorkflowName();
+                const w = (this.widgets || []).find((x) => x?.name === "workflow_name");
+                if (w && w.value !== wfName) w.value = wfName;
+            };
+            syncWorkflowName();
+            setTimeout(syncWorkflowName, 0);
+            setTimeout(syncWorkflowName, 200);
+
+            // 「清空缓存」 button. Unlike the old checkbox it fires immediately via
+            // the HTTP route instead of riding a run's edge — so clearing works even
+            // when the timeline has nothing to run. It targets exactly this node's
+            // conditioning + batch scratch dirs, never minimax_seg_cache.
+            const clearBtn = this.addWidget("button", "清空缓存", null, () => {
+                const nodeId = String(this.id ?? "");
+                const wfName = getActiveWorkflowName();
+                if (!window.confirm(
+                    "确认清空本节点的文本缓存与中间缓存吗？\n\n" +
+                    (wfName ? "工作流：" + wfName + "\n" : "") +
+                    "节点 ID：" + nodeId + "\n\n" +
+                    "将删除：\n" +
+                    "· 文本编码缓存（conditioning）\n" +
+                    "· batch 中间缓存（scratch）\n\n" +
+                    "不影响 minimax_seg_cache 的片段帧/音频/AV latent。"
+                )) {
+                    return;
+                }
+                (async () => {
+                    try {
+                        const resp = await api.fetchApi("/minimax/director/clear_cache", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ node_id: nodeId, workflow_name: wfName }),
+                        });
+                        const data = resp.ok ? await resp.json() : { error: (await resp.text()).slice(0, 200) };
+                        if (!resp.ok) {
+                            console.error("[MiniMax H3Director] clear cache failed:", data);
+                            window.alert("清空缓存失败：" + (data.error || resp.status));
+                            return;
+                        }
+                        const cond = data.cleared?.conditioning ?? 0;
+                        const batch = data.cleared?.batch ?? 0;
+                        const msg = [
+                            "缓存已清空",
+                            "工作流：" + (wfName || "（未命名）"),
+                            "删除文本缓存：" + cond + " 个文件",
+                            "删除中间缓存：" + (batch ? "已删除" : "无"),
+                        ].join("\n");
+                        console.log(
+                            `[MiniMax H3Director] cache cleared: ${cond} conditioning file(s), ` +
+                            `${batch ? "batch scratch removed" : "no batch scratch"} (workflow '${wfName || ""}')`
+                        );
+                        window.alert(msg);
+                    } catch (err) {
+                        console.error("[MiniMax H3Director] clear cache error:", err);
+                        window.alert("清空缓存出错：" + err);
+                    }
+                })();
+            });
 
             const existingDom = pruneDirectorDomWidgets(this);
             // Idempotent: reuse the host if onNodeCreated / graph restore already mounted one.

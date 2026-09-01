@@ -24,7 +24,9 @@ from .refine_pack import (
     refine_will_sample,
 )
 from .refine_sampling import apply_segment_refine
-from .frame_align import minimax_align_frame_count, pad_or_trim_frames
+from .frame_align import (
+    minimax_align_frame_count, minimax_phase_aligned_export_frames, pad_or_trim_frames,
+)
 from .audio_export import (
     AUDIO_MODE_GENERATE,
     AUDIO_MODE_MUTE,
@@ -44,6 +46,7 @@ from .plan import (
     prepare_segment_clip,
     resolve_ref_image_size,
     ref_audios_to_dict,
+    ref_video_audios_to_dict,
     ref_videos_to_dict,
     reference_video_for_segment,
     refs_to_kwargs_for_context,
@@ -240,14 +243,8 @@ def _build_minimax_inputs(
 
 
 def _ref_video_audios_to_dict(items) -> dict | None:
-    out: dict = {}
-    for item in items or []:
-        idx = int(getattr(item, "index", -1))
-        audio = getattr(item, "audio", None)
-        if idx < 0 or not isinstance(audio, dict) or audio.get("waveform") is None:
-            continue
-        out[f"ref_video_audio_{idx}"] = audio
-    return out or None
+    # Shared with batch mode — see plan.ref_video_audios_to_dict.
+    return ref_video_audios_to_dict(items)
 
 
 def execute_director_plan_core(
@@ -337,6 +334,9 @@ def execute_director_plan_core(
     segment_pre_refine: list[torch.Tensor] = []
     segment_audios: list[dict[str, Any]] = []
     skipped_no_cache: list[int] = []
+    # In-memory chunks keyed by timeline index for segments with no disk cache
+    # (source passthrough). The merge reads everything else from disk.
+    merge_overrides: dict[int, torch.Tensor] = {}
     reports: list[str] = [plan_summary(plan), "", "Execution path: ComfyUI official MiniMax H3"]
     # Add conditioning cache reports
     reports.extend(reports_init)
@@ -701,6 +701,10 @@ def execute_director_plan_core(
             )
             # Phase-align can pin a few frames before the previous export end.
             # Drop that orphaned tail so concat does not replay it at the seam.
+            # With the 17-frame-grid export length this is normally 0 and the
+            # block below is dead code; kept as a safety net for the edges where
+            # the pin window can still fall short (pixel-pin fallback,
+            # non-standard context lengths, hand-off from an older cache).
             trimmed_prev_export = 0
             if prev_export_trim > 0:
                 fps = float(plan.frame_rate or 24)
@@ -968,7 +972,11 @@ def execute_director_plan_core(
         if first_pass_gpu is not None and upscale_frames is None:
             del first_pass_gpu
             first_pass_gpu = None
-        export_len = int(num_frames) if trim_frames > 0 else int(target_len)
+        export_len = (
+            minimax_phase_aligned_export_frames(num_frames)
+            if trim_frames > 0
+            else int(num_frames)
+        )
         if will_refine and not skip_first_sample:
             save_first_pass_cache(
                 node_id,
@@ -1071,10 +1079,17 @@ def execute_director_plan_core(
         decoded, audio_dict = _decode_av_latent(
             samples, vae, audio_vae, decode_audio=decode_audio,
         )
-        # Keep exactly the UI segment length. With motion context, sample is
-        # longer (visible+ctx, 17k+5 aligned); after trim, crop to num_frames.
-        # Next segment must pin at export end (trim+export), not sample end.
-        export_len = int(num_frames) if trim_frames > 0 else int(target_len)
+        # Motion context: the sample is longer (visible+ctx, 17k+5 aligned);
+        # _trim_decoded_to_export drops the pinned prefix and crops to export_len.
+        # Next segment pins at export end (trim+export), not the sample end — and
+        # that export end must sit on the 17-frame VAE cycle grid, otherwise the
+        # pin window stops short and the remainder is either trimmed (lost) or
+        # replayed as a seam echo. See minimax_phase_aligned_export_frames.
+        export_len = (
+            minimax_phase_aligned_export_frames(num_frames)
+            if trim_frames > 0
+            else int(num_frames)
+        )
         decoded, audio_dict = _trim_decoded_to_export(
             decoded,
             audio_dict,
@@ -1265,6 +1280,9 @@ def execute_director_plan_core(
         completed_outputs[seg.index] = fill
         completed_pre_refine[seg.index] = fill
         passthrough_indices.append(seg.index)
+        # Passthrough exists only in RAM (never written to the segment cache),
+        # so the merge must be handed it explicitly instead of reading from disk.
+        merge_overrides[int(seg.index)] = fill
         reports.append(
             f"Segment {seg.index + 1}/{len(all_segments)}: source passthrough "
             f"({fill.shape[0]} frames, not sampled — outside run selection)"
@@ -1347,7 +1365,14 @@ def execute_director_plan_core(
     # Free completed_audios — export_audios / segment_audios now hold what we need.
     completed_audios.clear()
     # --- Main merge: lazy-load from disk (peak ≈ result + one chunk) ---
-    combined = concat_chunks_lazy(node_id, plan, export_segments)
+    # Segment cache reads fall back to a stale render, matching the pick order
+    # used to build export_segments — otherwise a「选择运行」+「全部导出」merge
+    # fails on the very segment it just accepted. Passthrough fills come from
+    # merge_overrides because they were never written to disk.
+    combined = concat_chunks_lazy(
+        node_id, plan, export_segments, overrides=merge_overrides
+    )
+    merge_overrides.clear()
     # Free all in-memory chunk lists — merge read from disk.
     export_chunks.clear()
     # --- Pre-refine merge: must use in-memory chunks (different data) ---

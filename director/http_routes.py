@@ -515,6 +515,68 @@ async def minimax_detect_shots(request):
     return web.json_response(result)
 
 
+async def minimax_clear_cache(request):
+    """Clear the per-node cache directories for the given Director node.
+
+    Deletes both the conditioning cache (``minimax_conditioning_cache/...``) and
+    the batch scratch (``minimax_batch_cache/...``) for this workflow + node. The
+    durable ``minimax_seg_cache/`` frames are left alone — they are the segments'
+    only persistent copy and are reused for motion context and「全部导出」.
+
+    ``workflow_name`` is resolved to the same slug the cache layer uses, so the
+    button always hits exactly the directory that holds this workflow's data.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    from .conditioning_cache import (
+        clear_conditioning_cache,
+        slugify_workflow_name,
+    )
+
+    workflow_name = str(body.get("workflow_name") or "").strip() or None
+    slug = slugify_workflow_name(workflow_name)
+
+    from folder_paths import get_output_directory
+
+    out_root = get_output_directory()
+    cleared = {"conditioning": 0, "batch": 0}
+    try:
+        cleared["conditioning"] = await asyncio.to_thread(
+            clear_conditioning_cache,
+            node_id=node_id,
+            workflow_name=workflow_name,
+        )
+    except Exception as exc:
+        log.warning("MiniMax H3 Director clear conditioning cache failed: %s", exc)
+
+    batch_dir = os.path.join(out_root, "minimax_batch_cache")
+    if slug:
+        batch_dir = os.path.join(batch_dir, slug)
+    batch_dir = os.path.join(batch_dir, f"node_{node_id}")
+    try:
+        if os.path.isdir(batch_dir):
+            shutil.rmtree(batch_dir, ignore_errors=True)
+            if os.path.isdir(batch_dir):
+                log.warning("Could not fully remove batch cache %s", batch_dir)
+            else:
+                cleared["batch"] = 1
+    except Exception as exc:
+        log.warning("MiniMax H3 Director clear batch cache failed: %s", exc)
+
+    log.info(
+        "MiniMax H3 Director cleared caches for node %s (workflow '%s'): %s",
+        node_id, workflow_name or "", cleared,
+    )
+    return web.json_response({"cleared": cleared})
+
+
 async def minimax_first_pass_cache_status(request):
     """Compare stored first-pass metadata with the Director's current inputs."""
     try:
@@ -598,6 +660,7 @@ def register_routes() -> bool:
     _register_route(routes, "POST", "/minimax/director/probe_video", minimax_probe_video)
     _register_route(routes, "GET", "/minimax/director/probe_video", minimax_probe_video)
     _register_route(routes, "GET", "/minimax/director/list_input_media", minimax_list_input_media)
+    _register_route(routes, "POST", "/minimax/director/clear_cache", minimax_clear_cache)
     _register_route(routes, "POST", "/minimax/director/detect_shots", minimax_detect_shots)
     _register_route(
         routes,

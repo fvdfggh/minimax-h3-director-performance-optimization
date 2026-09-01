@@ -344,6 +344,24 @@ def ref_audios_to_dict(audios: list[SegmentRefAudio]) -> dict | None:
     return ref_audios_dict([(a.index, a.audio) for a in audios])
 
 
+def ref_video_audios_to_dict(items) -> dict | None:
+    """Index-paired soundtracks for reference videos.
+
+    Keys MUST be ``ref_video_audio_<N>``: the official node pairs a soundtrack
+    with ``ref_video_<N>`` via ``ref_video_audios.get("ref_video_audio_" + N)``,
+    so any other naming silently drops the soundtrack and the reference video
+    is treated as silent (``kind="video"`` instead of ``"video_audio"``).
+    """
+    out: dict = {}
+    for item in items or []:
+        idx = int(getattr(item, "index", -1))
+        audio = getattr(item, "audio", None)
+        if idx < 0 or not isinstance(audio, dict) or audio.get("waveform") is None:
+            continue
+        out[f"ref_video_audio_{idx}"] = audio
+    return out or None
+
+
 def _ref_video_entry_has_file(item: dict | None) -> bool:
     if not isinstance(item, dict):
         return False

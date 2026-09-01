@@ -211,19 +211,11 @@ class MiniMaxH3Director:
         export_source_images=False,
         use_conditioning_cache=False,
         clear_conditioning_cache_on_run=False,
-        clear_conditioning_cache_button=False,
+        batch_mode=False,
+        workflow_name=None,
         **kwargs,
     ):
         del kwargs
-
-        # Handle clear cache button click
-        from ..director.conditioning_cache import clear_all_conditioning_cache
-        if clear_conditioning_cache_button:
-            cleared = clear_all_conditioning_cache()
-            if cleared > 0:
-                logging.info(f"Conditioning cache: manually cleared {cleared} files.")
-            else:
-                logging.info("Conditioning cache: no files to clear.")
 
         plan = prepare_director_plan(
             timeline_data=timeline_data,
@@ -240,28 +232,52 @@ class MiniMaxH3Director:
             refine=refine,
         )
 
-        combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation = (
-            execute_director_plan_core(
-                plan,
-                node_id=unique_id,
-                model=model,
-                vae=video_vae,
-                audio_vae=audio_vae,
-                clip=clip,
-                cfg=cfg,
-                seed=seed,
-                steps=steps,
-                sampler=sampler,
-                scheduler=scheduler,
-                shift_video=shift_video,
-                shift_audio=shift_audio,
-                clear_vram_between_segments=clear_vram_between_segments,
-                use_conditioning_cache=use_conditioning_cache,
-                clear_conditioning_cache_on_run=clear_conditioning_cache_on_run,
+        if batch_mode:
+            # Batch mode: three-phase execution
+            from ..director.batch_executor import execute_director_batch
+            combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation = (
+                execute_director_batch(
+                    plan,
+                    node_id=unique_id,
+                    model=model,
+                    vae=video_vae,
+                    audio_vae=audio_vae,
+                    clip=clip,
+                    cfg=cfg,
+                    seed=seed,
+                    steps=steps,
+                    sampler=sampler,
+                    scheduler=scheduler,
+                    shift_video=shift_video,
+                    shift_audio=shift_audio,
+                    use_conditioning_cache=use_conditioning_cache,
+                    workflow_name=workflow_name,
+                )
             )
-        )
+        else:
+            # Normal mode
+            combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation = (
+                execute_director_plan_core(
+                    plan,
+                    node_id=unique_id,
+                    model=model,
+                    vae=video_vae,
+                    audio_vae=audio_vae,
+                    clip=clip,
+                    cfg=cfg,
+                    seed=seed,
+                    steps=steps,
+                    sampler=sampler,
+                    scheduler=scheduler,
+                    shift_video=shift_video,
+                    shift_audio=shift_audio,
+                    clear_vram_between_segments=clear_vram_between_segments,
+                    use_conditioning_cache=use_conditioning_cache,
+                    clear_conditioning_cache_on_run=clear_conditioning_cache_on_run,
+                )
+            )
 
-        return finalize_director_outputs(
+        result = finalize_director_outputs(
             plan,
             combined,
             segment_outputs,
@@ -273,3 +289,5 @@ class MiniMaxH3Director:
             pre_refine_segments=pre_segments,
             block_final_images=held_for_confirmation,
         )
+
+        return result

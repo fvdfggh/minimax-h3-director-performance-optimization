@@ -1571,32 +1571,47 @@ def concat_chunks_lazy(
     node_id: int,
     plan: DirectorPlan,
     export_segments: list,
+    overrides: dict[int, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Lazy-loading merge: read segments from disk one by one, concat
     incrementally.  Peak memory ≈ result + one chunk (vs all chunks).
 
     Continuity seam fix is applied at each join.  Each ``del chunk`` frees
     the previous input before loading the next.
+
+    ``overrides`` carries in-memory chunks keyed by timeline index, for segments
+    that have **no** disk cache at all (source passthrough fill). Everything else
+    is read from disk, trying an exact fingerprint match first and falling back
+    to a stale render — the same pick order the caller used to build
+    ``export_segments``. Without that fallback a「选择运行」+「全部导出」merge
+    crashes: the caller selects an unselected segment via ``allow_stale=True``
+    (or passthrough), but a strict-only read here returns None for the very
+    segment that was just accepted.
     """
     from .segment_cache import load_segment_cache as _load_seg
 
     if not export_segments:
         raise ValueError("concat_chunks_lazy: no export_segments")
-    first = _load_seg(node_id, export_segments[0], plan)
-    if first is None:
-        raise RuntimeError(
-            f"concat_chunks_lazy: segment 0 cache miss (node {node_id})"
-        )
-    result = first.float()
-    del first
-    continuity = getattr(plan, "continuity_enabled", False)
-    for i, seg in enumerate(export_segments[1:], start=1):
-        chunk = _load_seg(node_id, seg, plan)
+    overrides = dict(overrides or {})
+
+    def _read(seg, label: int) -> torch.Tensor:
+        # pop so the override reference is released once merged.
+        chunk = overrides.pop(int(seg.index), None)
+        if chunk is None:
+            chunk = _load_seg(node_id, seg, plan)
+        if chunk is None:
+            chunk = _load_seg(node_id, seg, plan, allow_stale=True)
         if chunk is None:
             raise RuntimeError(
-                f"concat_chunks_lazy: segment {i} cache miss (node {node_id})"
+                f"concat_chunks_lazy: segment {label} cache miss "
+                f"(node {node_id}; timeline #{int(seg.index) + 1})"
             )
-        chunk = chunk.float()
+        return chunk.float()
+
+    result = _read(export_segments[0], 0)
+    continuity = getattr(plan, "continuity_enabled", False)
+    for i, seg in enumerate(export_segments[1:], start=1):
+        chunk = _read(seg, i)
         if continuity:
             left = _unfreeze_held_tail(result)
             if CONTINUITY_HOLD_POP_ON_TAIL:

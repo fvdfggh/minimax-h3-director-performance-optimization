@@ -249,6 +249,7 @@ def prepare_director_plan(
             ref_max_size=ref_max_size,
         )
         plan = _attach_refine(plan, refine)
+        _attach_segment_export(plan, timeline_data)
         log.info(
             "MiniMax H3 Director: external %s groups × %d (task=%s) | %s",
             family,
@@ -275,8 +276,40 @@ def prepare_director_plan(
         ref_max_size=ref_max_size,
     )
     plan = _attach_refine(plan, refine)
+    _attach_segment_export(plan, timeline_data)
     log.info(plan_summary(plan).replace("\n", " | "))
     return plan
+
+
+def _attach_segment_export(plan, timeline_data: str) -> None:
+    """Stamp the「分段导出」request onto a finished plan.
+
+    Applied here rather than inside each timeline builder (gen / fl2v / external
+    groups) so there is exactly one place that has both the parsed timeline and
+    the final segment list. Never raises — a malformed block just means the
+    feature stays off and the node runs normally.
+    """
+    from ..director.plan import _parse_segment_export
+
+    try:
+        timeline = json.loads(timeline_data) if timeline_data and timeline_data.strip() else {}
+    except json.JSONDecodeError:
+        return
+    if not isinstance(timeline, dict):
+        return
+    try:
+        plan.segment_export = _parse_segment_export(timeline, len(plan.segments))
+        _seg_export = plan.segment_export
+        log.info(
+            "MiniMax H3 Director 分段导出 parsed: enabled=%s mode=%s indices=%s nseg=%d",
+            _seg_export.enabled if _seg_export else None,
+            _seg_export.mode if _seg_export else None,
+            _seg_export.indices if _seg_export else None,
+            len(plan.segments),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("MiniMax H3 Director: 分段导出 config ignored (%s)", exc)
+        plan.segment_export = None
 
 
 def _attach_refine(plan, refine):
@@ -339,7 +372,28 @@ def _empty_source_images_for(images_out: list[torch.Tensor]) -> list[torch.Tenso
     return placeholders
 
 
-def _ensure_nonempty_image_batches(images_out: list[torch.Tensor], *, label: str) -> list[torch.Tensor]:
+def _ensure_nonempty_image_batches(
+    images_out: list[torch.Tensor],
+    *,
+    label: str,
+    fallback: tuple[int, int, int] | None = None,
+) -> list[torch.Tensor]:
+    # A completely empty list is illegal as an IMAGE output — ComfyUI slices every
+    # list input per batch item and an empty list makes the downstream node's
+    # ``slice_dict`` index out of range. This happens on「分段导出」of a segment
+    # that has only a latent (no decoded frames): nothing is exportable, so the
+    # split layout yields zero clips. Emit a single neutral placeholder instead
+    # of failing the whole graph.
+    if not images_out:
+        if fallback is None:
+            fallback = (1, 1, 3)
+        h, w, c = int(fallback[0]), int(fallback[1]), int(fallback[2])
+        log.warning(
+            "Director %s output is empty (no exportable segments); "
+            "emitting a 1-frame neutral placeholder.",
+            label,
+        )
+        return [torch.full((1, max(1, h), max(1, w), max(1, c)), 0.5)]
     fixed: list[torch.Tensor] = []
     for i, img in enumerate(images_out):
         if not isinstance(img, torch.Tensor) or img.ndim != 4:
@@ -361,10 +415,15 @@ def _layout_image_batches(
     export_segments: bool,
     is_batch: bool,
     video_batch: bool,
+    segment_frame_counts: list[int] | None = None,
 ) -> tuple[list[torch.Tensor], int]:
     if export_segments or (is_batch and not video_batch):
         images_out = segment_outputs
         frame_count = sum(int(s.shape[0]) for s in segment_outputs)
+        # Batch mode drops the per-segment frames once the merge owns them; the
+        # counts still describe the merged clip, so keep the report accurate.
+        if not segment_outputs and segment_frame_counts:
+            frame_count = sum(int(n) for n in segment_frame_counts)
         return images_out, frame_count
     combined = pad_or_trim_frames(combined, plan.total_frames).cpu().float()
     return [combined], int(combined.shape[0])
@@ -395,7 +454,21 @@ def finalize_director_outputs(
         export_segments=export_segments,
         is_batch=is_batch,
         video_batch=video_batch,
+        segment_frame_counts=segment_frame_counts,
     )
+    # 「分段导出」of latent-only segments yields zero clips on the split layout.
+    # An empty images list would make the downstream node's slice_dict index out
+    # of range AND would propagate an empty AUDIO list below. Make it non-empty
+    # up front so every consumer (audio / source / pre_refine) sees a valid list.
+    if not images_out:
+        _fb_h = int(getattr(plan, "height", 0) or 0)
+        _fb_w = int(getattr(plan, "width", 0) or 0)
+        _fb = (_fb_h, _fb_w, 3) if _fb_h > 0 and _fb_w > 0 else None
+        images_out = _ensure_nonempty_image_batches([], label="images", fallback=_fb)
+        log.warning(
+            "Director: no exportable segment frames; emitted a neutral placeholder "
+            "for the images/audio outputs."
+        )
     if export_segments and len(segment_outputs) > 1:
         report = (
             report
@@ -464,6 +537,15 @@ def finalize_director_outputs(
         source_fallback=source_fallback,
     )
 
+    # Merged layout: ``images_out`` is the merged clip and every length has been
+    # captured above, so the per-segment frames are a second full copy of the
+    # same video. Drop them before returning — nothing below reads them again.
+    # (Split layout must NOT do this: there ``images_out`` *is* this list.)
+    if not split_layout:
+        if pre_refine_segments is not None and pre_refine_segments is not segment_outputs:
+            del pre_refine_segments[:]
+        del segment_outputs[:]
+
     split_source_outputs = export_segments or (is_batch and not video_batch)
     if export_source_images:
         try:
@@ -489,9 +571,12 @@ def finalize_director_outputs(
     else:
         source_images_out = _empty_source_images_for(images_out)
 
-    images_out = _ensure_nonempty_image_batches(images_out, label="images")
-    source_images_out = _ensure_nonempty_image_batches(source_images_out, label="source_images")
-    pre_refine_out = _ensure_nonempty_image_batches(pre_refine_out, label="images_pre_refine")
+    fb_h = int(getattr(plan, "height", 0) or 0)
+    fb_w = int(getattr(plan, "width", 0) or 0)
+    fb = (fb_h, fb_w, 3) if fb_h > 0 and fb_w > 0 else None
+    images_out = _ensure_nonempty_image_batches(images_out, label="images", fallback=fb)
+    source_images_out = _ensure_nonempty_image_batches(source_images_out, label="source_images", fallback=fb)
+    pre_refine_out = _ensure_nonempty_image_batches(pre_refine_out, label="images_pre_refine", fallback=fb)
 
     refine_pack = getattr(plan, "refine", None)
     if isinstance(refine_pack, dict) and refine_pack.get("enabled"):

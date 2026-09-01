@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -332,14 +333,23 @@ def load_segment_handoff_meta(
     idx = seg.index
     meta_path = root / f"seg_{idx:04d}.meta.json"
     handoff_path = root / f"seg_{idx:04d}.handoff.json"
-    if not meta_path.is_file() or not handoff_path.is_file():
+    if not handoff_path.is_file():
+        return None
+    # A handoff can exist without its ``.meta.json`` (latent-only leftovers). With
+    # ``allow_stale=True`` we still serve it — there is no fingerprint to compare.
+    if meta_path.is_file():
+        try:
+            expected = segment_cache_fingerprint(seg, plan)
+            stored = json.loads(meta_path.read_text(encoding="utf-8"))
+            if stored != expected:
+                if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
+                    return None
+        except Exception:
+            if not allow_stale:
+                return None
+    elif not allow_stale:
         return None
     try:
-        expected = segment_cache_fingerprint(seg, plan)
-        stored = json.loads(meta_path.read_text(encoding="utf-8"))
-        if stored != expected:
-            if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
-                return None
         data = json.loads(handoff_path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
     except Exception:
@@ -389,14 +399,27 @@ def load_segment_av_latent(
     idx = seg.index
     meta_path = root / f"seg_{idx:04d}.meta.json"
     latent_path = root / f"seg_{idx:04d}.av.pt"
-    if not meta_path.is_file() or not latent_path.is_file():
+    if not latent_path.is_file():
+        return None
+    # A latent can exist without its ``.meta.json`` (e.g. a latent written by an
+    # older/batch-only path, or the meta write failed). With ``allow_stale=True``
+    # we still serve it — there is no fingerprint to compare against, and the
+    #「仅有 latent」export path only needs to decode it. Strict callers
+    # (``allow_stale=False``) still require the meta.
+    if meta_path.is_file():
+        try:
+            stored = json.loads(meta_path.read_text(encoding="utf-8"))
+            expected = segment_cache_fingerprint(seg, plan)
+            if stored != expected:
+                if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
+                    return None
+        except Exception as exc:
+            if not allow_stale:
+                log.warning("Failed to read segment %d AV latent meta: %s", idx + 1, exc)
+                return None
+    elif not allow_stale:
         return None
     try:
-        stored = json.loads(meta_path.read_text(encoding="utf-8"))
-        expected = segment_cache_fingerprint(seg, plan)
-        if stored != expected:
-            if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
-                return None
         payload = torch.load(latent_path, map_location="cpu", weights_only=False)
         if not isinstance(payload, dict) or "samples" not in payload:
             return None
@@ -434,20 +457,612 @@ def _fingerprint_matches(
         return False
 
 
-def load_segment_cache(
+# --------------------------------------------------------------------------
+# Segment video-clip cache (seg_XXXX.clip.mp4)
+#
+# An encoded clip kept beside the latent/frame cache so「分段导出」can serve a
+# segment straight from disk. Same lifetime as the other ``seg_XXXX.*`` files:
+# ``prune_segment_cache`` matches ``^seg_(\d+)\.`` so a removed timeline index
+# takes its clip with it, and a fresh decode overwrites it in place.
+# --------------------------------------------------------------------------
+
+CLIP_CACHE_SUFFIX = "clip.mp4"
+
+
+def clip_cache_path(node_id: str | None, seg_index: int) -> Path | None:
+    """``.../minimax_seg_cache/<node>/seg_XXXX.clip.mp4`` (does not create dirs)."""
+    if not node_id:
+        return None
+    try:
+        root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+    except Exception:
+        return None
+    return root / f"seg_{int(seg_index):04d}.{CLIP_CACHE_SUFFIX}"
+
+
+def has_segment_clip(node_id: str | None, seg_index: int) -> bool:
+    path = clip_cache_path(node_id, seg_index)
+    if path is None:
+        return False
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def save_segment_clip(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    frames: torch.Tensor,
+    audio: dict[str, Any] | None = None,
+) -> str | None:
+    """Encode ``frames`` into the clip cache. Never raises.
+
+    Called right after a successful decode so every rendered segment is
+    exportable without re-decoding. Best-effort like the rest of the cache: a
+    missing ffmpeg or a read-only mount must not break generation.
+    """
+    if not node_id:
+        return None
+    if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
+        return None
+    dest = clip_cache_path(node_id, int(seg.index))
+    if dest is None:
+        return None
+    try:
+        from ..lib.video_export import write_frames_to_mp4
+        from .audio_export import prepare_segment_audio_for_file_export
+
+        wave = prepare_segment_audio_for_file_export(
+            plan, seg, audio_dict=audio, frame_count=int(frames.shape[0]),
+        )
+        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp.mp4")
+        try:
+            write_frames_to_mp4(
+                tmp,
+                frames.detach().cpu().float(),
+                fps=float(getattr(plan, "frame_rate", 24) or 24),
+                audio=wave,
+            )
+            _atomic_publish(tmp, dest)
+        finally:
+            _safe_unlink(tmp)
+        log.debug("Cached segment %d clip for node %s", int(seg.index) + 1, node_id)
+        return str(dest)
+    except Exception as exc:
+        log.warning(
+            "Segment %d clip cache write skipped (%s). 分段导出 will re-encode on demand.",
+            int(seg.index) + 1,
+            exc,
+        )
+        _safe_unlink(dest)
+        return None
+
+
+def clear_segment_clip(node_id: str | None, seg_index: int) -> bool:
+    """Drop one segment's clip so a stale file can never be exported."""
+    path = clip_cache_path(node_id, seg_index)
+    if path is None:
+        return False
+    return _safe_unlink(path)
+
+
+def segment_export_availability(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+) -> dict[str, Any]:
+    """What「分段导出」can use for one segment, without loading pixel data."""
+    idx = int(seg.index)
+    has_clip = has_segment_clip(node_id, idx)
+    # ``allow_stale=True``: an export can still serve the last render after
+    # harmless fingerprint churn (same policy as the merge fill).
+    fp_ok = _fingerprint_matches(node_id, seg, plan, allow_stale=True)
+    tensor_path = resolve_segment_cache_path(node_id, seg, plan, allow_stale=True)
+    latent_path = None
+    root = _cache_root(node_id) if node_id else None
+    if root is not None:
+        candidate = root / f"seg_{idx:04d}.av.pt"
+        if candidate.is_file():
+            latent_path = candidate
+    frames = fp_ok and tensor_path is not None
+    latent = latent_path is not None
+    return {
+        "index": idx,
+        "hasClip": has_clip,
+        "hasFrames": bool(frames),
+        "hasLatent": bool(latent),
+        # Exportable when anything on disk can produce frames. A clip alone
+        # counts even if the fingerprint drifted: it is still this segment's
+        # last render, which is exactly what the user asked to export.
+        "exportable": bool(has_clip or frames or latent),
+        "stale": bool((frames or latent) and not _fingerprint_matches(node_id, seg, plan)),
+    }
+
+
+def inspect_segment_export_status(
+    node_id: str | None,
+    plan: DirectorPlan,
+) -> dict[str, Any]:
+    """Per-segment export availability for the「分段导出」picker."""
+    segments = list(getattr(plan, "segments", None) or [])
+    rows = [segment_export_availability(node_id, seg, plan) for seg in segments]
+    return {
+        "node_id": str(node_id or ""),
+        "segments": rows,
+        "exportable_count": sum(1 for row in rows if row["exportable"]),
+    }
+
+
+# --------------------------------------------------------------------------
+# Segment export (piecewise / continuous)
+# --------------------------------------------------------------------------
+
+def _load_segment_export_source(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    *,
+    vae: Any = None,
+) -> tuple[torch.Tensor, dict[str, Any] | None] | None:
+    """Frames + audio for one segment's export, or None if no frame source exists.
+
+    Sources, in order:
+      1. raw frame cache (``seg_XXXX.pt``) — lossless, no extra dependency.
+      2. latent cache (``seg_XXXX.av.pt``) decoded with the loaded VAE — the
+        「仅有 latent 缓存」case; only works when ``vae`` is supplied.
+
+    The encoded clip cache (``seg_XXXX.clip.mp4``) is deliberately **not** read
+    back here — that would need a video decoder. It is only used by the piecewise
+    exporter as a copy-on-disk source (see ``_export_piecewise``), so a segment
+    with only a clip is still exportable without any ffmpeg/cv2 read.
+    """
+    # 1) raw frame cache (fastest, lossless)
+    frames = load_segment_cache(node_id, seg, plan, allow_stale=True)
+    if frames is not None:
+        audio = load_segment_audio(node_id, seg, plan, allow_stale=True)
+        return frames.float(), (audio if isinstance(audio, dict) else None)
+
+    # 2) latent → decode (requires a VAE; supplied by the caller)
+    if vae is not None:
+        decoded = _decode_latent_to_frames(node_id, seg, plan, vae)
+        if decoded is not None:
+            return decoded
+
+    return None
+
+
+def _decode_latent_to_frames(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    vae: Any,
+) -> tuple[torch.Tensor, dict[str, Any] | None] | None:
+    """Decode the cached AV latent (the「仅有 latent 缓存」export path).
+
+    ``vae`` is a tuple ``(video_vae, audio_vae)`` as passed from the HTTP layer.
+    Requires ComfyUI's decode nodes; returns None when the latent is missing or
+    decoding fails so the caller falls through to other sources.
+    """
+    if not isinstance(vae, (tuple, list)) or len(vae) < 1 or vae[0] is None:
+        log.warning(
+            "Segment %d latent decode skipped: no video VAE provided.",
+            int(seg.index) + 1,
+        )
+        return None
+    latent = load_segment_av_latent(node_id, seg, plan, allow_stale=True)
+    if not isinstance(latent, dict) or "samples" not in latent:
+        log.warning(
+            "Segment %d latent decode skipped: no AV latent cache (.av.pt) present.",
+            int(seg.index) + 1,
+        )
+        return None
+    try:
+        from comfy_extras.nodes_lt import LTXVSeparateAVLatent
+        from nodes import VAEDecode
+
+        # The cached latent was written to CPU (``_av_latent_to_cpu``); the decode
+        # nodes expect it on the VAE's device (usually CUDA). Move it there before
+        # separating / decoding — a CPU latent makes LTXV separate or VAEDecode
+        # fail with a device mismatch, which is why「仅有 latent」exports silently
+        # skipped before.
+        #
+        # ``LTXVSeparateAVLatent.execute`` takes the whole AV-latent dict (it does
+        # ``av_latent["samples"]``), so move ``latent["samples"]`` in place and pass
+        # the dict — NOT ``latent["samples"]`` directly, which would index into a
+        # 5-D NestedTensor and raise "too many indices for tensor of dimension 5".
+        latent = _move_latent_to_device(latent, vae[0])
+        sep = LTXVSeparateAVLatent.execute(latent)
+        if hasattr(sep, "args"):
+            sep = sep.args
+        video_latent = sep[0]
+        images, = VAEDecode().decode(vae[0], video_latent)
+        images = images.cpu().float()
+        audio = None
+        audio_vae = vae[1] if len(vae) > 1 else None
+        if audio_vae is not None and len(sep) > 1:
+            try:
+                from comfy_extras.nodes_audio import VAEDecodeAudio as _AD
+            except ImportError:
+                from comfy_extras.nodes_lt import VAEDecodeAudio as _AD
+            audio_out = _AD.execute(audio_vae, sep[1])
+            if hasattr(audio_out, "args"):
+                audio_out = audio_out.args
+            audio = audio_out[0] if len(audio_out) > 0 else None
+        # Trim the decoded frames to this segment's *export* length, exactly like
+        # Phase 3 does (``_trim_decoded_to_export``). The latent holds the full
+        # motion-context-extended frames (e.g. 158 for a 120-frame/5s segment);
+        # without this trim a「连续导出」merge of two segments would grow to
+        # 158+158 frames instead of 120+120 — the "two 5s became 13s" symptom.
+        images, audio = _trim_decoded_for_export(
+            node_id, seg, plan, images, audio,
+        )
+        # Segmented exports decode many segments in sequence. Drop the GPU decode
+        # intermediates (separated video/audio latent, the GPU-moved latent dict)
+        # and release cached VRAM so memory does not accumulate across segments.
+        try:
+            del sep, video_latent, latent
+        except Exception:
+            pass
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return images, audio
+    except Exception as exc:
+        log.warning("Segment %d latent decode for export failed: %s", int(seg.index) + 1, exc)
+        return None
+
+
+def _expected_export_frames(plan, seg, fallback_n=0):
+    """Compute the segment's expected ``(trim_frames, export_len)`` exactly like
+    Phase 2's ``generation_frame_budget``, straight from the node's parameters
+    (``continuity_overlap_frames`` / ``frame_count`` / ``seg.index``).
+
+    Used both to trim decoded latent frames and to validate an existing frame
+    cache's length (a leftover untrimmed frame cache has the wrong count and must
+    be re-decoded).
+    """
+    from .frame_align import minimax_align_frame_count, minimax_phase_aligned_export_frames
+    from .h3_motion_context import snap_context_frames
+
+    frame_count = int(getattr(seg, "frame_count", 0) or 0)
+    visible = minimax_align_frame_count(max(5, frame_count)) if frame_count > 0 else int(fallback_n)
+    use_mc = int(getattr(plan, "continuity_overlap_frames", 0) or 0) > 0
+    has_prev = int(getattr(seg, "index", 0) or 0) > 0
+    ctx = (
+        snap_context_frames(int(getattr(plan, "continuity_overlap_frames", 0) or 0))
+        if (use_mc and has_prev) else 0
+    )
+    export_len = minimax_phase_aligned_export_frames(visible) if ctx > 0 else visible
+    if export_len <= 0:
+        export_len = int(fallback_n)
+    return int(ctx), int(export_len)
+
+
+def _trim_decoded_for_export(node_id, seg, plan, images, audio):
+    """Trim decoded (latent) frames + audio to the segment's export length.
+
+    Prefers the persisted handoff (``trim_frames``/``export_frames``) which is
+    exactly what Phase 3 wrote for this segment; falls back to the node-parameter
+    derived boundary (``_expected_export_frames``) when no handoff exists yet.
+    """
+    from .h3_motion_context import trim_context_prefix
+
+    fps = float(getattr(plan, "frame_rate", 0) or 24)
+    handoff = load_segment_handoff_meta(node_id, seg, plan, allow_stale=True) or {}
+    try:
+        trim_frames = int(handoff.get("trim_frames") or 0)
+    except Exception:
+        trim_frames = 0
+    try:
+        export_len = int(handoff.get("export_frames") or 0)
+    except Exception:
+        export_len = 0
+    if trim_frames <= 0 or export_len <= 0:
+        # Rebuild the boundary exactly like Phase 2's ``generation_frame_budget``
+        # — from the node's own parameters, not by approximating off the decoded
+        # length. ``continuity_overlap_frames`` (the motion-context widget) drives
+        # the trim; only segments that have a previous segment actually pin.
+        _trim_frames, export_len = _expected_export_frames(
+            plan, seg, fallback_n=int(images.shape[0]),
+        )
+        if trim_frames <= 0:
+            trim_frames = _trim_frames
+    if export_len <= 0:
+        export_len = int(images.shape[0])
+    if trim_frames > 0:
+        images, audio = trim_context_prefix(
+            images, audio, trim_frames,
+            fps=fps, match_tail=True,
+        )
+    if int(images.shape[0]) > export_len:
+        images = images[:export_len]
+        if isinstance(audio, dict) and audio.get("waveform") is not None:
+            sr = int(audio.get("sample_rate") or 32000)
+            want = int(round((export_len / fps) * sr))
+            wf = audio["waveform"]
+            if int(wf.shape[-1]) > want:
+                audio = {"waveform": wf[..., :want], "sample_rate": sr}
+    return images, audio
+
+
+def _move_latent_to_device(latent: dict, vae) -> dict:
+    """Move a cached (CPU) AV-latent dict to the VAE's device.
+
+    ``latent`` is the full ``{"samples": ..., ...}`` dict; only the ``samples``
+    tensor (a plain tensor, tuple/list, or ComfyUI NestedTensor) is moved, the
+    other keys (noise_seed etc.) are kept. Returns the dict on the VAE's device
+    so ``LTXVSeparateAVLatent`` / ``VAEDecode`` can run. Never raises — on
+    failure the original dict is returned and the decode surfaces a clearer error.
+    """
+    samples = latent.get("samples")
+    if samples is None:
+        return latent
+    device = getattr(vae, "device", None)
+    if device is None:
+        try:
+            device = next(vae.parameters()).device
+        except Exception:
+            device = None
+    if device is None:
+        try:
+            import torch as _t
+            device = _t.device("cuda") if _t.cuda.is_available() else _t.device("cpu")
+        except Exception:
+            device = None
+    if device is None:
+        return latent
+    try:
+        if hasattr(samples, "unbind"):
+            parts = [p.to(device) for p in samples.unbind()]
+            try:
+                import comfy.nested_tensor
+                moved = comfy.nested_tensor.NestedTensor(tuple(parts))
+            except Exception:
+                moved = tuple(parts)
+        elif isinstance(samples, (tuple, list)):
+            moved = tuple(p.to(device) if hasattr(p, "to") else p for p in samples)
+        elif hasattr(samples, "to"):
+            moved = samples.to(device)
+        else:
+            moved = samples
+        latent = dict(latent)
+        latent["samples"] = moved
+    except Exception as exc:
+        log.warning("Latent device move skipped (%s); decoding may fail.", exc)
+    return latent
+
+
+def _segments_by_index(
+    plan: DirectorPlan,
+) -> dict[int, SegmentPlan]:
+    return {int(s.index): s for s in (getattr(plan, "segments", None) or [])}
+
+
+def predecode_latent_segments(
+    node_id: str | None,
+    plan: DirectorPlan,
+    indices: list[int],
+    vae: Any = None,
+) -> dict[str, Any]:
+    """Unified decode for「分段导出」: decode every checked segment that has only
+    a latent (no ``seg_XXXX.pt`` frame cache) **once**, then write the decoded
+    frames back to the segment cache.
+
+    This runs *before* merge / node-output / mp4 export so every later consumer
+    reads frames from disk instead of re-decoding the latent per consumer. In
+    particular the batch MERGE path used to decode the same latent twice (once to
+    fill the node IMAGE output, once to write the mp4) — this removes that.
+
+    ``vae`` is the ``(video_vae, audio_vae)`` tuple (see ``_decode_latent_to_frames``).
+    Returns ``{"decoded": [...], "failed": [(index, reason), ...]}``. Never raises
+    for a per-segment failure.
+    """
+    decoded: list[int] = []
+    failed: list[tuple[int, str]] = []
+    if not node_id or not vae:
+        return {"decoded": decoded, "failed": failed}
+    segments = _segments_by_index(plan)
+    for idx in sorted({int(i) for i in indices}):
+        seg = segments.get(idx)
+        if seg is None:
+            continue
+        # A segment with a correctly-trimmed frame cache is authoritative — reuse
+        # it, never re-decode. Only latent-only leftovers (no frame cache) need the
+        # VAE; a leftover *untrimmed* frame cache (wrong frame count) is re-decoded.
+        cached = load_segment_cache(node_id, seg, plan, allow_stale=True)
+        if cached is not None:
+            expected_trim, expected_export = _expected_export_frames(plan, seg)
+            cached_n = int(cached.shape[0])
+            if cached_n == expected_export:
+                continue  # authoritative, correctly trimmed
+            log.warning(
+                "分段导出 predecode: seg #%d frame cache has %d frames (expected %d) — "
+                "leftover untrimmed frames, re-decoding from latent.",
+                idx + 1, cached_n, expected_export,
+            )
+        # Only decode when a latent actually exists.
+        latent = load_segment_av_latent(node_id, seg, plan, allow_stale=True)
+        if latent is None:
+            continue
+        result = _decode_latent_to_frames(node_id, seg, plan, vae)
+        if result is None:
+            failed.append((idx, "latent decode failed"))
+            continue
+        frames, audio = result
+        handoff = load_segment_handoff_meta(node_id, seg, plan, allow_stale=True) or {}
+        if not handoff:
+            # Rebuild the boundary from the node's own parameters (matches Phase 2)
+            # so it persists exactly.
+            trim_frames, export_len = _expected_export_frames(
+                plan, seg, fallback_n=int(frames.shape[0]),
+            )
+            handoff = {
+                "trim_frames": int(trim_frames),
+                "export_frames": int(export_len),
+                "sample_frames": int(frames.shape[0]),
+                "official_mc_length": False,
+            }
+        save_segment_cache(
+            node_id,
+            seg,
+            plan,
+            frames,
+            av_latent=latent,
+            handoff=handoff,
+            audio=audio if isinstance(audio, dict) else None,
+        )
+        decoded.append(idx)
+        log.info(
+            "分段导出 predecode: seg #%d latent → frames cache (%d frames)",
+            idx + 1,
+            int(frames.shape[0]),
+        )
+        # Free per-segment tensors promptly so a long piecewise export does not
+        # accumulate CPU/VRAM across many segments.
+        try:
+            del frames, audio, latent, handoff
+        except Exception:
+            pass
+        try:
+            import gc
+            gc.collect()
+            import torch as _torch
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except Exception:
+            pass
+    return {"decoded": decoded, "failed": failed}
+
+
+def run_segment_export(
+    node_id: str | None,
+    plan: DirectorPlan,
+    indices: list[int],
+    *,
+    mode: str = "piecewise",
+    vae: Any = None,
+    out_dir: str | None = None,
+) -> dict[str, Any]:
+    """Execute a「分段导出」request — one mp4 per checked segment (piecewise).
+
+    The continuous/concatenated mode was removed; ``mode`` is accepted only for
+    backward compatibility and always behaves as piecewise.
+
+    Returns a summary dict: ``files``, ``skipped``, ``export_dir``. Never raises
+    for a per-segment failure — it is reported in ``skipped`` and the rest still
+    exports. When ``out_dir`` is None the files land in
+    ``<output>/minimax_segment_export/<node_id>``.
+    """
+    segments = _segments_by_index(plan)
+    valid = sorted({int(i) for i in indices if int(i) in segments})
+    if not valid:
+        return {"files": [], "skipped": [], "export_dir": ""}
+
+    # Unified decode first: any checked segment that has only a latent (no frames)
+    # is decoded once and written back to the frame cache, so the exports below
+    # read frames directly instead of re-decoding per consumer.
+    pre = predecode_latent_segments(node_id, plan, valid, vae=vae)
+    if pre["decoded"]:
+        log.info(
+            "分段导出 predecode: unified-decoded %d latent-only segment(s) before export.",
+            len(pre["decoded"]),
+        )
+    for idx, reason in pre["failed"]:
+        log.warning("分段导出 predecode seg #%d failed: %s", idx + 1, reason)
+
+    if out_dir:
+        export_dir = str(out_dir)
+    else:
+        base = Path(folder_paths.get_output_directory()) / "minimax_segment_export"
+        export_dir = str(base / str(node_id or "node"))
+    os.makedirs(export_dir, exist_ok=True)
+
+    files: list[str] = []
+    skipped: list[dict[str, Any]] = []
+
+    def _export_one(seg, frames, audio, tag: str) -> None:
+        try:
+            path = _write_export_mp4(export_dir, seg, frames, audio, plan, tag=tag)
+            if path:
+                files.append(path)
+        except Exception as exc:  # pragma: no cover - defensive
+            skipped.append({"index": int(seg.index), "reason": str(exc)})
+
+    for idx in valid:
+        seg = segments[idx]
+        source = _load_segment_export_source(node_id, seg, plan, vae=vae)
+        if source is None:
+            # No frame source (no .pt, no latent). Fall back to copying the
+            # encoded clip cache (seg_XXXX.clip.mp4) verbatim — no re-decode,
+            # no re-encode, just a file copy.
+            clip = clip_cache_path(node_id, idx)
+            if clip is not None and clip.is_file() and clip.stat().st_size > 0:
+                try:
+                    stamp = uuid.uuid4().hex[:6]
+                    dest = os.path.join(
+                        export_dir, f"segment_export_seg_{idx + 1:02d}_{stamp}.mp4"
+                    )
+                    shutil.copy2(str(clip), dest)
+                    files.append(dest)
+                except Exception as exc:  # pragma: no cover - defensive
+                    skipped.append({"index": idx, "reason": str(exc)})
+            else:
+                skipped.append({"index": idx, "reason": "no exportable cache"})
+            continue
+        frames, audio = source
+        _export_one(seg, frames, audio, tag=f"seg_{idx + 1:02d}")
+
+    return {"files": files, "skipped": skipped, "export_dir": export_dir}
+
+
+def _write_export_mp4(
+    export_dir: str,
+    seg: SegmentPlan,
+    frames: torch.Tensor,
+    audio: dict[str, Any] | None,
+    plan: DirectorPlan,
+    *,
+    tag: str,
+) -> str | None:
+    """Write one export mp4 into ``export_dir`` with a safe, unique name."""
+    from ..lib.video_export import write_frames_to_mp4
+
+    fps = float(getattr(plan, "frame_rate", 24) or 24)
+    stamp = uuid.uuid4().hex[:6]
+    base = f"segment_export_{tag}_{stamp}.mp4"
+    path = os.path.join(export_dir, base)
+    tmp = path + ".tmp"
+    try:
+        write_frames_to_mp4(
+            tmp,
+            frames.detach().cpu().float(),
+            fps=fps,
+            audio=audio,
+        )
+        os.replace(tmp, path)
+    finally:
+        _safe_unlink(Path(tmp))
+    return path
+
+
+def resolve_segment_cache_path(
     node_id: str | None,
     seg: SegmentPlan,
     plan: DirectorPlan,
     *,
     allow_stale: bool = False,
-) -> torch.Tensor | None:
-    """Load cached segment frames.
+) -> Path | None:
+    """Validate a segment's disk cache and return its tensor path (no pixels read).
 
-    ``allow_stale=True``: used for「选择运行」+「全部导出」fill of unselected
-    segments. Prefer the last render on disk over blank/gray source placeholders
-    when the fingerprint drifted (pipeline bump, minor plan churn). A different
-    source video is never treated as usable stale — callers then passthrough
-    the current clip (v2v/rv2v) or skip (gen timelines).
+    Split out of :func:`load_segment_cache` so callers that only need the frame
+    count / canvas can probe the cache without materialising the whole clip —
+    the merge pass used to load every segment twice (once to measure it, once to
+    concatenate it), which doubled both merge I/O and peak RAM.
     """
     if not node_id:
         return None
@@ -490,11 +1105,78 @@ def load_segment_cache(
                 "Segment %d: using cache without meta for export fill.",
                 idx + 1,
             )
+        return tensor_path
+    except Exception as exc:
+        log.warning("Failed to load segment %d cache: %s", idx + 1, exc)
+        return None
+
+
+def probe_segment_cache_shape(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    *,
+    allow_stale: bool = False,
+) -> tuple[int, int, int, int] | None:
+    """``(F, H, W, C)`` of the cached clip, reading only the file header.
+
+    Uses ``mmap`` so the pixels stay on disk until the caller actually copies
+    them. Returns ``None`` when the cache is unusable (same policy as
+    :func:`load_segment_cache`) or the shape cannot be read cheaply.
+    """
+    path = resolve_segment_cache_path(node_id, seg, plan, allow_stale=allow_stale)
+    if path is None:
+        return None
+    try:
+        loaded = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        if not torch.is_tensor(loaded) or loaded.ndim != 4:
+            return None
+        shape = tuple(int(d) for d in loaded.shape)
+        del loaded
+        return shape  # type: ignore[return-value]
+    except TypeError:
+        # torch < 2.1 has no mmap kwarg — fall back below.
+        pass
+    except Exception as exc:
+        log.debug("Segment %d shape probe failed (mmap): %s", seg.index + 1, exc)
+    try:
+        loaded = torch.load(path, map_location="cpu", weights_only=True)
+        if not torch.is_tensor(loaded) or loaded.ndim != 4:
+            return None
+        shape = tuple(int(d) for d in loaded.shape)
+        del loaded
+        return shape  # type: ignore[return-value]
+    except Exception as exc:
+        log.debug("Segment %d shape probe failed: %s", seg.index + 1, exc)
+        return None
+
+
+def load_segment_cache(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    *,
+    allow_stale: bool = False,
+) -> torch.Tensor | None:
+    """Load cached segment frames.
+
+    ``allow_stale=True``: used for「选择运行」+「全部导出」fill of unselected
+    segments. Prefer the last render on disk over blank/gray source placeholders
+    when the fingerprint drifted (pipeline bump, minor plan churn). A different
+    source video is never treated as usable stale — callers then passthrough
+    the current clip (v2v/rv2v) or skip (gen timelines).
+    """
+    tensor_path = resolve_segment_cache_path(
+        node_id, seg, plan, allow_stale=allow_stale
+    )
+    if tensor_path is None:
+        return None
+    try:
         return _frames_from_disk(
             torch.load(tensor_path, map_location="cpu", weights_only=True)
         )
     except Exception as exc:
-        log.warning("Failed to load segment %d cache: %s", idx + 1, exc)
+        log.warning("Failed to load segment %d cache: %s", seg.index + 1, exc)
         return None
 
 

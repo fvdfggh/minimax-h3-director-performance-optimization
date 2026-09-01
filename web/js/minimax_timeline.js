@@ -1,4 +1,4 @@
-﻿import { app } from "../../scripts/app.js";
+import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
     CUSTOM_ASPECT_RATIO,
@@ -600,6 +600,8 @@ const STYLES = `
   height:100%;min-height:0;max-height:100%;overflow:hidden;align-self:stretch
 }
 .bd-modal-overlay{position:absolute;inset:0;z-index:200;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:10px;box-sizing:border-box;border-radius:6px}
+.bd-modal-overlay-fixed{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
+.bd-modal-overlay-fixed .bd-modal{max-width:none;max-height:calc(100vh - 48px)}
 .bd-modal{background:#1e1e1e;border:1px solid #333;border-radius:6px;padding:12px;width:100%;max-width:460px;max-height:calc(100% - 8px);display:flex;flex-direction:column;gap:10px;box-shadow:0 10px 28px rgba(0,0,0,.5)}
 .bd-modal-title{color:#e0e0e0;font-size:12px;font-weight:600;line-height:1.35}
 .bd-modal-body{color:#aaa;font-size:11px;line-height:1.5;white-space:pre-wrap}
@@ -610,6 +612,28 @@ const STYLES = `
 .bd-modal-item:hover{background:#252525;color:#eee}
 .bd-modal-item.selected{background:#2a2a2a;border-color:#4fff8f;color:#fff}
 .bd-modal-actions{display:flex;gap:8px;justify-content:flex-end;flex-shrink:0}
+.bd-modal-wide{max-width:720px;min-width:420px}
+.bd-modal-overlay-fixed .bd-modal-wide{width:auto;min-width:520px}
+.bd-seg-export-mode{display:flex;align-items:center;gap:14px;font-size:12px;color:#ccc;flex-wrap:wrap}
+.bd-seg-export-mode-label{font-weight:600;color:#e0e0e0}
+.bd-seg-export-mode label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.bd-seg-export-mode input[type="radio"]{accent-color:#4fff8f;width:14px;height:14px}
+.bd-seg-export-hint{color:#888;font-size:11px;line-height:1.4}
+.bd-seg-export-count{color:#4fff8f;font-size:12px;font-weight:600}
+.bd-modal-overlay-fixed .bd-modal-list{flex:1;min-height:240px;max-height:min(480px,calc(100vh - 220px))}
+.bd-seg-export-item{display:flex;align-items:center;gap:10px;padding:8px 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:4px;color:#ccc;font-size:12px;line-height:1.4;border:1px solid transparent}
+.bd-seg-export-item:hover{background:#252525;color:#eee}
+.bd-seg-export-item.disabled{opacity:.42;cursor:not-allowed}
+.bd-seg-export-item.disabled .bd-seg-export-cb{cursor:not-allowed}
+.bd-seg-export-item .bd-seg-export-cb{accent-color:#4fff8f;width:15px;height:15px;flex-shrink:0;cursor:pointer}
+.bd-seg-export-name{font-weight:600;color:#e0e0e0;flex-shrink:0;min-width:42px}
+.bd-seg-export-badges{display:inline-flex;gap:6px;flex-wrap:nowrap;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.bd-seg-export-badge{font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid #333;line-height:1.4;white-space:nowrap;flex-shrink:0}
+.bd-seg-export-badge.ok{color:#7dffa0;border-color:#2f6b40}
+.bd-seg-export-badge.warn{color:#ffd27d;border-color:#7a5c22}
+.bd-seg-export-badge.muted{color:#888;border-color:#333}
+.bd-seg-export-toast{position:fixed;left:50%;bottom:56px;transform:translateX(-50%) translateY(20px);background:#1f3d2b;color:#9dffb3;border:1px solid #2f6b40;border-radius:8px;padding:10px 18px;font-size:13px;z-index:10000;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;box-shadow:0 6px 20px rgba(0,0,0,.4)}
+.bd-seg-export-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .bd-media-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
 .bd-media-head .bd-modal-title{flex:1;min-width:0;padding-top:4px}
 .bd-media-head-actions{display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
@@ -2163,6 +2187,7 @@ class MiniMaxH3DirectorEditor {
                 },
                 output,
                 ...this._runSelectionPayload(),
+                ...this._segmentExportPayload(),
             };
         }
         if (this.isImageBatch()) {
@@ -2223,6 +2248,7 @@ class MiniMaxH3DirectorEditor {
                     };
                 }),
                 ...this._runSelectionPayload(),
+                ...this._segmentExportPayload(),
             };
         }
         if (this.isGenMode()) {
@@ -2253,6 +2279,7 @@ class MiniMaxH3DirectorEditor {
                 };
             }),
             ...this._runSelectionPayload(),
+            ...this._segmentExportPayload(),
             };
         }
         this._persistCurrentVideoWorkspace();
@@ -2313,6 +2340,7 @@ class MiniMaxH3DirectorEditor {
             },
             output: normalizeOutputContinuity({ ...this.timeline.output }),
             ...this._runSelectionPayload(),
+            ...this._segmentExportPayload(),
         };
     }
 
@@ -2377,6 +2405,7 @@ class MiniMaxH3DirectorEditor {
                         <input type="checkbox" data-r="run-select-all-cb">
                         <span data-i18n="toolbar.selectAll">全选</span>
                     </label>
+                    <button type="button" class="bd-btn" data-a="seg-export" data-i18n="toolbar.segmentExport" data-i18n-title="tooltip.segmentExport">分段导出</button>
                     <button type="button" class="bd-btn bd-btn-danger" data-a="del" data-i18n="toolbar.deleteSegment" data-i18n-title="tooltip.deleteSegment">删除片段</button>
                     <div class="bd-mode">
                         <button type="button" data-a="mode-global" class="active" data-i18n="toolbar.modeGlobal">全局模式</button>
@@ -2866,6 +2895,7 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="smart-split"]', () => { void this.smartSplit(); });
         bind('[data-a="del-split"]', () => this.deleteSelectedSplitPoint());
         bind('[data-a="run-select-toggle"]', () => this.toggleRunSelectMode());
+        bind('[data-a="seg-export"]', () => { void this.openSegmentExportPicker(); });
         bind('[data-a="del"]', () => this.deleteSelectedSegment());
         bind('[data-a="mode-global"]', () => this.setEditMode("global"));
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));
@@ -3650,6 +3680,236 @@ class MiniMaxH3DirectorEditor {
     _clearLiveRunSelection() {
         this.timeline.runSelectEnabled = false;
         this.timeline.runSelection = [];
+    }
+
+    // ---------------------------------------------------------------------
+    // 分段导出 (segment export)
+    // ---------------------------------------------------------------------
+
+    /** Stored under ``timeline.output.segmentExport``; written by the picker. */
+    _segmentExportConfig() {
+        const cfg = this.timeline.output?.segmentExport || {};
+        return {
+            enabled: !!cfg.enabled,
+            mode: "piecewise",
+            indices: Array.isArray(cfg.indices)
+                ? cfg.indices.map((i) => parseInt(i, 10)).filter((i) => i >= 0)
+                : [],
+        };
+    }
+
+    _segmentExportPayload() {
+        return { segmentExport: this._segmentExportConfig() };
+    }
+
+    getSegmentExportNodeId() {
+        return String(this.node?.id ?? "");
+    }
+
+    async _fetchSegmentExportStatus() {
+        const payload = {
+            node_id: this.getSegmentExportNodeId(),
+            timeline_data: this.buildTimelinePayload(),
+            task_type: this.globalTask?.value || this.taskTypeWidget?.value || "",
+            global_prompt: this.timeline.global?.prompt || "",
+            total_frames: this.getTotalFrames(),
+            frame_rate: this.getFrameRate(),
+            width: this.timeline.output?.width || 864,
+            height: this.timeline.output?.height || 480,
+            ref_max_size: this.refMaxWidget?.value || this.timeline.output?.longEdge || 864,
+        };
+        try {
+            const resp = await api.fetchApi("/minimax/director/segment_export_status", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            return await resp.json();
+        } catch (e) {
+            console.error("[MiniMax] segment export status failed", e);
+            return { segments: [], error: String(e) };
+        }
+    }
+
+    async openSegmentExportPicker() {
+        this._closeBdModal();
+        const n = this.getRunnableSegmentCount();
+        const segments = (this.timeline.segments || []).slice(0, n);
+        const cfg = this._segmentExportConfig();
+
+        const overlay = document.createElement("div");
+        overlay.className = "bd-modal-overlay bd-modal-overlay-fixed";
+        const panel = document.createElement("div");
+        panel.className = "bd-modal bd-modal-wide";
+        panel.innerHTML = `
+            <div class="bd-modal-title"></div>
+            <div class="bd-modal-body"></div>
+            <div class="bd-modal-list"></div>
+            <div class="bd-modal-actions"></div>`;
+        panel.querySelector(".bd-modal-title").textContent = t("segmentExport.title");
+        const bodyEl = panel.querySelector(".bd-modal-body");
+        const listEl = panel.querySelector(".bd-modal-list");
+        const actionsEl = panel.querySelector(".bd-modal-actions");
+
+        const finish = (val) => {
+            this._closeBdModal();
+            if (val) this.resolveSegmentExport(val);
+        };
+
+        // Mode — piecewise only (the continuous/concatenated mode was removed).
+        const modeWrap = document.createElement("div");
+        modeWrap.className = "bd-seg-export-mode";
+        modeWrap.innerHTML = `<span class="bd-seg-export-mode-label">${t("segmentExport.mode")}</span>
+            <label><input type="radio" name="seg-export-mode" value="piecewise" checked> ${t("segmentExport.modePiecewise")}</label>`;
+        bodyEl.appendChild(modeWrap);
+
+        // Segment list
+        const hint = document.createElement("div");
+        hint.className = "bd-seg-export-hint";
+        hint.textContent = t("segmentExport.desc");
+        bodyEl.appendChild(hint);
+        listEl.classList.remove("hidden");
+
+        const checkboxes = [];
+        const rowEls = [];
+        const refreshCount = () => {
+            const checked = checkboxes.filter((c) => c.checked && !c.disabled).length;
+            countEl.textContent = checked
+                ? t("segmentExport.count", { n: checked })
+                : t("segmentExport.empty");
+            okBtn.disabled = checked === 0;
+        };
+
+        let countEl = null;
+        const countRow = document.createElement("div");
+        countRow.className = "bd-seg-export-count";
+        bodyEl.appendChild(countRow);
+        countEl = countRow;
+
+        const okBtn = document.createElement("button");
+        okBtn.type = "button";
+        okBtn.className = "bd-btn bd-btn-primary";
+        okBtn.textContent = t("segmentExport.export");
+        okBtn.onclick = () => {
+            const indices = [];
+            checkboxes.forEach((cb, i) => {
+                if (cb.checked && !cb.disabled) indices.push(i);
+            });
+            finish({ enabled: indices.length > 0, mode: "piecewise", indices });
+        };
+
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "bd-btn";
+        cancelBtn.textContent = t("dialog.cancel");
+        cancelBtn.onclick = () => finish(null);
+        actionsEl.appendChild(cancelBtn);
+        actionsEl.appendChild(okBtn);
+
+        // Fetch availability, then render rows (disabled where not exportable)
+        const status = await this._fetchSegmentExportStatus();
+        const rows = (status && status.segments) || [];
+        const avail = {};
+        for (const r of rows) avail[r.index] = r;
+        for (let i = 0; i < segments.length; i++) {
+            const info = avail[i] || {};
+            const exportable = !!info.exportable;
+            const row = document.createElement("div");
+            row.className = "bd-modal-item bd-seg-export-item" + (exportable ? "" : " disabled");
+            const name = `${i + 1}`;
+            const badge = this._segmentExportBadge(info);
+            row.innerHTML = `<span class="bd-seg-export-name">#${name}</span><span class="bd-seg-export-badges">${badge}</span>`;
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.className = "bd-seg-export-cb";
+            cb.disabled = !exportable;
+            cb.checked = exportable && cfg.indices.includes(i);
+            cb.onchange = refreshCount;
+            row.prepend(cb);
+            row.onclick = (e) => {
+                if (e.target === cb) return;
+                if (!cb.disabled) {
+                    cb.checked = !cb.checked;
+                    cb.onchange && cb.onchange();
+                }
+            };
+            listEl.appendChild(row);
+            checkboxes.push(cb);
+            rowEls.push(row);
+        }
+        refreshCount();
+
+        // Escape closes
+        const keyHandler = (e) => {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                finish(null);
+            }
+        };
+        window.addEventListener("keydown", keyHandler, true);
+        this._modalKeyHandler = keyHandler;
+
+        overlay.onclick = (e) => { if (e.target === overlay) finish(null); };
+        panel.onclick = (e) => e.stopPropagation();
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+        // Register with the shared modal owner so _closeBdModal() cleans it up.
+        this._modalEl = overlay;
+    }
+
+    _segmentExportBadge(info) {
+        if (!info) return `<span class="bd-seg-export-badge muted">${t("segmentExport.noCache")}</span>`;
+        const bits = [];
+        if (info.hasClip) bits.push(`<span class="bd-seg-export-badge ok">${t("segmentExport.hasClip")}</span>`);
+        if (info.hasFrames) bits.push(`<span class="bd-seg-export-badge ok">${t("segmentExport.hasFrames")}</span>`);
+        if (info.hasLatent) bits.push(`<span class="bd-seg-export-badge warn">${t("segmentExport.hasLatent")}</span>`);
+        if (!bits.length) bits.push(`<span class="bd-seg-export-badge muted">${t("segmentExport.noCache")}</span>`);
+        return bits.join(" ");
+    }
+
+    resolveSegmentExport(val) {
+        // Persist into timeline.output.segmentExport and re-sync the widget so the
+        // backend's _parse_segment_export sees it on the next run.
+        if (!this.timeline.output) this.timeline.output = {};
+        this.timeline.output.segmentExport = {
+            enabled: !!val.enabled,
+            mode: val.mode === "continuous" ? "continuous" : "piecewise",
+            indices: [...(val.indices || [])].sort((a, b) => a - b),
+        };
+        this.commit(false, { syncTimeline: true });
+        this.flushTimelineSync();
+        this.scheduleRender();
+        // Push the Director node into ComfyUI's queue so the export runs with the
+        // models loaded (latent-only segments need the VAE). The queuePrompt patch
+        // already flushes every Director's timeline before the prompt is built, so
+        // segmentExport reaches the backend. Best-effort: never throw in the picker.
+        try {
+            if (typeof app?.queuePrompt === "function") {
+                app.queuePrompt();
+                this._toast ? this._toast(t("segmentExport.queued")) : this._segExportToast(t("segmentExport.queued"));
+            } else {
+                this._segExportToast(t("segmentExport.runToExport"));
+            }
+        } catch (e) {
+            console.warn("[MiniMax] segment export queue prompt failed", e);
+            this._segExportToast(t("segmentExport.runToExport"));
+        }
+    }
+
+    /** Minimal inline toast so the picker gives feedback without other deps. */
+    _segExportToast(msg) {
+        let el = this.root.querySelector("[data-r='seg-export-toast']");
+        if (!el) {
+            el = document.createElement("div");
+            el.setAttribute("data-r", "seg-export-toast");
+            el.className = "bd-seg-export-toast";
+            this.root.appendChild(el);
+        }
+        el.textContent = msg;
+        el.classList.add("show");
+        clearTimeout(this._segExportToastTimer);
+        this._segExportToastTimer = setTimeout(() => el.classList.remove("show"), 4000);
     }
 
     _runSelectionPayload() {
@@ -11867,21 +12127,34 @@ app.registerExtension({
             setTimeout(syncWorkflowName, 0);
             setTimeout(syncWorkflowName, 200);
 
-            // 「清空缓存」 button. Unlike the old checkbox it fires immediately via
-            // the HTTP route instead of riding a run's edge — so clearing works even
-            // when the timeline has nothing to run. It targets exactly this node's
-            // conditioning + batch scratch dirs, never minimax_seg_cache.
-            const clearBtn = this.addWidget("button", "清空缓存", null, () => {
+            // 「清空缓存」 / 「清空节点所有缓存」 buttons. Unlike the old checkbox they
+            // fire immediately via the HTTP route instead of riding a run's edge — so
+            // clearing works even when the timeline has nothing to run.
+            //   · 清空缓存           → this node's conditioning + batch scratch dirs only
+            //                          (transient; never touches minimax_seg_cache).
+            //   · 清空节点所有缓存   → additionally wipes minimax_seg_cache/<node>/,
+            //                          forcing a full re-render of every segment.
+            const runClearCache = (clearAll) => {
                 const nodeId = String(this.id ?? "");
                 const wfName = getActiveWorkflowName();
+                const scope = clearAll ? "本节点的全部缓存" : "本节点的文本缓存与中间缓存";
+                const willDelete = clearAll
+                    ? [
+                        "· 文本编码缓存（conditioning）",
+                        "· batch 中间缓存（scratch）",
+                        "· 片段帧 / 音频 / AV latent / clip（minimax_seg_cache）",
+                    ]
+                    : [
+                        "· 文本编码缓存（conditioning）",
+                        "· batch 中间缓存（scratch）",
+                    ];
                 if (!window.confirm(
-                    "确认清空本节点的文本缓存与中间缓存吗？\n\n" +
+                    "确认清空" + scope + "吗？\n\n" +
                     (wfName ? "工作流：" + wfName + "\n" : "") +
                     "节点 ID：" + nodeId + "\n\n" +
                     "将删除：\n" +
-                    "· 文本编码缓存（conditioning）\n" +
-                    "· batch 中间缓存（scratch）\n\n" +
-                    "不影响 minimax_seg_cache 的片段帧/音频/AV latent。"
+                    willDelete.join("\n") +
+                    (clearAll ? "\n\n警告：片段缓存删除后需重新渲染所有片段！" : "\n\n不影响 minimax_seg_cache 的片段帧/音频/AV latent。")
                 )) {
                     return;
                 }
@@ -11890,7 +12163,7 @@ app.registerExtension({
                         const resp = await api.fetchApi("/minimax/director/clear_cache", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ node_id: nodeId, workflow_name: wfName }),
+                            body: JSON.stringify({ node_id: nodeId, workflow_name: wfName, clear_all: clearAll }),
                         });
                         const data = resp.ok ? await resp.json() : { error: (await resp.text()).slice(0, 200) };
                         if (!resp.ok) {
@@ -11900,15 +12173,19 @@ app.registerExtension({
                         }
                         const cond = data.cleared?.conditioning ?? 0;
                         const batch = data.cleared?.batch ?? 0;
+                        const segments = data.cleared?.segments ?? 0;
                         const msg = [
                             "缓存已清空",
                             "工作流：" + (wfName || "（未命名）"),
                             "删除文本缓存：" + cond + " 个文件",
                             "删除中间缓存：" + (batch ? "已删除" : "无"),
+                            ...(clearAll ? ["删除片段缓存：" + (segments ? "已删除" : "无")] : []),
                         ].join("\n");
                         console.log(
                             `[MiniMax H3Director] cache cleared: ${cond} conditioning file(s), ` +
-                            `${batch ? "batch scratch removed" : "no batch scratch"} (workflow '${wfName || ""}')`
+                            `${batch ? "batch scratch removed" : "no batch scratch"}, ` +
+                            `${clearAll ? (segments ? "segment cache removed" : "no segment cache") : "segments kept"} ` +
+                            `(workflow '${wfName || ""}')`
                         );
                         window.alert(msg);
                     } catch (err) {
@@ -11916,7 +12193,9 @@ app.registerExtension({
                         window.alert("清空缓存出错：" + err);
                     }
                 })();
-            });
+            };
+            this.addWidget("button", "清空缓存", null, () => runClearCache(false));
+            this.addWidget("button", "清空节点所有缓存", null, () => runClearCache(true));
 
             const existingDom = pruneDirectorDomWidgets(this);
             // Idempotent: reuse the host if onNodeCreated / graph restore already mounted one.

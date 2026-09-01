@@ -17,7 +17,9 @@ from typing import Any
 
 import torch
 
-from ..lib.image_prep import cat_frames_variable_size, fit_canvas, fit_long_edge
+from ..lib.image_prep import (
+    cat_frames_variable_size, fit_canvas, fit_long_edge, pad_frames_to_canvas,
+)
 from .h3_motion_context import (
     CONTINUITY_TASK_KEYS,
     DEFAULT_CONTEXT_FRAMES as DEFAULT_CONTINUITY_OVERLAP,
@@ -1567,32 +1569,100 @@ def concat_continuous_chunks(
     return cat_frames_variable_size(fixed)
 
 
+def _seam_window() -> int:
+    """Frames on each side of a join that the seam pipeline can rewrite.
+
+    Every helper below only ever touches the leading / trailing few frames, so a
+    window this size is enough to reproduce the maths exactly while keeping each
+    internal ``.clone()`` at ~16 frames instead of the whole merged clip.
+    """
+    return max(
+        int(CONTINUITY_SEAM_ADD_LUMA_FRAMES),
+        int(CONTINUITY_SPIKE_SCAN),
+        int(CONTINUITY_HOLD_POP_SCAN),
+        int(CONTINUITY_OPENING_LUMA_BLEND),
+        int(CONTINUITY_OPENING_EXPOSURE_SMOOTH),
+        int(CONTINUITY_SEAM_SOFTEN_FRAMES),
+        int(CONTINUITY_TAIL_SOFTEN_FRAMES),
+        int(CONTINUITY_TAIL_LUMA_BLEND),
+        3,  # _micro_seam_bridge rewrites up to 3 frames per side
+    ) + 4
+
+
+def _seam_fix_windows(
+    left_tail: torch.Tensor,
+    body_head: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the seam pipeline on two small windows (``left_tail`` / ``body_head``).
+
+    Same order and same helpers as ``concat_continuous_chunks``, so the result is
+    bit-identical to passing the full clips — but each helper's internal
+    ``.clone()`` now costs one window rather than the accumulated merge. That
+    clone was the OOM: the join used to clone everything merged so far once per
+    segment, i.e. O(N^2) traffic and a transient third copy of the whole video.
+    """
+    if left_tail is None or body_head is None:
+        return left_tail, body_head
+    left = _unfreeze_held_tail(left_tail)
+    if CONTINUITY_HOLD_POP_ON_TAIL:
+        left = _break_hold_pop_window(left, from_end=True)
+    body = _break_hold_pop_window(body_head, from_end=False)
+    if float(CONTINUITY_SPIKE_WEIGHT) > 0:
+        body = _ease_opening_spikes(body)
+    body = _soften_body0_toward_prev(body, left)
+    body = _additive_opening_luma(body, left)
+    return _micro_seam_bridge(left, body)
+
+
 def concat_chunks_lazy(
     node_id: int,
     plan: DirectorPlan,
     export_segments: list,
     overrides: dict[int, torch.Tensor] | None = None,
+    *,
+    fill: float = 0.5,
 ) -> torch.Tensor:
-    """Lazy-loading merge: read segments from disk one by one, concat
-    incrementally.  Peak memory ≈ result + one chunk (vs all chunks).
+    """Streaming merge: allocate the result once, then copy each segment in.
 
-    Continuity seam fix is applied at each join.  Each ``del chunk`` frees
-    the previous input before loading the next.
+    Two costs the previous incremental ``torch.cat`` version paid on every join:
 
-    ``overrides`` carries in-memory chunks keyed by timeline index, for segments
-    that have **no** disk cache at all (source passthrough fill). Everything else
-    is read from disk, trying an exact fingerprint match first and falling back
-    to a stale render — the same pick order the caller used to build
-    ``export_segments``. Without that fallback a「选择运行」+「全部导出」merge
-    crashes: the caller selects an unselected segment via ``allow_stale=True``
-    (or passthrough), but a strict-only read here returns None for the very
-    segment that was just accepted.
+    * **O(N^2) copying** — each ``cat`` reallocated and re-copied everything
+      merged so far, so a 10-segment merge moved ~5x the final video.
+    * **O(N) transient clones** — the continuity seam pipeline cloned the whole
+      accumulated result (``_unfreeze_held_tail`` / ``_micro_seam_bridge``),
+      putting 2-3 full copies of the merge in RAM at once. That is the
+      ``not enough memory`` the batch merge hit.
+
+    Now: one allocation for the result, one copy-in per segment, and the seam
+    fix runs on two ``_seam_window()``-sized windows (see ``_seam_fix_windows``).
+    Peak memory is the result plus one segment.
+
+    ``overrides`` carries in-memory chunks keyed by timeline index — both the
+    source-passthrough fills (which have no disk cache) and, in batch mode, the
+    segments this run just decoded, so they are reused instead of being
+    re-read from disk. Everything else is read from disk, trying an exact
+    fingerprint match first and falling back to a stale render — the same pick
+    order the caller used to build ``export_segments``. Without that fallback a
+    「选择运行」+「全部导出」merge crashes: the caller selects an unselected
+    segment via ``allow_stale=True`` (or passthrough), but a strict-only read
+    here returns None for the very segment that was just accepted.
     """
-    from .segment_cache import load_segment_cache as _load_seg
+    from .segment_cache import (
+        load_segment_cache as _load_seg,
+        probe_segment_cache_shape as _probe_seg,
+    )
 
     if not export_segments:
         raise ValueError("concat_chunks_lazy: no export_segments")
     overrides = dict(overrides or {})
+    continuity = getattr(plan, "continuity_enabled", False)
+    window = _seam_window() if continuity else 0
+
+    def _miss(seg, label: int) -> RuntimeError:
+        return RuntimeError(
+            f"concat_chunks_lazy: segment {label} cache miss "
+            f"(node {node_id}; timeline #{int(seg.index) + 1})"
+        )
 
     def _read(seg, label: int) -> torch.Tensor:
         # pop so the override reference is released once merged.
@@ -1602,39 +1672,92 @@ def concat_chunks_lazy(
         if chunk is None:
             chunk = _load_seg(node_id, seg, plan, allow_stale=True)
         if chunk is None:
-            raise RuntimeError(
-                f"concat_chunks_lazy: segment {label} cache miss "
-                f"(node {node_id}; timeline #{int(seg.index) + 1})"
-            )
+            raise _miss(seg, label)
         return chunk.float()
 
-    result = _read(export_segments[0], 0)
-    continuity = getattr(plan, "continuity_enabled", False)
-    for i, seg in enumerate(export_segments[1:], start=1):
-        chunk = _read(seg, i)
-        if continuity:
-            left = _unfreeze_held_tail(result)
-            if CONTINUITY_HOLD_POP_ON_TAIL:
-                left = _break_hold_pop_window(left, from_end=True)
-            body = _break_hold_pop_window(chunk, from_end=False)
-            if float(CONTINUITY_SPIKE_WEIGHT) > 0:
-                body = _ease_opening_spikes(body)
-            body = _soften_body0_toward_prev(body, left)
-            body = _additive_opening_luma(body, left)
-            left, body = _micro_seam_bridge(left, body)
-            # ``left`` = seam-fixed tail, ``body`` = seam-fixed opening.
-            # ``result[:-left.shape[0]]`` is a view (zero-copy).
-            new_result = cat_frames_variable_size(
-                [result[:-left.shape[0]], left, body]
-            )
-            del result, left, body
-            result = new_result
+    # ---- Pass 1: geometry only (no pixels) ---------------------------------
+    # Probing reads the file header rather than the tensor, so measuring the
+    # merge costs almost nothing and every clip is loaded exactly once below.
+    shapes: list[tuple[int, int, int, int]] = []
+    for seg in export_segments:
+        in_mem = overrides.get(int(seg.index))
+        if in_mem is not None:
+            shapes.append(tuple(int(d) for d in in_mem.shape))
+            continue
+        shape = _probe_seg(node_id, seg, plan)
+        if shape is None:
+            shape = _probe_seg(node_id, seg, plan, allow_stale=True)
+        if shape is None:
+            # Legacy / unreadable header: fall back to a full read, and keep the
+            # pixels in ``overrides`` so pass 2 does not read them twice.
+            chunk = _load_seg(node_id, seg, plan)
+            if chunk is None:
+                chunk = _load_seg(node_id, seg, plan, allow_stale=True)
+            if chunk is None:
+                raise _miss(seg, len(shapes))
+            overrides[int(seg.index)] = chunk
+            shapes.append(tuple(int(d) for d in chunk.shape))
+            del chunk
         else:
-            new_result = cat_frames_variable_size([result, chunk])
-            del result
-            result = new_result
+            shapes.append(shape)
+
+    total = sum(int(s[0]) for s in shapes)
+    if total <= 0:
+        raise ValueError("concat_chunks_lazy: export segments contain no frames")
+    max_h = max(int(s[1]) for s in shapes)
+    max_w = max(int(s[2]) for s in shapes)
+    max_c = max(int(s[3]) for s in shapes)
+
+    out = torch.empty((total, max_h, max_w, max_c), dtype=torch.float32)
+    if any(int(s[3]) != max_c for s in shapes):
+        # Mixed channel counts would leave uninitialised lanes.
+        out[..., max(1, min(int(s[3]) for s in shapes)) :] = fill
+
+    # ---- Pass 2: stream each segment into the result -----------------------
+    pos = 0
+    # Tail of the previous clip at its *native* resolution. Kept so the seam
+    # maths sees real pixels: padding to the shared canvas first would fold the
+    # letterbox bars into the exposure statistics and skew the correction. It is
+    # only ``_seam_window()`` frames, so holding it costs a few MB.
+    prev_tail = None
+    prev_hw = None
+
+    for i, seg in enumerate(export_segments):
+        n = int(shapes[i][0])
+        if n <= 0:
+            continue
+        chunk = _read(seg, i)
+        h, w, c = int(chunk.shape[1]), int(chunk.shape[2]), int(chunk.shape[3])
+
+        if window > 0 and prev_tail is not None:
+            # ``k_body`` must not be clamped by ``pos``: a short segment still
+            # needs its real length here, or helpers that bail out below 3
+            # frames would silently skip the correction.
+            k_body = min(window, n)
+            k_left = int(prev_tail.shape[0])
+            # Two small clones instead of cloning the accumulated merge — this
+            # join used to cost a full copy of everything merged so far.
+            left_tail = prev_tail.clone()
+            body_head = chunk[:k_body].clone()
+            left_tail, body_head = _seam_fix_windows(left_tail, body_head)
+            if prev_hw != (max_h, max_w):
+                left_tail = pad_frames_to_canvas(left_tail, max_w, max_h, fill=fill)
+            out[pos - k_left : pos] = left_tail
+            chunk[:k_body] = body_head
+            del left_tail, body_head
+
+        if window > 0:
+            k_keep = min(window, n)
+            prev_tail = chunk[n - k_keep : n].clone()
+            prev_hw = (h, w)
+
+        if (h, w) != (max_h, max_w):
+            chunk = pad_frames_to_canvas(chunk, max_w, max_h, fill=fill)
+        out[pos : pos + n, :, :, :c] = chunk
+        pos += n
         del chunk
-    return result
+
+    return out
 
 
 def apply_cached_segment_continuity(

@@ -518,10 +518,12 @@ async def minimax_detect_shots(request):
 async def minimax_clear_cache(request):
     """Clear the per-node cache directories for the given Director node.
 
-    Deletes both the conditioning cache (``minimax_conditioning_cache/...``) and
-    the batch scratch (``minimax_batch_cache/...``) for this workflow + node. The
-    durable ``minimax_seg_cache/`` frames are left alone — they are the segments'
-    only persistent copy and are reused for motion context and「全部导出」.
+    Default clears the transient caches: conditioning (``minimax_conditioning_cache/...``)
+    and batch scratch (``minimax_batch_cache/...``) for this workflow + node.
+
+    With ``clear_all=true`` it additionally wipes this node's durable segment
+    cache (``minimax_seg_cache/<node_id>/``) — every rendered frame / AV latent /
+    audio / clip. That forces a full re-render on the next run.
 
     ``workflow_name`` is resolved to the same slug the cache layer uses, so the
     button always hits exactly the directory that holds this workflow's data.
@@ -546,7 +548,8 @@ async def minimax_clear_cache(request):
     from folder_paths import get_output_directory
 
     out_root = get_output_directory()
-    cleared = {"conditioning": 0, "batch": 0}
+    clear_all = bool(body.get("clear_all"))
+    cleared = {"conditioning": 0, "batch": 0, "segments": 0}
     try:
         cleared["conditioning"] = await asyncio.to_thread(
             clear_conditioning_cache,
@@ -570,9 +573,23 @@ async def minimax_clear_cache(request):
     except Exception as exc:
         log.warning("MiniMax H3 Director clear batch cache failed: %s", exc)
 
+    # clear_all → also wipe this node's durable segment cache so the next run
+    # must re-render every segment (frames / AV latent / audio / clip).
+    if clear_all:
+        seg_dir = os.path.join(out_root, "minimax_seg_cache", node_id)
+        try:
+            if os.path.isdir(seg_dir):
+                shutil.rmtree(seg_dir, ignore_errors=True)
+                if os.path.isdir(seg_dir):
+                    log.warning("Could not fully remove segment cache %s", seg_dir)
+                else:
+                    cleared["segments"] = 1
+        except Exception as exc:
+            log.warning("MiniMax H3 Director clear segment cache failed: %s", exc)
+
     log.info(
-        "MiniMax H3 Director cleared caches for node %s (workflow '%s'): %s",
-        node_id, workflow_name or "", cleared,
+        "MiniMax H3 Director cleared caches for node %s (workflow '%s', clear_all=%s): %s",
+        node_id, workflow_name or "", clear_all, cleared,
     )
     return web.json_response({"cleared": cleared})
 
@@ -621,6 +638,103 @@ async def minimax_first_pass_cache_status(request):
         )
 
 
+async def minimax_segment_export_status(request):
+    """Availability of every segment for「分段导出」(what the picker greys out)."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    timeline_data = body.get("timeline_data") or ""
+    if isinstance(timeline_data, dict):
+        timeline_data = json.dumps(timeline_data, ensure_ascii=False)
+    try:
+        from .plan import build_director_plan
+        from .segment_cache import inspect_segment_export_status
+
+        plan = build_director_plan(
+            str(timeline_data),
+            global_task_type=str(body.get("task_type") or ""),
+            global_prompt=str(body.get("global_prompt") or ""),
+            total_frames=int(body.get("total_frames") or 124),
+            frame_rate=float(body.get("frame_rate") or 24.0),
+            width=int(body.get("width") or 864),
+            height=int(body.get("height") or 480),
+            ref_max_size=int(body.get("ref_max_size") or 864),
+        )
+        return web.json_response(inspect_segment_export_status(node_id, plan))
+    except Exception as exc:
+        log.warning("MiniMax H3 Director segment-export status failed: %s", exc)
+        return web.json_response({"segments": [], "error": str(exc)}, status=400)
+
+
+async def minimax_segment_export(request):
+    """Run a「分段导出」request against the cached segments.
+
+    Body mirrors the timeline block: ``enabled``, ``mode``
+    (``piecewise`` | ``continuous``), ``indices``. Each checked segment must have
+    an exportable source — its clip cache, its frame cache, or (only when the
+    caller supplies models) its latent — otherwise it is skipped and reported.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    timeline_data = body.get("timeline_data") or ""
+    if isinstance(timeline_data, dict):
+        timeline_data = json.dumps(timeline_data, ensure_ascii=False)
+    mode = str(body.get("mode") or "").lower()
+    raw_indices = body.get("indices")
+    if not isinstance(raw_indices, list) or not raw_indices:
+        return web.Response(status=400, text="No segment indices selected.")
+
+    try:
+        from .plan import build_director_plan
+        from .segment_cache import run_segment_export
+
+        # continuous mode was removed; always piecewise.
+        mode = "piecewise"
+        try:
+            indices = [int(i) for i in raw_indices]
+        except (TypeError, ValueError):
+            return web.Response(status=400, text="Invalid segment indices.")
+
+        plan = build_director_plan(
+            str(timeline_data),
+            global_task_type=str(body.get("task_type") or ""),
+            global_prompt=str(body.get("global_prompt") or ""),
+            total_frames=int(body.get("total_frames") or 124),
+            frame_rate=float(body.get("frame_rate") or 24.0),
+            width=int(body.get("width") or 864),
+            height=int(body.get("height") or 480),
+            ref_max_size=int(body.get("ref_max_size") or 864),
+        )
+        # Disk-only export: clip cache / raw frame cache. Latent-only segments
+        # cannot be decoded here (no VAE in an HTTP request), so they are skipped
+        # with a hint — the full latent decode happens during node execution when
+        # the VAE is loaded.
+        result = await asyncio.to_thread(
+            run_segment_export,
+            node_id,
+            plan,
+            indices,
+            mode=mode,
+        )
+        return web.json_response(result)
+    except Exception as exc:
+        log.warning("MiniMax H3 Director segment-export failed: %s", exc)
+        return web.json_response({"error": str(exc)}, status=500)
+
+
 def _register_route(routes, method: str, path: str, handler) -> None:
     if hasattr(routes, "add_route"):
         routes.add_route(method, path, handler)
@@ -667,6 +781,18 @@ def register_routes() -> bool:
         "POST",
         "/minimax/director/first_pass_cache_status",
         minimax_first_pass_cache_status,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/segment_export_status",
+        minimax_segment_export_status,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/segment_export",
+        minimax_segment_export,
     )
     _ROUTES_REGISTERED = True
     log.info("MiniMax H3 Director HTTP routes registered")

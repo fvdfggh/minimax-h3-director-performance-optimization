@@ -16,6 +16,8 @@ from .director_common import (
 
 _CATEGORY = "MiniMaxH3"
 
+log = logging.getLogger("ComfyUI-MiniMaxH3-Director.nodes")
+
 _DEFAULT_GLOBAL_PROMPT = "A cinematic scene with natural motion and synchronized ambience"
 
 
@@ -289,5 +291,33 @@ class MiniMaxH3Director:
             pre_refine_segments=pre_segments,
             block_final_images=held_for_confirmation,
         )
+
+        # 「分段导出」for the non-batch path. Batch mode already handles it inside
+        # execute_director_batch; here the VAE is still loaded, so latent-only
+        # segments can be decoded on demand. Best-effort: failures are logged.
+        try:
+            seg_export = getattr(plan, "segment_export", None)
+            if seg_export is not None and seg_export.enabled and seg_export.indices:
+                from ..director.segment_cache import run_segment_export
+
+                seg_export_report = run_segment_export(
+                    unique_id,
+                    plan,
+                    list(seg_export.indices),
+                    mode=seg_export.normalized_mode(),
+                    vae=(video_vae, audio_vae)
+                    if (video_vae is not None or audio_vae is not None)
+                    else None,
+                )
+                for path in seg_export_report.get("files") or []:
+                    log.info("MiniMax H3 Director 分段导出 → %s", path)
+                for sk in seg_export_report.get("skipped") or []:
+                    log.warning(
+                        "MiniMax H3 Director 分段导出 #%d skipped: %s",
+                        int(sk.get("index", -1)) + 1,
+                        sk.get("reason"),
+                    )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("MiniMax H3 Director 分段导出 failed: %s", exc)
 
         return result

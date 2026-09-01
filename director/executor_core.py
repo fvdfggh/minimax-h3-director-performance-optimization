@@ -73,6 +73,7 @@ from .segment_cache import (
     prune_segment_cache,
     save_first_pass_cache,
     save_segment_cache,
+    save_segment_clip,
 )
 from .segment_mp4_export import (
     copy_segment_mp4_suffix,
@@ -1136,6 +1137,13 @@ def execute_director_plan_core(
             handoff=handoff,
             audio=audio_dict if isinstance(audio_dict, dict) else None,
         )
+        # Segment video-clip cache for「分段导出」. ``chunk`` is the trimmed export
+        # clip exactly as the merge/exports use it, so the encoded file needs no
+        # re-decode or re-trim. Best-effort: a failed encode must not abort gen.
+        try:
+            save_segment_clip(node_id, seg, plan, chunk, audio=audio_dict)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("Segment %d clip cache skipped: %s", int(seg.index) + 1, exc)
         completed_outputs[seg.index] = chunk
         completed_pre_refine[seg.index] = pre_chunk
         completed_refine_passes[seg.index] = pass_clips

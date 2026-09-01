@@ -54,8 +54,8 @@ from .h3_motion_context import (
 )
 from .segment_cache import (
     load_first_pass_cache, load_segment_audio, load_segment_av_latent,
-    load_segment_cache, load_segment_handoff_meta,
-    save_first_pass_cache, save_segment_cache,
+    load_segment_handoff_meta, probe_segment_cache_shape,
+    save_first_pass_cache, save_segment_cache, save_segment_clip,
 )
 from .segment_mp4_export import (
     copy_segment_mp4_suffix, maybe_export_segment_mp4, maybe_export_segment_mp4s,
@@ -78,6 +78,14 @@ def _unpack_node_output(out):
     if isinstance(out, (tuple, list)):
         return out
     raise RuntimeError(f"Unexpected node output: {type(out)!r}")
+
+
+def _save_export_clip(node_id, seg, plan, chunk, audio_dict) -> None:
+    """Best-effort clip-cache write right after a decode, for「分段导出」."""
+    try:
+        save_segment_clip(node_id, seg, plan, chunk, audio=audio_dict)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("Segment %d clip cache skipped: %s", int(seg.index) + 1, exc)
 
 
 def _decode_av_latent(samples, vae, audio_vae, *, decode_audio=True):
@@ -729,13 +737,18 @@ def _assemble_export_list(
             audios.append(completed_audios.get(seg.index) or {})
             continue
 
-        cached = load_segment_cache(node_id, seg, plan)
+        # Probe the header only: this branch used to load the whole clip just to
+        # read ``shape[0]`` and then throw the pixels away, so every unselected
+        # segment was read twice per run (once here, once by the merge).
+        cached_shape = probe_segment_cache_shape(node_id, seg, plan)
         used_stale = False
-        if cached is None:
-            cached = load_segment_cache(node_id, seg, plan, allow_stale=True)
-            used_stale = cached is not None
-        if cached is not None:
-            n_frames = int(cached.shape[0])
+        if cached_shape is None:
+            cached_shape = probe_segment_cache_shape(
+                node_id, seg, plan, allow_stale=True
+            )
+            used_stale = cached_shape is not None
+        if cached_shape is not None:
+            n_frames = int(cached_shape[0])
             cached_audio = load_segment_audio(node_id, seg, plan, allow_stale=used_stale)
             if not isinstance(cached_audio, dict):
                 cached_audio = {}
@@ -747,7 +760,6 @@ def _assemble_export_list(
                 f"{', +audio' if cached_audio else ', no audio cache'}"
                 f"{', stale fingerprint' if used_stale else ''})"
             )
-            del cached
             continue
 
         fill = segment_passthrough_chunk(plan, seg)
@@ -821,9 +833,20 @@ def execute_director_batch(
         pass
 
     run_indices = set(plan.run_indices) if plan.run_indices is not None else set(range(len(all_segments)))
+
+    # 「分段导出」: the checked segments already live in the cache, so there is
+    # NOTHING to sample here. Sampling would re-run the UNet on the whole
+    # timeline (and apply seam luma on every segment), which is exactly what an
+    # export-only run must avoid. We sample zero segments; the export reads
+    # frames / latents from disk and decodes with the already-loaded VAE.
+    seg_export = getattr(plan, "segment_export", None)
+    seg_export_active = seg_export is not None and seg_export.enabled and bool(seg_export.indices)
+    if seg_export_active:
+        run_indices = set()
+
     run_list = [seg for seg in all_segments if seg.index in run_indices]
 
-    if not run_list:
+    if not run_list and not seg_export_active:
         raise ValueError("Batch mode: no segments to run.")
 
     # Lives from Phase 1 on: the motion-context probe in Phase 1 may back-fill a
@@ -1427,6 +1450,11 @@ def execute_director_batch(
             handoff=handoff,
             audio=audio_dict if isinstance(audio_dict, dict) else None,
         )
+        # Segment video-clip cache for「分段导出」. Best-effort: ``chunk`` is the
+        # exact trimmed export clip the user sees, so the encoded file is
+        # byte-equivalent to a piecewise export of this segment — no re-decode,
+        # no re-trim needed later.
+        _save_export_clip(node_id, seg, plan, chunk, audio_dict)
 
         # Export mp4
         if mp4_run_dir is not None:
@@ -1588,9 +1616,63 @@ def execute_director_batch(
     # ===================================================================
     report_director_finish(node_id, len(run_list))
 
-    if plan.export_mode == "all":
+    if seg_export is not None and seg_export.enabled and seg_export.indices:
+        # 「分段导出」: only the checked segments participate — no full-timeline
+        # merge. This keeps an export-only run fast (it never renders or encodes
+        # the other 30+ segments) and returns a combined clip of just the checked
+        # segments as the node output; the per-segment mp4 files come from
+        # ``run_segment_export`` below.
+        #
+        # Unified decode first: latent-only segments (no frame cache) are decoded
+        # once and written back to ``seg_XXXX.pt``, so ``_load_segment_export_source``
+        # below reads frames directly — no repeated per-consumer VAE decode.
+        from .segment_cache import predecode_latent_segments as _predecode
+
+        _predecode(
+            node_id,
+            plan,
+            list(seg_export.indices),
+            vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None,
+        )
+        wanted_segs = [s for s in all_segments if int(s.index) in set(seg_export.indices)]
+        export_segments_list, segment_audios, export_frame_counts, merge_overrides = (
+            _assemble_export_list(
+                node_id, plan, wanted_segs,
+                decoded_frames=decoded_frames,
+                completed_audios=completed_audios,
+                reports=reports,
+            )
+        )
+        # 「分段导出」must NOT merge the checked segments into one video on the
+        # images output — each checked segment (piecewise) / each contiguous run
+        # (continuous) is a separate clip. Route through the segments layout so
+        # the node emits one IMAGE per clip instead of a stitched merge. The
+        # per-segment mp4 files come from ``run_segment_export`` below.
+        plan.export_mode = "segments"
+        # ``export_segments_list`` is a list of SegmentPlan objects (not frames).
+        # Load each checked segment's frames from cache / latent for the images
+        # output, reusing the exact source the export uses so IMAGE == mp4.
+        from .segment_cache import _load_segment_export_source as _seg_src
+
+        seg_by_index = {int(s.index): s for s in wanted_segs}
+        frame_by_index = {}
+        for idx in sorted(set(int(i) for i in seg_export.indices)):
+            s = seg_by_index.get(idx)
+            if s is None:
+                continue
+            src = _seg_src(node_id, s, plan, vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None)
+            if src is not None:
+                frame_by_index[idx] = src[0]
+
+        # Piecewise only — the continuous/concatenated export mode was removed.
+        segment_outputs = [frame_by_index[i] for i in sorted(frame_by_index)]
+        export_frame_counts = [int(t.shape[0]) for t in segment_outputs]
+    elif plan.export_mode == "all" or (not run_list and seg_export is not None and seg_export.enabled):
         # Batch mode only samples「选择运行」—「全部导出」still needs the whole
         # timeline, so unselected slots are filled from cache / source.
+        # (An export-only run with every selected segment cached has an empty
+        # ``run_list``; we still assemble the full merged clip from cache so the
+        # node returns a valid output.)
         # Index them by seg.index: run_list positions are not contiguous, so the
         # old `all_segments[run_list[0].index + i]` mapped to the wrong segment
         # whenever the selection had gaps.
@@ -1607,15 +1689,90 @@ def execute_director_batch(
         export_frame_counts = [int(t.shape[0]) for t in segment_outputs]
         merge_overrides = None
 
-    # Lazy merge from disk (peak ≈ result + one chunk).
-    combined = concat_chunks_lazy(
-        node_id, plan, export_segments_list, overrides=merge_overrides
-    )
-    merge_overrides = None
+    # Under「全部导出」the node emits the merged clip only — every segment frame
+    # is re-read from disk by the merge, so the in-memory chunks are now a second
+    # full copy of the same video. Release them *before* allocating the merge
+    # result: keeping both is what pushed peak RAM to 2x the final video (the
+    # long-timeline OOM). Batch mode has no refine pass, so
+    # ``segment_pre_refine`` holds the very same tensors.
+    if plan.export_mode == "all":
+        del segment_outputs[:], segment_pre_refine[:]
+        gc.collect()
+
+    # Streaming merge: one allocation for the result, one copy-in per segment.
+    if seg_export_active:
+        # 分段导出: never stitch the checked segments into one video. The images
+        # output already carries each clip separately (segments layout above, runs
+        # for continuous); ``combined`` is just a placeholder because the split
+        # layout never reads it.
+        if segment_outputs:
+            # ``segment_outputs`` holds the real per-segment frames loaded for the
+            # images output; use its shape for the placeholder (``export_segments_list``
+            # is a list of SegmentPlan, not frames).
+            hh, ww, cc = segment_outputs[0].shape[1], segment_outputs[0].shape[2], segment_outputs[0].shape[3]
+            combined = torch.zeros((1, hh, ww, cc), dtype=torch.float32)
+        else:
+            hh = int(getattr(plan, "height", 480) or 480)
+            ww = int(getattr(plan, "width", 864) or 864)
+            combined = torch.zeros((1, hh, ww, 3), dtype=torch.float32)
+        merge_overrides = None
+    elif not export_segments_list:
+        # 「分段导出」of latent-only segments (no .pt) has nothing to merge here —
+        # the per-segment files are still produced by run_segment_export below.
+        # Emit a 1-frame placeholder so the node never fails on an empty list.
+        if not seg_export_active:
+            raise ValueError("Batch mode: export list is empty.")
+        hh = int(getattr(plan, "height", 480) or 480)
+        ww = int(getattr(plan, "width", 864) or 864)
+        combined = torch.zeros((1, hh, ww, 3), dtype=torch.float32)
+        merge_overrides = None
+    else:
+        combined = concat_chunks_lazy(
+            node_id, plan, export_segments_list, overrides=merge_overrides
+        )
+        merge_overrides = None
     # Batch mode has no refine pass (pre_chunk is chunk), so the「一采」merge is
     # the same data — reuse it instead of re-reading every segment from disk a
     # second time (that doubled merge time and peak RAM).
     pre_combined = combined
+
+    # 「分段导出」: the user checked segments + a mode. The VAE is loaded here
+    # (and the clip cache was just written during decode), so latent-only
+    # segments can be decoded on demand. Best-effort: a failed export only logs.
+    seg_export = getattr(plan, "segment_export", None)
+    if seg_export is not None:
+        log.info(
+            "分段导出 config: enabled=%s mode=%s indices=%s",
+            seg_export.enabled,
+            seg_export.mode,
+            seg_export.indices,
+        )
+    try:
+        if seg_export is not None and seg_export.enabled and seg_export.indices:
+            from .segment_cache import run_segment_export
+
+            seg_export_report = run_segment_export(
+                node_id,
+                plan,
+                list(seg_export.indices),
+                mode=seg_export.normalized_mode(),
+                vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None,
+            )
+            log.info(
+                "分段导出 done: files=%d skipped=%d mode=%s",
+                len(seg_export_report.get("files") or []),
+                len(seg_export_report.get("skipped") or []),
+                seg_export.normalized_mode(),
+            )
+            for path in seg_export_report.get("files") or []:
+                reports.append(f"  分段导出 → {path}")
+            for sk in seg_export_report.get("skipped") or []:
+                reports.append(
+                    f"  分段导出 #{(int(sk.get('index', -1)) + 1)} skipped: {sk.get('reason')}"
+                )
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("分段导出 failed in batch mode: %s", exc)
+        reports.append(f"  分段导出 failed: {exc}")
 
     # Scratch dir keeps this run's intermediates; the segments themselves live on
     # in minimax_seg_cache. Clearing is driven by the node's 「清空缓存」button

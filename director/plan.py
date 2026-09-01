@@ -38,6 +38,25 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
 
 MIN_SEGMENT_FRAMES = 4
 DEFAULT_CONTINUITY_OVERLAP = 22
+
+DEFAULT_SEGMENT_EXPORT_MODE = "piecewise"
+
+
+@dataclass(frozen=True)
+class SegmentExportRequest:
+    """A「分段导出」request carried by the timeline JSON.
+
+    ``indices`` holds the user-checked segment indices (already normalised and
+    sorted). Every checked segment is written out as its own mp4 (piecewise);
+    the continuous/concatenated mode was removed.
+    """
+
+    enabled: bool
+    mode: str = DEFAULT_SEGMENT_EXPORT_MODE
+    indices: tuple[int, ...] = ()
+
+    def normalized_mode(self) -> str:
+        return DEFAULT_SEGMENT_EXPORT_MODE
 MIN_CONTINUITY_OVERLAP = 5
 MAX_CONTINUITY_OVERLAP = 56
 REF_IMAGE_SIZE_MATCH = "match"
@@ -188,6 +207,7 @@ class DirectorPlan:
     export_max_frames: int = 0
     export_mode: str = "all"  # "all" | "segments"
     run_indices: frozenset[int] | None = None  # None = run all segments
+    segment_export: SegmentExportRequest | None = None
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
@@ -469,6 +489,47 @@ def _resolve_export_mode(output_block: dict) -> str:
     if mode in ("segments", "segment", "per_segment", "by_segment"):
         return "segments"
     return "all"
+
+
+def _parse_segment_export(timeline: dict, segment_count: int) -> SegmentExportRequest | None:
+    """Read the「分段导出」block from ``timeline.output.segmentExport``.
+
+    Returns ``None`` when the feature is off, so every existing call site keeps
+    its current behaviour. Indices are clamped to the live timeline and
+    de-duplicated; an enabled request with no valid index is reported as
+    disabled rather than raising, letting the node fall back to a normal run.
+    """
+    if not isinstance(timeline, dict) or segment_count <= 0:
+        return None
+    output_block = timeline.get("output") or {}
+    if not isinstance(output_block, dict):
+        return None
+    block = output_block.get("segmentExport")
+    if block is None:
+        block = output_block.get("segment_export")
+    if not isinstance(block, dict):
+        return None
+
+    enabled = bool(block.get("enabled") or block.get("active"))
+    # continuous mode was removed; every export is piecewise.
+    mode = DEFAULT_SEGMENT_EXPORT_MODE
+
+    raw = block.get("indices")
+    if raw is None:
+        raw = block.get("selection")
+    indices: list[int] = []
+    if isinstance(raw, list):
+        for item in raw:
+            try:
+                idx = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < segment_count and idx not in indices:
+                indices.append(idx)
+
+    if not enabled or not indices:
+        return SegmentExportRequest(enabled=False, mode=mode, indices=())
+    return SegmentExportRequest(enabled=True, mode=mode, indices=tuple(sorted(indices)))
 
 
 def _clip_segment_ranges(

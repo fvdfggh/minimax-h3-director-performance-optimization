@@ -1656,6 +1656,7 @@ def execute_director_batch(
 
         seg_by_index = {int(s.index): s for s in wanted_segs}
         frame_by_index = {}
+        audio_by_index = {}
         for idx in sorted(set(int(i) for i in seg_export.indices)):
             s = seg_by_index.get(idx)
             if s is None:
@@ -1663,10 +1664,70 @@ def execute_director_batch(
             src = _seg_src(node_id, s, plan, vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None)
             if src is not None:
                 frame_by_index[idx] = src[0]
+                audio_by_index[idx] = src[1] if isinstance(src[1], dict) else {}
+        # ``segment_audios`` from the export list is aligned with
+        # ``export_segments_list``; fall back to it when the frame source carried
+        # no audio (e.g. a stale frame cache without an audio sidecar).
+        for s, a in zip(export_segments_list or [], segment_audios or []):
+            idx = int(getattr(s, "index", -1))
+            if idx >= 0 and not audio_by_index.get(idx) and isinstance(a, dict):
+                audio_by_index[idx] = a
 
-        # Piecewise only — the continuous/concatenated export mode was removed.
-        segment_outputs = [frame_by_index[i] for i in sorted(frame_by_index)]
-        export_frame_counts = [int(t.shape[0]) for t in segment_outputs]
+        _seg_mode = seg_export.normalized_mode()
+        if _seg_mode == "continuous":
+            # 连续导出: one clip per contiguous run (stitched with the streaming
+            # merge), standalone for a checked segment with no checked neighbour —
+            # matching exactly what ``run_segment_export`` writes to disk.
+            from .segment_cache import continuous_export_runs as _runs
+            from .segment_cache import merge_run_audio as _merge_audio
+
+            outputs: list[torch.Tensor] = []
+            counts: list[int] = []
+            run_audios: list[dict] = []
+            for run in _runs(frame_by_index.keys()):
+                run = [i for i in run if i in frame_by_index]
+                if not run:
+                    continue
+                if len(run) == 1:
+                    outputs.append(frame_by_index[run[0]])
+                    counts.append(int(frame_by_index[run[0]].shape[0]))
+                    run_audios.append(audio_by_index.get(run[0]) or {})
+                    continue
+                run_counts = [int(frame_by_index[i].shape[0]) for i in run]
+                try:
+                    merged = concat_chunks_lazy(
+                        node_id,
+                        plan,
+                        [seg_by_index[i] for i in run],
+                        overrides={i: frame_by_index[i] for i in run},
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.warning(
+                        "分段导出 连续导出: images merge of #%d–#%d failed (%s); "
+                        "falling back to standalone clips.",
+                        run[0] + 1, run[-1] + 1, exc,
+                    )
+                    for i in run:
+                        outputs.append(frame_by_index[i])
+                        counts.append(int(frame_by_index[i].shape[0]))
+                        run_audios.append(audio_by_index.get(i) or {})
+                    continue
+                outputs.append(merged)
+                counts.append(int(merged.shape[0]))
+                run_audios.append(
+                    _merge_audio(plan, [audio_by_index.get(i) or {} for i in run], run_counts)
+                    or {}
+                )
+            segment_outputs = outputs
+            export_frame_counts = counts
+            segment_audios = run_audios
+        else:
+            ordered = sorted(frame_by_index)
+            segment_outputs = [frame_by_index[i] for i in ordered]
+            export_frame_counts = [int(t.shape[0]) for t in segment_outputs]
+            # Keep audio 1:1 with the frames actually emitted (a segment whose
+            # frames could not be loaded must not shift the alignment).
+            segment_audios = [audio_by_index.get(i) or {} for i in ordered]
     elif plan.export_mode == "all" or (not run_list and seg_export is not None and seg_export.enabled):
         # Batch mode only samples「选择运行」—「全部导出」still needs the whole
         # timeline, so unselected slots are filled from cache / source.

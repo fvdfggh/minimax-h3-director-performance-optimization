@@ -698,11 +698,10 @@ async def minimax_segment_export(request):
         return web.Response(status=400, text="No segment indices selected.")
 
     try:
-        from .plan import build_director_plan
+        from .plan import build_director_plan, normalize_segment_export_mode
         from .segment_cache import run_segment_export
 
-        # continuous mode was removed; always piecewise.
-        mode = "piecewise"
+        mode = normalize_segment_export_mode(mode)
         try:
             indices = [int(i) for i in raw_indices]
         except (TypeError, ValueError):

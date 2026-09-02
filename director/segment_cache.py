@@ -939,6 +939,103 @@ def predecode_latent_segments(
     return {"decoded": decoded, "failed": failed}
 
 
+def continuous_export_runs(indices) -> list[list[int]]:
+    """Group sorted segment indices into runs of timeline-adjacent segments.
+
+    ``[1, 2, 3, 7, 8]`` → ``[[1, 2, 3], [7, 8]]``. Used by「连续导出」: a run of
+    two or more is stitched into one clip, a run of one is exported standalone.
+    """
+    runs: list[list[int]] = []
+    for idx in sorted({int(i) for i in indices}):
+        if runs and idx == runs[-1][-1] + 1:
+            runs[-1].append(idx)
+        else:
+            runs.append([idx])
+    return runs
+
+
+def _audio_has_samples(audio: Any) -> bool:
+    """True when an audio dict carries actual samples (mirrors audio_export)."""
+    if not isinstance(audio, dict):
+        return False
+    wave = audio.get("waveform")
+    return isinstance(wave, torch.Tensor) and int(wave.numel()) > 0
+
+
+def merge_run_audio(
+    plan: DirectorPlan,
+    audios: list,
+    frame_counts: list[int],
+) -> dict[str, Any] | None:
+    """Concatenate the per-segment audio of one「连续导出」run.
+
+    Mirrors the「全部导出」merge (``_merge_generated_segment_audios``) so a stitched
+    clip keeps A/V sync: each part is padded/trimmed to its own frame count, then
+    concatenated. Returns ``None`` when there is nothing to merge so the caller
+    writes a silent clip instead of failing.
+    """
+    counts = [max(0, int(c)) for c in (frame_counts or [])]
+    total = sum(counts)
+    if total <= 0 or not audios:
+        return None
+    if not any(_audio_has_samples(a) for a in audios):
+        # Nothing recorded for this run — keep the clip silent (no audio track)
+        # instead of encoding a silent AAC stream.
+        return None
+    try:
+        from .audio_export import _merge_generated_segment_audios
+
+        fps = float(getattr(plan, "frame_rate", 24) or 24)
+        merged = _merge_generated_segment_audios(
+            plan,
+            list(audios),
+            total_frames=total,
+            fps=fps,
+            frame_counts=counts,
+        )
+        return merged if isinstance(merged, dict) else None
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("分段导出 连续导出: audio merge failed (%s)", exc)
+        return None
+
+
+def _run_frame_counts(
+    node_id,
+    plan: DirectorPlan,
+    run_segments: list,
+    total_frames: int,
+) -> list[int]:
+    """Per-segment frame counts of one「连续导出」run, read from the cache header.
+
+    The stitched clip length is authoritative (the merge is what actually lands on
+    disk), so probed counts are rescaled when they disagree with it — a wrong
+    split would desync the merged audio.
+    """
+    counts: list[int] = []
+    for seg in run_segments:
+        shape = probe_segment_cache_shape(node_id, seg, plan)
+        if shape is None:
+            shape = probe_segment_cache_shape(node_id, seg, plan, allow_stale=True)
+        counts.append(max(0, int(shape[0])) if shape else 0)
+    probed = sum(counts)
+    if probed == total_frames:
+        return counts
+    if probed <= 0:
+        n = max(1, len(counts))
+        base, rem = divmod(max(0, int(total_frames)), n)
+        return [base + (1 if i < rem else 0) for i in range(n)]
+    # Proportional rescale onto the real merged length.
+    scaled: list[int] = []
+    used = 0
+    for i, c in enumerate(counts):
+        want = int(round(total_frames * (c / probed)))
+        if i == len(counts) - 1:
+            want = max(0, int(total_frames) - used)
+        scaled.append(max(0, want))
+        used += scaled[-1]
+    return scaled
+
+
 def run_segment_export(
     node_id: str | None,
     plan: DirectorPlan,
@@ -948,20 +1045,29 @@ def run_segment_export(
     vae: Any = None,
     out_dir: str | None = None,
 ) -> dict[str, Any]:
-    """Execute a「分段导出」request — one mp4 per checked segment (piecewise).
+    """Execute a「分段导出」request.
 
-    The continuous/concatenated mode was removed; ``mode`` is accepted only for
-    backward compatibility and always behaves as piecewise.
+    ``mode="piecewise"`` (default) writes one mp4 per checked segment.
+    ``mode="continuous"`` stitches checked segments that sit next to each other on
+    the timeline into a single mp4 (``seg_AA-BB``); a checked segment that has no
+    checked neighbour is exported on its own, so a sparse selection produces a mix
+    of stitched runs and standalone clips.
 
-    Returns a summary dict: ``files``, ``skipped``, ``export_dir``. Never raises
-    for a per-segment failure — it is reported in ``skipped`` and the rest still
-    exports. When ``out_dir`` is None the files land in
+    Latent-only segments are predecoded once up front (same as piecewise) and read
+    back from the frame cache, so both modes share one decode path.
+
+    Returns a summary dict: ``files``, ``skipped``, ``export_dir``, ``mode``.
+    Never raises for a per-segment failure — it is reported in ``skipped`` and the
+    rest still exports. When ``out_dir`` is None the files land in
     ``<output>/minimax_segment_export/<node_id>``.
     """
+    from .plan import normalize_segment_export_mode
+
+    normalized = normalize_segment_export_mode(mode)
     segments = _segments_by_index(plan)
     valid = sorted({int(i) for i in indices if int(i) in segments})
     if not valid:
-        return {"files": [], "skipped": [], "export_dir": ""}
+        return {"files": [], "skipped": [], "export_dir": "", "mode": normalized}
 
     # Unified decode first: any checked segment that has only a latent (no frames)
     # is decoded once and written back to the frame cache, so the exports below
@@ -993,31 +1099,100 @@ def run_segment_export(
         except Exception as exc:  # pragma: no cover - defensive
             skipped.append({"index": int(seg.index), "reason": str(exc)})
 
-    for idx in valid:
-        seg = segments[idx]
-        source = _load_segment_export_source(node_id, seg, plan, vae=vae)
+    def _export_clip_copy(idx: int) -> None:
+        """Copy the encoded clip cache verbatim — no re-decode, no re-encode."""
+        clip = clip_cache_path(node_id, idx)
+        if clip is not None and clip.is_file() and clip.stat().st_size > 0:
+            try:
+                stamp = uuid.uuid4().hex[:6]
+                dest = os.path.join(
+                    export_dir, f"segment_export_seg_{idx + 1:02d}_{stamp}.mp4"
+                )
+                shutil.copy2(str(clip), dest)
+                files.append(dest)
+            except Exception as exc:  # pragma: no cover - defensive
+                skipped.append({"index": idx, "reason": str(exc)})
+        else:
+            skipped.append({"index": idx, "reason": "no exportable cache"})
+
+    def _export_standalone(idx: int) -> None:
+        """Export one segment on its own: frames → latent decode → clip copy."""
+        source = _load_segment_export_source(node_id, segments[idx], plan, vae=vae)
         if source is None:
             # No frame source (no .pt, no latent). Fall back to copying the
             # encoded clip cache (seg_XXXX.clip.mp4) verbatim — no re-decode,
             # no re-encode, just a file copy.
-            clip = clip_cache_path(node_id, idx)
-            if clip is not None and clip.is_file() and clip.stat().st_size > 0:
-                try:
-                    stamp = uuid.uuid4().hex[:6]
-                    dest = os.path.join(
-                        export_dir, f"segment_export_seg_{idx + 1:02d}_{stamp}.mp4"
-                    )
-                    shutil.copy2(str(clip), dest)
-                    files.append(dest)
-                except Exception as exc:  # pragma: no cover - defensive
-                    skipped.append({"index": idx, "reason": str(exc)})
-            else:
-                skipped.append({"index": idx, "reason": "no exportable cache"})
-            continue
-        frames, audio = source
-        _export_one(seg, frames, audio, tag=f"seg_{idx + 1:02d}")
+            _export_clip_copy(idx)
+            return
+        _export_one(segments[idx], source[0], source[1], tag=f"seg_{idx + 1:02d}")
 
-    return {"files": files, "skipped": skipped, "export_dir": export_dir}
+    def _segment_audio(idx: int) -> dict[str, Any] | None:
+        audio = load_segment_audio(node_id, segments[idx], plan, allow_stale=True)
+        return audio if isinstance(audio, dict) else None
+
+    if normalized != "continuous":
+        for idx in valid:
+            _export_standalone(idx)
+        return {
+            "files": files,
+            "skipped": skipped,
+            "export_dir": export_dir,
+            "mode": normalized,
+        }
+
+    # --- 连续导出: stitch runs of adjacent checked segments ------------------
+    # Only a segment with a frame cache can be stitched; the merge streams the
+    # clips in from disk (peak ≈ result + one segment, same as「全部导出」) instead
+    # of holding a whole run in RAM. Latent-only segments were predecoded above,
+    # so they are on disk by now and take part like any other cached segment.
+    from .segment_continuity import concat_chunks_lazy
+
+    stitchable = [
+        idx
+        for idx in valid
+        if resolve_segment_cache_path(node_id, segments[idx], plan, allow_stale=True)
+        is not None
+    ]
+    for run in continuous_export_runs(stitchable):
+        first, last = run[0], run[-1]
+        if len(run) == 1:
+            # No checked neighbour — export it on its own.
+            _export_standalone(first)
+            continue
+        run_segs = [segments[i] for i in run]
+        try:
+            merged = concat_chunks_lazy(node_id, plan, run_segs)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning(
+                "分段导出 连续导出: stitching #%d–#%d failed (%s); "
+                "falling back to standalone clips.",
+                first + 1, last + 1, exc,
+            )
+            for i in run:
+                _export_standalone(i)
+            continue
+        counts = _run_frame_counts(node_id, plan, run_segs, int(merged.shape[0]))
+        audio = merge_run_audio(plan, [_segment_audio(i) for i in run], counts)
+        _export_one(
+            segments[first],
+            merged,
+            audio,
+            tag=f"seg_{first + 1:02d}-{last + 1:02d}",
+        )
+        del merged
+
+    # Checked segments without a frame cache (clip-only, or a latent that could
+    # not be decoded here) are exported verbatim / skipped.
+    for idx in valid:
+        if idx not in stitchable:
+            _export_standalone(idx)
+
+    return {
+        "files": files,
+        "skipped": skipped,
+        "export_dir": export_dir,
+        "mode": normalized,
+    }
 
 
 def _write_export_mp4(

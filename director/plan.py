@@ -40,6 +40,18 @@ MIN_SEGMENT_FRAMES = 4
 DEFAULT_CONTINUITY_OVERLAP = 22
 
 DEFAULT_SEGMENT_EXPORT_MODE = "piecewise"
+SEGMENT_EXPORT_MODE_PIECEWISE = "piecewise"
+SEGMENT_EXPORT_MODE_CONTINUOUS = "continuous"
+
+_CONTINUOUS_MODE_ALIASES = frozenset({"continuous", "concat", "concatenate", "merged"})
+
+
+def normalize_segment_export_mode(mode) -> str:
+    """Map a UI/payload mode string onto ``piecewise`` | ``continuous``."""
+    text = str(mode or "").strip().lower()
+    if text in _CONTINUOUS_MODE_ALIASES:
+        return SEGMENT_EXPORT_MODE_CONTINUOUS
+    return SEGMENT_EXPORT_MODE_PIECEWISE
 
 
 @dataclass(frozen=True)
@@ -47,8 +59,12 @@ class SegmentExportRequest:
     """A「分段导出」request carried by the timeline JSON.
 
     ``indices`` holds the user-checked segment indices (already normalised and
-    sorted). Every checked segment is written out as its own mp4 (piecewise);
-    the continuous/concatenated mode was removed.
+    sorted).
+
+    * ``piecewise`` — every checked segment is written out as its own mp4.
+    * ``continuous`` — checked segments that are adjacent on the timeline are
+      stitched into one mp4 with the streaming merge (``concat_chunks_lazy``); a
+      checked segment with no neighbour stays a standalone mp4.
     """
 
     enabled: bool
@@ -56,7 +72,9 @@ class SegmentExportRequest:
     indices: tuple[int, ...] = ()
 
     def normalized_mode(self) -> str:
-        return DEFAULT_SEGMENT_EXPORT_MODE
+        return normalize_segment_export_mode(self.mode)
+
+
 MIN_CONTINUITY_OVERLAP = 5
 MAX_CONTINUITY_OVERLAP = 56
 REF_IMAGE_SIZE_MATCH = "match"
@@ -511,8 +529,9 @@ def _parse_segment_export(timeline: dict, segment_count: int) -> SegmentExportRe
         return None
 
     enabled = bool(block.get("enabled") or block.get("active"))
-    # continuous mode was removed; every export is piecewise.
-    mode = DEFAULT_SEGMENT_EXPORT_MODE
+    mode = normalize_segment_export_mode(
+        block.get("mode") if block.get("mode") is not None else block.get("exportMode")
+    )
 
     raw = block.get("indices")
     if raw is None:

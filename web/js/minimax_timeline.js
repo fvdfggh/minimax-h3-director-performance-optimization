@@ -3691,7 +3691,7 @@ class MiniMaxH3DirectorEditor {
         const cfg = this.timeline.output?.segmentExport || {};
         return {
             enabled: !!cfg.enabled,
-            mode: "piecewise",
+            mode: cfg.mode === "continuous" ? "continuous" : "piecewise",
             indices: Array.isArray(cfg.indices)
                 ? cfg.indices.map((i) => parseInt(i, 10)).filter((i) => i >= 0)
                 : [],
@@ -3756,12 +3756,27 @@ class MiniMaxH3DirectorEditor {
             if (val) this.resolveSegmentExport(val);
         };
 
-        // Mode — piecewise only (the continuous/concatenated mode was removed).
+        // Mode — piecewise (one file per segment) or continuous (adjacent
+        // checked segments are stitched into one file).
         const modeWrap = document.createElement("div");
         modeWrap.className = "bd-seg-export-mode";
         modeWrap.innerHTML = `<span class="bd-seg-export-mode-label">${t("segmentExport.mode")}</span>
-            <label><input type="radio" name="seg-export-mode" value="piecewise" checked> ${t("segmentExport.modePiecewise")}</label>`;
+            <label><input type="radio" name="seg-export-mode" value="piecewise"${cfg.mode === "continuous" ? "" : " checked"}> ${t("segmentExport.modePiecewise")}</label>
+            <label><input type="radio" name="seg-export-mode" value="continuous"${cfg.mode === "continuous" ? " checked" : ""}> ${t("segmentExport.modeContinuous")}</label>`;
+        const modeHint = document.createElement("div");
+        modeHint.className = "bd-seg-export-hint";
+        const syncModeHint = () => {
+            const picked = modeWrap.querySelector('input[name="seg-export-mode"]:checked')?.value;
+            modeHint.textContent = t(
+                picked === "continuous" ? "segmentExport.modeHintContinuous" : "segmentExport.modeHintPiecewise"
+            );
+        };
+        modeWrap.querySelectorAll('input[name="seg-export-mode"]').forEach((r) => {
+            r.onchange = syncModeHint;
+        });
+        syncModeHint();
         bodyEl.appendChild(modeWrap);
+        bodyEl.appendChild(modeHint);
 
         // Segment list
         const hint = document.createElement("div");
@@ -3795,7 +3810,10 @@ class MiniMaxH3DirectorEditor {
             checkboxes.forEach((cb, i) => {
                 if (cb.checked && !cb.disabled) indices.push(i);
             });
-            finish({ enabled: indices.length > 0, mode: "piecewise", indices });
+            const mode = modeWrap.querySelector('input[name="seg-export-mode"]:checked')?.value === "continuous"
+                ? "continuous"
+                : "piecewise";
+            finish({ enabled: indices.length > 0, mode, indices });
         };
 
         const cancelBtn = document.createElement("button");

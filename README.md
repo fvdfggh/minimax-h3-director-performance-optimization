@@ -150,6 +150,7 @@ pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
 7. fl2v 默认跳过二采（保护钉死的首尾帧）；关掉 Refine 上的 `skip_fl2v` 才会采
 8. `upscale` 默认 `h3_latent`：在 Refine 节点里选 3D 权重（`upscale_method` 下方下拉框；`mode=latent_upscale` 时同样出现）。权重放 `ComfyUI/models/latent_upscale_models/`。`lanczos` 可另接 `upscale_model`（RealESRGAN 等），不接则纯插值；也可改 `nvidia_rtx_vsr`
 9. 「分段导出」且 `passes>1` 时，每轮会另落 `seg_XXXX_pN.mp4`；「全部导出」只出一采和终稿
+10. 「分段导出」有两种模式：**分片导出**（每个勾选片段一个视频）和**连续导出**（时间轴上相邻的勾选片段用「全部导出」同一套流式拼接合成一个视频 `seg_AA-BB`；没有相邻勾选片段的片段仍单独导出）。latent 处理与分片导出一致：运行时用已加载的 VAE 预解码后写回帧缓存再导出
 
 示例：`example_workflows/minimax_h3_director_二采_加速.json`
 

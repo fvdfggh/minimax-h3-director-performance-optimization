@@ -858,7 +858,12 @@ def execute_director_batch(
     # export-only run must avoid. We sample zero segments; the export reads
     # frames / latents from disk and decodes with the already-loaded VAE.
     seg_export = getattr(plan, "segment_export", None)
-    seg_export_active = seg_export is not None and seg_export.enabled and bool(seg_export.indices)
+    # Trigger purely on whether the user checked segments (indices), NOT on the
+    # one-shot `enabled` flag. `enabled` is set by the UI picker and is prone to a
+    # clear-before-queue race (the picker clears it right after queueing), which
+    # made every export silently fall through to a placeholder. `indices` is the
+    # stable signal of user intent and survives the round trip to the backend.
+    seg_export_active = seg_export is not None and bool(seg_export.indices)
     if seg_export_active:
         run_indices = set()
 
@@ -1705,7 +1710,7 @@ def execute_director_batch(
             s = seg_by_index.get(idx)
             if s is None:
                 continue
-            src = _seg_src(node_id, s, plan, vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None)
+            src = _seg_src(node_id, s, plan, vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None, workflow_name=workflow_name)
             if src is not None:
                 frame_by_index[idx] = src[0]
                 audio_by_index[idx] = src[1] if isinstance(src[1], dict) else {}
@@ -1773,7 +1778,7 @@ def execute_director_batch(
             # Keep audio 1:1 with the frames actually emitted (a segment whose
             # frames could not be loaded must not shift the alignment).
             segment_audios = [audio_by_index.get(i) or {} for i in ordered]
-    elif plan.export_mode == "all" or (not run_list and seg_export is not None and seg_export.enabled):
+    elif plan.export_mode == "all" or (not run_list and seg_export is not None and bool(seg_export.indices)):
         # Batch mode only samples「选择运行」—「全部导出」still needs the whole
         # timeline, so unselected slots are filled from cache / source.
         # (An export-only run with every selected segment cached has an empty
@@ -1806,25 +1811,13 @@ def execute_director_batch(
         del segment_outputs[:], segment_pre_refine[:]
         gc.collect()
 
-    # Streaming merge: one allocation for the result, one copy-in per segment.
-    if seg_export_active:
-        # Export-to-node-output: stitch the checked segments into one video and emit
-        # it directly on the node's output (same as a normal run), instead of a
-        # 1-frame placeholder + disk file. The user wants the result in the OUTPUT
-        # slot, not written to disk.
-        if export_segments_list:
-            combined = concat_chunks_lazy(
-                node_id, plan, export_segments_list, overrides=merge_overrides,
-                workflow_name=workflow_name,
-            )
-        elif segment_outputs:
-            hh, ww, cc = segment_outputs[0].shape[1], segment_outputs[0].shape[2], segment_outputs[0].shape[3]
-            combined = torch.zeros((1, hh, ww, cc), dtype=torch.float32)
-        else:
-            hh = int(getattr(plan, "height", 480) or 480)
-            ww = int(getattr(plan, "width", 864) or 864)
-            combined = torch.zeros((1, hh, ww, 3), dtype=torch.float32)
-        merge_overrides = None
+    log.info("分段导出: export_mode=%r seg_export_active=%s export_segments_list_len=%d segment_outputs_len=%d",
+             plan.export_mode, seg_export_active,
+             len(export_segments_list) if export_segments_list else 0,
+             len(segment_outputs) if segment_outputs else 0)
+    if plan.export_mode == "all":
+        # （上面 1810 行已释放 segment_outputs；这里合并全部段为单个 combined）
+        pass
     elif not export_segments_list:
         # 「分段导出」of latent-only segments (no .pt) has nothing to merge here —
         # the per-segment files are still produced by run_segment_export below.

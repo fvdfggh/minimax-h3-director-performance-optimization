@@ -293,33 +293,17 @@ class MiniMaxH3Director:
             block_final_images=held_for_confirmation,
         )
 
-        # 「分段导出」for the non-batch path. Batch mode already handles it inside
-        # execute_director_batch; here the VAE is still loaded, so latent-only
-        # segments can be decoded on demand. Best-effort: failures are logged.
-        try:
-            seg_export = getattr(plan, "segment_export", None)
-            if seg_export is not None and seg_export.enabled and seg_export.indices:
-                from ..director.segment_cache import run_segment_export
-
-                seg_export_report = run_segment_export(
-                    unique_id,
-                    plan,
-                    list(seg_export.indices),
-                    mode=seg_export.normalized_mode(),
-                    vae=(video_vae, audio_vae)
-                    if (video_vae is not None or audio_vae is not None)
-                    else None,
-                    workflow_name=workflow_name,
-                )
-                for path in seg_export_report.get("files") or []:
-                    log.info("MiniMax H3 Director 分段导出 → %s", path)
-                for sk in seg_export_report.get("skipped") or []:
-                    log.warning(
-                        "MiniMax H3 Director 分段导出 #%d skipped: %s",
-                        int(sk.get("index", -1)) + 1,
-                        sk.get("reason"),
-                    )
-        except Exception as exc:  # pragma: no cover - defensive
-            log.warning("MiniMax H3 Director 分段导出 failed: %s", exc)
+        # 「分段导出」不再另外写磁盘：节点 OUTPUT 已由 finalize_director_outputs
+        # 通过 segment_outputs 直接输出（与「运行」一致），batch / normal 两条路径
+        # 都在上面的 execute_* 中填充了 segment_outputs。这里若再调用
+        # run_segment_export 会重复向 minimax_segment_export/<node_id>/ 落盘，与
+        # 「不保存磁盘、节点直接输出」的需求冲突，故禁用。
+        seg_export = getattr(plan, "segment_export", None)
+        if seg_export is not None and seg_export.enabled and seg_export.indices:
+            log.info(
+                "分段导出 → 节点输出模式: %d 个片段 (mode=%s, 不写磁盘)",
+                len(list(seg_export.indices)),
+                seg_export.normalized_mode(),
+            )
 
         return result

@@ -526,8 +526,12 @@ def _parse_segment_export(timeline: dict, segment_count: int) -> SegmentExportRe
         return None
     output_block = timeline.get("output") or {}
     if not isinstance(output_block, dict):
-        return None
-    block = output_block.get("segmentExport")
+        output_block = {}
+    # The frontend spreads the segment-export block at the TOP LEVEL of the
+    # timeline payload (see buildTimelinePayload: `...this._segmentExportPayload()`),
+    # NOT under `output`. Accept both locations so indices are never missed.
+    block = (timeline.get("segmentExport") if isinstance(timeline.get("segmentExport"), dict)
+             else output_block.get("segmentExport"))
     if block is None:
         block = output_block.get("segment_export")
     if not isinstance(block, dict):
@@ -551,7 +555,13 @@ def _parse_segment_export(timeline: dict, segment_count: int) -> SegmentExportRe
             if 0 <= idx < segment_count and idx not in indices:
                 indices.append(idx)
 
-    if not enabled or not indices:
+    # NOTE: `enabled` is a one-shot UI flag that the picker clears immediately after
+    # queueing, so by the time the backend reads the timeline it can already be
+    # False even though the user *did* choose segments to export. We therefore gate
+    # purely on `indices`: if the user checked any segment, the request is live and
+    # `enabled` is forced True so downstream call sites (and the
+    # `seg_export_active` check in batch_executor) activate correctly.
+    if not indices:
         return SegmentExportRequest(enabled=False, mode=mode, indices=())
     return SegmentExportRequest(enabled=True, mode=mode, indices=tuple(sorted(indices)))
 

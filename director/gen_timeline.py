@@ -372,7 +372,10 @@ def build_gen_director_plan(
         else:
             source_video = cat_frames_variable_size(source_clips)
 
-    from .segment_continuity import resolve_segment_continuity_from_prev
+    from .segment_continuity import (
+        resolve_segment_continuity_from_prev,
+        resolve_segment_continuity_to_next,
+    )
 
     segments: list[SegmentPlan] = []
     for idx, (start, end, seg_data) in enumerate(segment_ranges):
@@ -494,6 +497,11 @@ def build_gen_director_plan(
                 continuity_from_prev=resolve_segment_continuity_from_prev(
                     seg_data if isinstance(seg_data, dict) else {},
                     segment_index=idx,
+                ),
+                continuity_to_next=resolve_segment_continuity_to_next(
+                    seg_data if isinstance(seg_data, dict) else {},
+                    segment_index=idx,
+                    segment_count=len(segment_ranges),
                 ),
                 ref_image_size=resolve_ref_image_size(
                     seg_data if isinstance(seg_data, dict) else {},

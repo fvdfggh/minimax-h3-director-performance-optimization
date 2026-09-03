@@ -190,6 +190,11 @@ class SegmentPlan:
     ui_index: int | None = None
     # Per-segment「引用上段」; master「段间引导」must also be on. Default True.
     continuity_from_prev: bool = True
+    # Per-segment「对齐下段」: pin the *next* segment's opening into this tail so
+    # the join is forged from both sides. Cache-driven middle-out mode, so it is
+    # opt-in (default False) and only runs when that neighbour has a cached AV
+    # latent. Master「段间引导」must also be on.
+    continuity_to_next: bool = False
     # Official MiniMaxH3ReferenceToVideo combo: match | max. Per r2v/rv2v group.
     ref_image_size: str = "match"
 

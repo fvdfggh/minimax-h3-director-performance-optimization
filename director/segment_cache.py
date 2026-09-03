@@ -131,6 +131,10 @@ def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[
         "continuity": plan.continuity_enabled,
         "continuity_overlap": plan.continuity_overlap_frames if plan.continuity_enabled else 0,
         "continuity_from_prev": bool(getattr(seg, "continuity_from_prev", True)),
+        # An align-to-next render pins an extra latent into the tail, so its
+        # latent is not interchangeable with a plain continuity render. Without
+        # this the two would share a key and reuse each other's cache.
+        "continuity_to_next": bool(getattr(seg, "continuity_to_next", False)),
         "continuity_pipeline": CONTINUITY_PIPELINE_ID,
     }
 
@@ -310,11 +314,36 @@ def save_segment_cache(
             _safe_unlink(stray)
 
 
+def _fingerprint_defaults() -> dict[str, Any]:
+    """Defaults for fingerprint keys added after older caches were written.
+
+    Adding a key to the fingerprint makes every pre-existing cache look stale
+    (``stored != expected``), forcing a full re-render for no user-visible
+    reason. Keys listed here are filled in from their default when *absent* from
+    a stored fingerprint, so old caches stay valid as long as the feature they
+    describe was off — which is exactly what "absent" meant at the time.
+    """
+    return {"continuity_to_next": False}
+
+
+def _fingerprint_compatible(stored: Any, expected: dict[str, Any]) -> bool:
+    """Compare fingerprints, treating keys added later as their default."""
+    if not isinstance(stored, dict):
+        return stored == expected
+    patched = dict(stored)
+    for key, default in _fingerprint_defaults().items():
+        patched.setdefault(key, default)
+    return patched == expected
+
+
 def _fingerprint_diff_keys(stored: Any, expected: dict[str, Any]) -> list[str]:
     if not isinstance(stored, dict):
         return ["<invalid-meta>"]
-    keys = sorted(set(stored) | set(expected))
-    return [k for k in keys if stored.get(k) != expected.get(k)]
+    patched = dict(stored)
+    for key, default in _fingerprint_defaults().items():
+        patched.setdefault(key, default)
+    keys = sorted(set(patched) | set(expected))
+    return [k for k in keys if patched.get(k) != expected.get(k)]
 
 
 def load_segment_handoff_meta(
@@ -341,7 +370,7 @@ def load_segment_handoff_meta(
         try:
             expected = segment_cache_fingerprint(seg, plan)
             stored = json.loads(meta_path.read_text(encoding="utf-8"))
-            if stored != expected:
+            if not _fingerprint_compatible(stored, expected):
                 if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
                     return None
         except Exception:
@@ -410,7 +439,7 @@ def load_segment_av_latent(
         try:
             stored = json.loads(meta_path.read_text(encoding="utf-8"))
             expected = segment_cache_fingerprint(seg, plan)
-            if stored != expected:
+            if not _fingerprint_compatible(stored, expected):
                 if _reject_source_stale(stored, expected, seg_index=idx, quiet=True) or not allow_stale:
                     return None
         except Exception as exc:
@@ -427,6 +456,54 @@ def load_segment_av_latent(
     except Exception as exc:
         log.warning("Failed to load segment %d AV latent cache: %s", idx + 1, exc)
         return None
+
+
+def next_segment_av_latent_path(node_id: str | None, seg_index: int) -> Path | None:
+    """Cache path of the AV latent one segment after ``seg_index``."""
+    if not node_id:
+        return None
+    root = _cache_root(node_id)
+    if root is None:
+        return None
+    return root / f"seg_{int(seg_index) + 1:04d}.av.pt"
+
+
+def has_next_segment_av_latent(node_id: str | None, seg_index: int) -> bool:
+    """Whether the next segment holds a cached AV latent for「对齐下段」.
+
+    Presence of the file is the whole contract: align-to-next is a cache-driven
+    mode, so the UI disables the checkbox exactly when this returns False.
+    """
+    path = next_segment_av_latent_path(node_id, seg_index)
+    return path is not None and path.is_file()
+
+
+def load_next_segment_av_latent(node_id: str | None, seg_index: int) -> dict | None:
+    """Load the next segment's cached AV latent to pin into this segment's tail.
+
+    Unlike :func:`load_segment_av_latent` this reads a *neighbour's* cache and
+    deliberately skips fingerprint validation: the next segment's fingerprint
+    describes its own render, not ours, so validating it would disable
+    align-to-next whenever that neighbour happened to be rendered under any
+    other settings. Being a reference for someone else's handoff does not
+    require that neighbour to be reproducible by us.
+    """
+    path = next_segment_av_latent_path(node_id, seg_index)
+    if path is None or not path.is_file():
+        return None
+    idx = int(seg_index) + 1
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        log.warning(
+            "Failed to load next segment %d AV latent for align-to-next: %s",
+            idx + 1,
+            exc,
+        )
+        return None
+    if not isinstance(payload, dict) or "samples" not in payload:
+        return None
+    return payload
 
 
 def _fingerprint_matches(
@@ -448,7 +525,7 @@ def _fingerprint_matches(
     try:
         stored = json.loads(meta_path.read_text(encoding="utf-8"))
         expected = segment_cache_fingerprint(seg, plan)
-        if stored == expected:
+        if _fingerprint_compatible(stored, expected):
             return True
         if _reject_source_stale(stored, expected, seg_index=seg.index, quiet=True):
             return False
@@ -1253,7 +1330,7 @@ def resolve_segment_cache_path(
         expected = segment_cache_fingerprint(seg, plan)
         if meta_path.is_file():
             stored = json.loads(meta_path.read_text(encoding="utf-8"))
-            if stored != expected:
+            if not _fingerprint_compatible(stored, expected):
                 if _reject_source_stale(stored, expected, seg_index=idx):
                     return None
                 diff = _fingerprint_diff_keys(stored, expected)
@@ -1463,7 +1540,7 @@ def load_first_pass_cache(
     try:
         stored = json.loads(meta_path.read_text(encoding="utf-8"))
         expected = first_pass_cache_fingerprint(seg, plan)
-        if not isinstance(stored, dict) or stored != expected:
+        if not _fingerprint_compatible(stored, expected):
             if isinstance(stored, dict) and _reject_source_stale(
                 stored, expected, seg_index=idx, quiet=True,
             ):
@@ -1610,7 +1687,7 @@ def inspect_first_pass_cache(
                 read_error = str(exc)
 
         expected = first_pass_cache_fingerprint(seg, plan)
-        matches = bool(cache_exists and isinstance(stored, dict) and stored == expected)
+        matches = bool(cache_exists and _fingerprint_compatible(stored, expected))
         diff = (
             _fingerprint_diff_keys(stored, expected)
             if isinstance(stored, dict)

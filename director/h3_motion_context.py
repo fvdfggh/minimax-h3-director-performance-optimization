@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 
+from .frame_align import minimax_phase_aligned_export_frames
 from .h3_context_patches import (
     CTX_AUDIO_END_KEY,
     CTX_FRAME_KEY,
@@ -53,6 +54,59 @@ def snap_context_frames(raw: int | float | None) -> int:
     return int(chosen)
 
 
+def snap_tail_context_frames(raw: int | float | None, max_frames: int) -> int:
+    """Largest legal tail-pin length that fits the sample's spare tail capacity.
+
+    The tail pin lives in the frames the sample already wastes beyond the export
+    (``sample - head_pin - export``). Snapping with ``snap_context_frames``
+    would round 17 back up to 22 and push the pin into the exported region, so
+    the tail is clamped to whole latent steps at or under ``max_frames``
+    instead — the UI overlap is honoured whenever the grid allows it.
+    """
+    try:
+        want = int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+    try:
+        cap = int(max_frames or 0)
+    except (TypeError, ValueError):
+        return 0
+    if want <= 0 or cap <= 0:
+        return 0
+    limit = min(want, cap)
+    best = 0
+    for k in range(1, 65):
+        frames = pixel_frames_for_latent_t(k)
+        if frames > limit:
+            break
+        best = frames
+    return int(best)
+
+
+def resolve_tail_context_length(
+    latent: dict, export_frame_count: int, *, context_n: int
+) -> int:
+    """Frames of the next segment to pin into this segment's tail.
+
+    The pin lives in the frames the sample already generates-and-discards past
+    the export (``sample - head_pin - export``), so it costs no extra decode and
+    never touches the exported region. Returns 0 when the sample has no spare
+    tail capacity, which disables「对齐下段」rather than shortening the export.
+    """
+    try:
+        samples = latent["samples"]
+        latent_t = int(samples.shape[2])
+        sample_frames = pixel_frames_for_latent_t(latent_t)
+        export_frames = minimax_phase_aligned_export_frames(int(export_frame_count))
+        head_pin = snap_context_frames(context_n)
+        spare = sample_frames - export_frames - head_pin
+        if spare <= 0:
+            return 0
+        return int(snap_tail_context_frames(context_n, spare))
+    except Exception:  # never block a run on an optional alignment
+        return 0
+
+
 def recommended_context_frames(task_key: str | None = None) -> int:
     """Official Motion Context baseline (22) for all continuity tasks."""
     del task_key
@@ -76,6 +130,24 @@ def step_offsets(latent_t: int) -> list[int]:
     for k in range(int(latent_t)):
         out.append(acc)
         acc += FRAME_PER_TOKEN[k % 5]
+    return out
+
+
+def step_offsets_from(start_step: int, latent_t: int) -> list[int]:
+    """Pixel offsets of ``latent_t`` steps starting at ``start_step``.
+
+    ``step_offsets`` assumes a 0-phase start (step 0, where the first token
+    spans 1 frame). A tail pin sits at the end of the sample and can begin on
+    any step of the 5-cycle, so each step's span depends on the phase
+    ``start_step % 5``. Anchoring a pin at the wrong phase misplaces it by up
+    to 3 frames inside the VAE cycle and shows up as a torn seam.
+    """
+    start = int(start_step)
+    base = pixel_frames_for_latent_t(start)
+    out, acc = [], 0
+    for k in range(int(latent_t)):
+        out.append(base + acc)
+        acc += FRAME_PER_TOKEN[(start + k) % 5]
     return out
 
 
@@ -188,6 +260,38 @@ def _video_tail_blocks(
         )
     blocks = [video[:1, :, start + k : start + k + 1].clone() for k in range(steps)]
     return blocks, step_offsets(steps), covered, pin_end_px, gap
+
+
+def _video_head_blocks(
+    latent: dict,
+    n: int,
+) -> tuple[list[torch.Tensor], list[int], int]:
+    """Return ``(blocks, offsets, covered)`` for the first ``n`` frames.
+
+    Mirror of ``_video_tail_blocks``: used to pin the *next* segment's opening
+    into the current segment's tail so the join is forged from both sides.
+    Offsets are relative to the source clip; the caller re-maps them onto the
+    target sample timeline with ``step_offsets_from``.
+    """
+    video = video_from_latent(latent)
+    total = int(video.shape[2])
+    steps = steps_for_frames(n)
+    if steps is None:
+        raise ValueError(
+            f"Director continuity: {n} frames is not a whole number of latent steps "
+            f"(use {', '.join(str(x) for x in CONTEXT_FRAME_CHOICES)})."
+        )
+    if steps > total:
+        raise ValueError(
+            f"Director continuity: need {steps} latent steps, next segment has {total}."
+        )
+    covered = pixel_frames_for_latent_t(steps)
+    if covered != n:
+        raise RuntimeError(
+            f"Director continuity: {steps} steps cover {covered} frames, expected {n}."
+        )
+    blocks = [video[:1, :, k : k + 1].clone() for k in range(steps)]
+    return blocks, step_offsets(steps), covered
 
 
 def _audio_tail_from_latent(
@@ -308,8 +412,15 @@ def apply_motion_context(
     keep_existing_keyframes: bool = True,
     context_end_frame: int | None = None,
     audio_context_length: int | None = None,
+    tail_context_latent: dict | None = None,
+    tail_context_length: int | None = None,
 ) -> tuple[Any, int, int]:
     """Inject previous-segment motion (and optional audio) into conditioning.
+
+    ``tail_context_latent`` / ``tail_context_length`` pin the *next* segment's
+    opening into this segment's tail (align-to-next), mirroring the head pin.
+    Both pins coexist: the head is forged by the previous segment, the tail by
+    the next one, and only the middle is denoised.
 
     Returns ``(positive, trim_frames, prev_export_trim_tail)``.
 
@@ -436,6 +547,76 @@ def apply_motion_context(
         for p, blk in zip(offsets, blocks)
     ]
 
+    # --- align-to-next: pin the next segment's opening into this tail ---
+    # Both pins are "cond" rows flagged never-denoised, so the tail is restored
+    # every step exactly like the head. The caller trims head and tail, so the
+    # exported clip is only the freshly generated middle.
+    tail_span = 0
+    if tail_context_latent is not None and int(tail_context_length or 0) > 0:
+        try:
+            sample_steps = int(video.shape[2])
+            # Caller pre-snaps to the legal value that fits the sample's spare
+            # tail capacity (``snap_tail_context_frames``). Snapping here with
+            # ``snap_context_frames`` would round 17 back up to 22 and push the
+            # pin into the exported region.
+            tail_n = int(tail_context_length or 0)
+            head_steps = steps_for_frames(span)
+            tail_steps = steps_for_frames(tail_n)
+            if head_steps is None or tail_steps is None:
+                log.warning(
+                    "Director continuity: tail pin %df is not a whole number of "
+                    "latent steps; skipping align-to-next.",
+                    tail_n,
+                )
+            elif head_steps + tail_steps >= sample_steps:
+                log.warning(
+                    "Director continuity: head pin %d + tail pin %d steps do not "
+                    "fit in a %d-step sample; skipping align-to-next.",
+                    head_steps,
+                    tail_steps,
+                    sample_steps,
+                )
+            else:
+                tail_steps_val = int(tail_steps)
+                t_blocks, _t_src_offsets, t_covered = _video_head_blocks(
+                    tail_context_latent, tail_n
+                )
+                t_video = video_from_latent(tail_context_latent)
+                if (
+                    int(t_video.shape[3]) != int(video.shape[3])
+                    or int(t_video.shape[4]) != int(video.shape[4])
+                ):
+                    log.warning(
+                        "Director continuity: next segment latent is %dx%d but this "
+                        "segment is %dx%d; skipping align-to-next.",
+                        int(t_video.shape[4]) * 16,
+                        int(t_video.shape[3]) * 16,
+                        width,
+                        height,
+                    )
+                else:
+                    tail_start = sample_steps - tail_steps_val
+                    t_offsets = step_offsets_from(tail_start, tail_steps_val)
+                    ctx_keyframes.extend(
+                        {
+                            "resolved_frame_index": 0,
+                            CTX_FRAME_KEY: int(p),
+                            "latent": blk,
+                        }
+                        for p, blk in zip(t_offsets, t_blocks)
+                    )
+                    tail_span = int(t_covered)
+                    log.info(
+                        "Director continuity: pinned next-segment head %df "
+                        "(%d steps at sample step %d-%d) into this tail.",
+                        tail_span,
+                        tail_steps_val,
+                        tail_start,
+                        sample_steps - 1,
+                    )
+        except Exception as exc:  # never break a run for an optional alignment
+            log.warning("Director continuity: align-to-next unavailable (%s).", exc)
+
     merged = list(ctx_keyframes)
     if keep_existing_keyframes:
         for kf in _existing_keyframes(positive):
@@ -459,6 +640,11 @@ def apply_motion_context(
         "minimax_keyframes": merged,
         "minimax_frame_count": frame_count,
     }
+    if tail_span > 0:
+        # Caller trims this many frames off the decoded tail. Published on the
+        # conditioning so it always reflects what was actually pinned (a tail
+        # pin can be skipped for grid/resolution reasons).
+        values["minimax_tail_trim_frames"] = int(tail_span)
     out = node_helpers.conditioning_set_values(positive, values)
 
     context_audio = _usable_context_audio(context_audio)

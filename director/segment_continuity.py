@@ -160,6 +160,35 @@ def resolve_segment_continuity_from_prev(
     return _truthy_continuity_flag(raw)
 
 
+def resolve_segment_continuity_to_next(
+    seg_data: dict | None,
+    *,
+    segment_index: int,
+    segment_count: int = 0,
+) -> bool:
+    """Per-segment「对齐下段」flag (pin the next segment's opening into this tail).
+
+    Master「段间引导」must also be on (checked by ``is_continuity_active``).
+    Missing field defaults to False — unlike「引用上段」(default True), aligning
+    to the next segment is strictly opt-in: it is a cache-driven, middle-out
+    mode and only means something when that neighbour already holds an AV
+    latent. The last segment never pins (there is no next segment).
+    """
+    if int(segment_index) < 0:
+        return False
+    if segment_count and int(segment_index) >= int(segment_count) - 1:
+        return False
+    if not isinstance(seg_data, dict):
+        return False
+    if "continuityToNext" in seg_data:
+        raw = seg_data.get("continuityToNext")
+    elif "continuity_to_next" in seg_data:
+        raw = seg_data.get("continuity_to_next")
+    else:
+        return False
+    return _truthy_continuity_flag(raw)
+
+
 def timeline_row_for_index(timeline: dict | None, index: int) -> dict:
     """Best-effort segment/shot/group row from timeline for per-segment flags."""
     if not isinstance(timeline, dict) or int(index) < 0:

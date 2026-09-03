@@ -2413,6 +2413,37 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             contLabel.appendChild(contText);
             head.appendChild(contLabel);
         }
+        // 对齐下段 (align-to-next): pin this segment's tail to the next
+        // segment's opening. Cache-driven middle-out mode, so it only exists
+        // under「选择运行」, defaults to OFF, and is disabled when the next
+        // segment has no cached AV latent to align against.
+        if (masterCont && isVideo && editor.isRunSelectEnabled?.()) {
+            const nextLabel = document.createElement("label");
+            nextLabel.className = "bd-batch-continuity bd-batch-continuity-next";
+            const nextCb = document.createElement("input");
+            nextCb.type = "checkbox";
+            nextCb.className = "bd-batch-continuity-check";
+            const canAlign = !!editor.canAlignToNext?.(index);
+            nextCb.checked = canAlign && seg.continuityToNext === true;
+            nextCb.disabled = !canAlign;
+            nextLabel.title = canAlign
+                ? t("tooltip.segmentContinuityToNext")
+                : t("tooltip.segmentContinuityToNextNoCache");
+            nextCb.onchange = (e) => {
+                e.stopPropagation();
+                seg.continuityToNext = !!nextCb.checked;
+                editor.commit?.(false, { syncTimeline: true });
+                editor.flushTimelineSync?.();
+            };
+            nextCb.onclick = (e) => e.stopPropagation();
+            const nextText = document.createElement("span");
+            nextText.setAttribute("data-i18n", "batch.continuityToNext");
+            nextText.textContent = t("batch.continuityToNext");
+            nextLabel.appendChild(nextCb);
+            nextLabel.appendChild(nextText);
+            head.appendChild(nextLabel);
+            if (!canAlign) nextLabel.classList.add("bd-disabled");
+        }
         const meta = document.createElement("div");
         meta.className = "bd-batch-head-meta";
         if (isR2v) {

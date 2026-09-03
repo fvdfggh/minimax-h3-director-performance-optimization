@@ -672,6 +672,58 @@ async def minimax_segment_export_status(request):
         return web.json_response({"segments": [], "error": str(exc)}, status=400)
 
 
+async def minimax_align_to_next_status(request):
+    """Which segments may enable「对齐下段」(i.e. the next one holds an AV latent).
+
+    The frontend cannot derive this itself: under「选择运行」``plan.index`` is
+    the compact run order, so "the next segment" is not simply ``i + 1`` in the
+    card list. The plan is rebuilt here (same payload as the run) so the
+    backend's index semantics are the single source of truth.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    timeline_data = body.get("timeline_data") or ""
+    if isinstance(timeline_data, dict):
+        timeline_data = json.dumps(timeline_data, ensure_ascii=False)
+    try:
+        from .plan import build_director_plan
+        from .segment_cache import has_next_segment_av_latent
+        from .segment_continuity import is_continuity_active
+
+        plan = build_director_plan(
+            str(timeline_data),
+            global_task_type=str(body.get("task_type") or ""),
+            global_prompt=str(body.get("global_prompt") or ""),
+            total_frames=int(body.get("total_frames") or 124),
+            frame_rate=float(body.get("frame_rate") or 24.0),
+            width=int(body.get("width") or 864),
+            height=int(body.get("height") or 480),
+            ref_max_size=int(body.get("ref_max_size") or 864),
+        )
+        segments = list(getattr(plan, "segments", None) or [])
+        rows = []
+        for seg in segments:
+            rows.append(
+                {
+                    "index": int(seg.index),
+                    # Master「段间引导」must be on for the pin to mean anything.
+                    "continuity": bool(is_continuity_active(plan, seg)),
+                    "canAlignToNext": bool(has_next_segment_av_latent(node_id, seg.index)),
+                }
+            )
+        return web.json_response({"node_id": node_id, "segments": rows})
+    except Exception as exc:
+        log.warning("MiniMax H3 Director align-to-next status failed: %s", exc)
+        return web.json_response({"segments": [], "error": str(exc)}, status=400)
+
+
 async def minimax_segment_export(request):
     """Run a「分段导出」request against the cached segments.
 
@@ -786,6 +838,12 @@ def register_routes() -> bool:
         "POST",
         "/minimax/director/segment_export_status",
         minimax_segment_export_status,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/align_to_next_status",
+        minimax_align_to_next_status,
     )
     _register_route(
         routes,

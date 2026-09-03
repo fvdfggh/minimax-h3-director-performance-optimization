@@ -49,11 +49,13 @@ from .progress import report_director_finish, report_director_progress, report_d
 from .h3_motion_context import (
     DEFAULT_AUDIO_CONTEXT_FRAMES, apply_motion_context,
     generation_frame_budget, handoff_end_frame,
+    resolve_tail_context_length,
     snap_context_frames, trim_context_prefix, trim_export_tail,
     video_from_latent,
 )
 from .segment_cache import (
-    load_first_pass_cache, load_segment_audio, load_segment_av_latent,
+    load_first_pass_cache, load_next_segment_av_latent,
+    load_segment_audio, load_segment_av_latent,
     load_segment_handoff_meta, probe_segment_cache_shape,
     save_first_pass_cache, save_segment_cache, save_segment_clip,
 )
@@ -1257,6 +1259,32 @@ def execute_director_batch(
                     prev_end_frame = None
 
             pin_audio = audio_mode != AUDIO_MODE_MUTE and (prev_av is not None or prev_audio is not None)
+            # ------------------------------------------------------------------
+            # 对齐下段 (align-to-next): pin the next segment's opening into this
+            # segment's tail. Cache-driven middle-out mode — only runs when that
+            # neighbour already holds an AV latent, otherwise it silently no-ops.
+            # ------------------------------------------------------------------
+            tail_context_latent = None
+            tail_context_length = 0
+            if bool(getattr(seg, "continuity_to_next", False)):
+                tail_n = resolve_tail_context_length(
+                    latent, int(seg.frame_count), context_n=context_n
+                )
+                if tail_n > 0:
+                    next_latent = load_next_segment_av_latent(node_id, seg.index)
+                    if next_latent is None:
+                        log.info(
+                            "Seg #%d: 对齐下段 skipped — next segment has no cached AV latent.",
+                            seg.index + 1,
+                        )
+                    else:
+                        tail_context_latent = next_latent
+                        tail_context_length = tail_n
+                        log.info(
+                            "Seg #%d: 对齐下段 active — pinning next segment head %df.",
+                            seg.index + 1,
+                            tail_n,
+                        )
             positive, trim_frames, prev_export_trim = apply_motion_context(
                 positive, latent, vae=vae,
                 context_length=context_n,
@@ -1268,6 +1296,8 @@ def execute_director_batch(
                 keep_existing_keyframes=(seg.task_key == "fl2v"),
                 context_end_frame=prev_end_frame,
                 audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
+                tail_context_latent=tail_context_latent,
+                tail_context_length=tail_context_length,
             )
             if prev_export_trim > 0:
                 pending_prev_trim[seg.index] = int(prev_export_trim)

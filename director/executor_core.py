@@ -60,12 +60,14 @@ from .h3_motion_context import (
     apply_motion_context,
     generation_frame_budget,
     handoff_end_frame,
+    resolve_tail_context_length,
     snap_context_frames,
     trim_context_prefix,
     trim_export_tail,
 )
 from .segment_cache import (
     load_first_pass_cache,
+    load_next_segment_av_latent,
     load_segment_audio,
     load_segment_av_latent,
     load_segment_cache,
@@ -91,6 +93,21 @@ from .segment_continuity import (
 from .vram_cleanup import cleanup_segment_vram
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
+
+
+def _resolve_tail_context_length(latent, seg, *, context_n: int) -> int:
+    """Frames of the next segment to pin into this segment's tail.
+
+    Shared helper lives in :mod:`h3_motion_context` so the batch path computes
+    the identical value; this wrapper only logs segment context on failure.
+    """
+    n = resolve_tail_context_length(latent, int(seg.frame_count), context_n=context_n)
+    if n <= 0:
+        log.info(
+            "Seg #%d: 对齐下段 inactive — sample has no spare tail capacity.",
+            int(seg.index) + 1,
+        )
+    return n
 
 
 def _unpack_node_output(out):
@@ -682,6 +699,32 @@ def execute_director_plan_core(
                 audio_mode != AUDIO_MODE_MUTE
                 and (prev_av is not None or prev_audio is not None)
             )
+            # ------------------------------------------------------------------
+            # 对齐下段 (align-to-next): pin the next segment's opening into this
+            # segment's tail. Cache-driven middle-out mode — only runs when that
+            # neighbour already holds an AV latent, otherwise it silently no-ops.
+            # ------------------------------------------------------------------
+            tail_context_latent = None
+            tail_context_length = 0
+            if bool(getattr(seg, "continuity_to_next", False)):
+                tail_n = _resolve_tail_context_length(
+                    latent, seg, context_n=context_n
+                )
+                if tail_n > 0:
+                    next_latent = load_next_segment_av_latent(node_id, seg.index)
+                    if next_latent is None:
+                        log.info(
+                            "Seg #%d: 对齐下段 skipped — next segment has no cached AV latent.",
+                            seg.index + 1,
+                        )
+                    else:
+                        tail_context_latent = next_latent
+                        tail_context_length = tail_n
+                        log.info(
+                            "Seg #%d: 对齐下段 active — pinning next segment head %df.",
+                            seg.index + 1,
+                            tail_n,
+                        )
             positive, trim_frames, prev_export_trim = apply_motion_context(
                 positive,
                 latent,
@@ -699,6 +742,8 @@ def execute_director_plan_core(
                 keep_existing_keyframes=(seg.task_key == "fl2v"),
                 context_end_frame=prev_end_frame,
                 audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
+                tail_context_latent=tail_context_latent,
+                tail_context_length=tail_context_length,
             )
             # Phase-align can pin a few frames before the previous export end.
             # Drop that orphaned tail so concat does not replay it at the seam.

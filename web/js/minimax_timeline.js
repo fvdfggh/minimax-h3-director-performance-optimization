@@ -2244,6 +2244,8 @@ class MiniMaxH3DirectorEditor {
                         genImage: clean.genImage || { imageFile: "" },
                         // Persist per-segment「引用上段」(default true when unset).
                         continuityFromPrev: isSegmentContinuityFromPrev(clean, i),
+                        // 「对齐下段」is opt-in (default false) and cache-driven.
+                        continuityToNext: clean.continuityToNext === true,
                         refImageSize: resolveSegmentRefImageSize(clean, this.timeline.output),
                     };
                 }),
@@ -3573,6 +3575,74 @@ class MiniMaxH3DirectorEditor {
         return (this.timeline.runSelection || []).includes(index);
     }
 
+    // ---------------------------------------------------------------------
+    // 对齐下段 (align-to-next) availability
+    // ---------------------------------------------------------------------
+
+    /** Map of plan index -> canAlignToNext, refreshed from the backend. */
+    _alignToNextMap() {
+        return this._alignToNextCache || {};
+    }
+
+    /**
+     * Refresh which segments may enable「对齐下段」.
+     *
+     * Asked of the backend because under「选择运行」the plan index is the
+     * compact run order, so the frontend cannot infer "the next segment" from
+     * the card list. Best-effort: on failure every segment stays disabled.
+     */
+    async refreshAlignToNextStatus() {
+        if (!this.isRunSelectEnabled() || !this.supportsRunSelect()) {
+            this._alignToNextCache = {};
+            return;
+        }
+        const payload = {
+            node_id: String(this.node?.id ?? ""),
+            timeline_data: this.buildTimelinePayload(),
+            task_type: this.globalTask?.value || this.taskTypeWidget?.value || "",
+            global_prompt: this.timeline.global?.prompt || "",
+            total_frames: this.getTotalFrames(),
+            frame_rate: this.timeline.output?.frameRate || 24,
+            width: this.timeline.output?.width || 864,
+            height: this.timeline.output?.height || 480,
+            ref_max_size: this.refMaxWidget?.value || this.timeline.output?.longEdge || 864,
+        };
+        try {
+            const resp = await api.fetchApi("/minimax/director/align_to_next_status", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) throw new Error(String(resp.status));
+            const data = await resp.json();
+            const map = {};
+            (data?.segments || []).forEach((row) => {
+                map[row.index] = !!row.canAlignToNext && row.continuity !== false;
+            });
+            this._alignToNextCache = map;
+        } catch (e) {
+            this._alignToNextCache = {};
+        }
+        if (this.isImageBatch()) this.renderImageBatchGroups();
+        else this.scheduleRender();
+    }
+
+    /**
+     * Whether segment ``index`` may tick「对齐下段」: the next segment must hold
+     * a cached AV latent. Unticked by default — this is an opt-in, cache-driven
+     * middle-out mode.
+     */
+    canAlignToNext(index) {
+        if (!this.isRunSelectEnabled()) return false;
+        const seg = this.timeline.batch?.segments?.[index] ?? this.timeline.segments?.[index];
+        if (!seg) return false;
+        const n = this.getRunnableSegmentCount();
+        if (index >= n - 1) return false; // last segment has no next segment
+        const map = this._alignToNextMap();
+        if (index in map) return map[index];
+        return false; // unknown until the status call lands — stay disabled
+    }
+
     toggleSegmentRun(index) {
         if (!this.isRunSelectEnabled()) return;
         if (this.isFl2vMode()) {
@@ -3594,6 +3664,9 @@ class MiniMaxH3DirectorEditor {
     toggleRunSelectMode() {
         if (!this.supportsRunSelect()) return;
         this.timeline.runSelectEnabled = !this.timeline.runSelectEnabled;
+        //「对齐下段」only exists in this mode, so its availability is fetched
+        // here — that is also when the user asked "what can I tick?".
+        void this.refreshAlignToNextStatus();
         if (this.timeline.runSelectEnabled) {
             if (!(this.timeline.runSelection || []).length) {
                 if (this.isFl2vMode()) {
@@ -3754,6 +3827,10 @@ class MiniMaxH3DirectorEditor {
         const finish = (val) => {
             this._closeBdModal();
             if (val) this.resolveSegmentExport(val);
+            // Cancelling clears a leftover flag: the picker cannot be confirmed
+            // with zero segments (OK is disabled), so this is the only way back
+            // to "enabled" once it has been persisted.
+            else this._clearSegmentExportFlag();
         };
 
         // Mode — piecewise (one file per segment) or continuous (adjacent
@@ -3905,6 +3982,10 @@ class MiniMaxH3DirectorEditor {
         try {
             if (typeof app?.queuePrompt === "function") {
                 app.queuePrompt();
+                // Safe to clear now: the patched queuePrompt flushes every
+                // Director timeline synchronously *before* the prompt is built,
+                // so the backend has already read the flag.
+                this._clearSegmentExportFlag();
                 this._toast ? this._toast(t("segmentExport.queued")) : this._segExportToast(t("segmentExport.queued"));
             } else {
                 this._segExportToast(t("segmentExport.runToExport"));
@@ -3913,6 +3994,32 @@ class MiniMaxH3DirectorEditor {
             console.warn("[MiniMax] segment export queue prompt failed", e);
             this._segExportToast(t("segmentExport.runToExport"));
         }
+    }
+
+    /**
+     * Turn the persisted「分段导出」flag back off.
+     *
+     * Export is a one-shot action, but ``resolveSegmentExport`` stores
+     * ``enabled`` on ``timeline.output`` where it survives re-renders and page
+     * reloads. Left set, every later run exports instead of generating — the run
+     * silently becomes an export-only pass (no sampling, just a few seconds).
+     * Mode/indices are kept so the picker reopens with the last selection.
+     */
+    _clearSegmentExportFlag() {
+        const cfg = this.timeline.output?.segmentExport;
+        if (!cfg) return;
+        this.timeline.output.segmentExport = { ...cfg, enabled: false };
+        // Drop it from the in-memory timeline right away so the very next flush
+        // omits it, then persist after the current task so we cannot race the
+        // prompt build that is already in flight.
+        setTimeout(() => {
+            try {
+                this.commit(false, { syncTimeline: true });
+            } catch (e) {
+                /* best-effort */
+            }
+        }, 0);
+        this.scheduleRender();
     }
 
     /** Minimal inline toast so the picker gives feedback without other deps. */

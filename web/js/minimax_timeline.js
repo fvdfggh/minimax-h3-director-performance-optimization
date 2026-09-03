@@ -3606,7 +3606,7 @@ class MiniMaxH3DirectorEditor {
             width: this.timeline.output?.width || 864,
             height: this.timeline.output?.height || 480,
             ref_max_size: this.refMaxWidget?.value || this.timeline.output?.longEdge || 864,
-            workflow_name: getActiveWorkflowName() || "",
+            workflow_name: getStableWorkflowId(),
         };
         try {
             const resp = await api.fetchApi("/minimax/director/align_to_next_status", {
@@ -3797,7 +3797,7 @@ class MiniMaxH3DirectorEditor {
             width: this.timeline.output?.width || 864,
             height: this.timeline.output?.height || 480,
             ref_max_size: this.refMaxWidget?.value || this.timeline.output?.longEdge || 864,
-            workflow_name: getActiveWorkflowName() || "",
+            workflow_name: getStableWorkflowId(),
         };
         try {
             const resp = await api.fetchApi("/minimax/director/segment_export_status", {
@@ -3985,16 +3985,31 @@ class MiniMaxH3DirectorEditor {
         this.scheduleRender();
         // Push the Director node into ComfyUI's queue so the export runs with the
         // models loaded (latent-only segments need the VAE). The queuePrompt patch
-        // already flushes every Director's timeline before the prompt is built, so
+        // flushes every Director's timeline before the prompt is built, so
         // segmentExport reaches the backend. Best-effort: never throw in the picker.
         try {
             if (typeof app?.queuePrompt === "function") {
-                app.queuePrompt();
-                // Safe to clear now: the patched queuePrompt flushes every
-                // Director timeline synchronously *before* the prompt is built,
-                // so the backend has already read the flag.
-                this._clearSegmentExportFlag();
-                this._toast ? this._toast(t("segmentExport.queued")) : this._segExportToast(t("segmentExport.queued"));
+                // IMPORTANT: do NOT clear the one-shot `enabled` flag until the
+                // prompt has actually been built & queued. queuePrompt may be async
+                // (it awaits internal validation/prompt collection), so clearing
+                // synchronously right after the call races the prompt build and can
+                // reset `segmentExport.enabled` to false *before* the backend reads
+                // it — which is why exports silently produced nothing. Await the
+                // queue, then clear on the next tick so the prompt is already sent.
+                const queued = app.queuePrompt();
+                const clearAfter = () => {
+                    // Re-flush with the flag off so the in-memory timeline widget
+                    // reflects the cleared state for any subsequent run.
+                    this._clearSegmentExportFlag();
+                    this._toast ? this._toast(t("segmentExport.queued")) : this._segExportToast(t("segmentExport.queued"));
+                };
+                if (queued && typeof queued.then === "function") {
+                    queued.then(clearAfter, clearAfter);
+                } else {
+                    // Synchronous queue: defer clearing to a macrotask so the
+                    // synchronous prompt build in queuePrompt has fully completed.
+                    setTimeout(clearAfter, 0);
+                }
             } else {
                 this._segExportToast(t("segmentExport.runToExport"));
             }
@@ -4017,16 +4032,14 @@ class MiniMaxH3DirectorEditor {
         const cfg = this.timeline.output?.segmentExport;
         if (!cfg) return;
         this.timeline.output.segmentExport = { ...cfg, enabled: false };
-        // Drop it from the in-memory timeline right away so the very next flush
-        // omits it, then persist after the current task so we cannot race the
-        // prompt build that is already in flight.
-        setTimeout(() => {
-            try {
-                this.commit(false, { syncTimeline: true });
-            } catch (e) {
-                /* best-effort */
-            }
-        }, 0);
+        // Persist the cleared state into the timeline widget. This is only ever
+        // called *after* the export prompt has been queued (see resolveSegmentExport),
+        // so it can no longer race the prompt build.
+        try {
+            this.commit(false, { syncTimeline: true });
+        } catch (e) {
+            /* best-effort */
+        }
         this.scheduleRender();
     }
 
@@ -11494,25 +11507,43 @@ class MiniMaxH3DirectorEditor {
     }
 }
 
-/** Resolve the currently active workflow's display name for cache namespacing.
-
- * Modern ComfyUI exposes it on the workflow manager; fall back to the graph's
- * ``extra`` metadata (used by older versions). Empty string means "no workflow
- * namespace" — the server then falls back to the node-id-only directory.
+/** Resolve a stable, workflow-bound unique id for cache namespacing.
+ *
+ * Unlike the old display-name approach (which returned "" for unnamed/unsaved
+ * workflows and broke whenever the user renamed the file), this persists a UUID
+ * inside the graph's ``extra`` metadata. The id is generated once per workflow
+ * file, is stable across reloads and machines, and never depends on the user
+ * naming the workflow. Empty string is only returned if even the graph object
+ * is unavailable — the server then falls back to the node-id-only directory.
  */
-function getActiveWorkflowName() {
-    try {
-        const wfManager = app.workflowManager;
-        const wf = wfManager?.activeWorkflow;
-        const name = wf?.name || wf?.title || wf?.workflow_name;
-        if (name) return String(name);
-    } catch (_) { /* ignore */ }
+// Module-level fallback so a workflow id is ALWAYS non-empty. An empty id would
+// make the backend fall back to the node-id-only directory (e.g. `node_5/`) and
+// silently split the cache into an orphan folder that status checks / exports
+// never read — which is exactly what greyed-out「对齐下段」checkboxes and
+// "export produced nothing" came from.
+let _fallbackWorkflowId = null;
+function getStableWorkflowId() {
     try {
         const graph = app.graph ?? app.canvas?.graph;
-        const extraName = graph?.extra?.workflow?.name || graph?.extra?.ds?.workflow_name;
-        if (extraName) return String(extraName);
+        if (!graph) {
+            if (!_fallbackWorkflowId) {
+                _fallbackWorkflowId = ("wf-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+            }
+            return _fallbackWorkflowId;
+        }
+        if (!graph.extra) graph.extra = {};
+        let id = graph.extra.minimax_director_workflow_id;
+        if (!id) {
+            id = (crypto?.randomUUID?.() || ("wf-" + Date.now() + "-" + Math.random().toString(36).slice(2)));
+            graph.extra.minimax_director_workflow_id = id;
+            try { app.graph?.setDirty?.(); } catch (_) { /* ignore */ }
+        }
+        return String(id);
     } catch (_) { /* ignore */ }
-    return "";
+    if (!_fallbackWorkflowId) {
+        _fallbackWorkflowId = ("wf-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+    }
+    return _fallbackWorkflowId;
 }
 
 function findDirectorNode(nodeId) {
@@ -12095,6 +12126,14 @@ app.registerExtension({
             const graph = app.graph ?? app.canvas?.graph;
             for (const node of graph?._nodes ?? graph?.nodes ?? []) {
                 node._minimaxEditor?.flushTimelineSync?.();
+                // Keep the workflow id in the hidden `workflow_name` widget in sync
+                // on every queue. The backend cache layout is keyed on this id, so
+                // a stale/empty widget (e.g. after loading a saved workflow or
+                // clearing the cache) would otherwise write to the bare node_<id>/
+                // directory and make every「对齐下段」/「分段导出」checkbox grey out.
+                const wfName = getStableWorkflowId();
+                const w = (node.widgets || []).find((x) => x?.name === "workflow_name");
+                if (w && w.value !== wfName) w.value = wfName;
             }
         };
         if (app.queuePrompt && !app.queuePrompt._minimaxPatched) {
@@ -12248,11 +12287,12 @@ app.registerExtension({
             setTimeout(() => applyDirectorWidgetLabels(this), 0);
             this.size = [1000, 680];
 
-            // Backend cache layout is keyed on the workflow name: the conditioning
-            // and batch caches live under <workflow>/node_<id>. Sync that name into
-            // the hidden `workflow_name` widget so the server picks the right dir.
+            // Backend cache layout is keyed on a stable workflow id (a UUID persisted
+            // in the graph's extra metadata): the conditioning and batch caches live
+            // under <workflow_id>/node_<id>. Sync that id into the hidden
+            // `workflow_name` widget so the server picks the right dir.
             const syncWorkflowName = () => {
-                const wfName = getActiveWorkflowName();
+                const wfName = getStableWorkflowId();
                 const w = (this.widgets || []).find((x) => x?.name === "workflow_name");
                 if (w && w.value !== wfName) w.value = wfName;
             };
@@ -12270,7 +12310,7 @@ app.registerExtension({
             //                          re-render of every segment.
             const runClearCache = (clearAll) => {
                 const nodeId = String(this.id ?? "");
-                const wfName = getActiveWorkflowName();
+                const wfName = getStableWorkflowId();
                 const scope = clearAll ? "本节点的全部缓存" : "本节点的文本缓存与中间缓存";
                 const willDelete = clearAll
                     ? [

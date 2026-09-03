@@ -1106,6 +1106,7 @@ def _run_frame_counts(
     plan: DirectorPlan,
     run_segments: list,
     total_frames: int,
+    workflow_name: str | None = None,
 ) -> list[int]:
     """Per-segment frame counts of one「连续导出」run, read from the cache header.
 
@@ -1115,9 +1116,9 @@ def _run_frame_counts(
     """
     counts: list[int] = []
     for seg in run_segments:
-        shape = probe_segment_cache_shape(node_id, seg, plan)
+        shape = probe_segment_cache_shape(node_id, seg, plan, workflow_name=workflow_name)
         if shape is None:
-            shape = probe_segment_cache_shape(node_id, seg, plan, allow_stale=True)
+            shape = probe_segment_cache_shape(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
         counts.append(max(0, int(shape[0])) if shape else 0)
     probed = sum(counts)
     if probed == total_frames:
@@ -1253,9 +1254,10 @@ def run_segment_export(
     stitchable = [
         idx
         for idx in valid
-        if resolve_segment_cache_path(node_id, segments[idx], plan, allow_stale=True)
+        if resolve_segment_cache_path(node_id, segments[idx], plan, allow_stale=True, workflow_name=workflow_name)
         is not None
     ]
+    log.info("[DEBUG-EXPORT] valid=%s stitchable=%s runs=%s", valid, stitchable, continuous_export_runs(stitchable))
     for run in continuous_export_runs(stitchable):
         first, last = run[0], run[-1]
         if len(run) == 1:
@@ -1264,7 +1266,7 @@ def run_segment_export(
             continue
         run_segs = [segments[i] for i in run]
         try:
-            merged = concat_chunks_lazy(node_id, plan, run_segs)
+            merged = concat_chunks_lazy(node_id, plan, run_segs, workflow_name=workflow_name)
         except Exception as exc:  # pragma: no cover - defensive
             log.warning(
                 "分段导出 连续导出: stitching #%d–#%d failed (%s); "
@@ -1274,7 +1276,7 @@ def run_segment_export(
             for i in run:
                 _export_standalone(i)
             continue
-        counts = _run_frame_counts(node_id, plan, run_segs, int(merged.shape[0]))
+        counts = _run_frame_counts(node_id, plan, run_segs, int(merged.shape[0]), workflow_name=workflow_name)
         audio = merge_run_audio(plan, [_segment_audio(i) for i in run], counts)
         _export_one(
             segments[first],

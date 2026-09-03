@@ -1429,7 +1429,8 @@ def execute_director_plan_core(
     # fails on the very segment it just accepted. Passthrough fills come from
     # merge_overrides because they were never written to disk.
     combined = concat_chunks_lazy(
-        node_id, plan, export_segments, overrides=merge_overrides
+        node_id, plan, export_segments, overrides=merge_overrides,
+        workflow_name=workflow_name,
     )
     merge_overrides.clear()
     # Free all in-memory chunk lists — merge read from disk.

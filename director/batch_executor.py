@@ -1744,6 +1744,7 @@ def execute_director_batch(
                         plan,
                         [seg_by_index[i] for i in run],
                         overrides={i: frame_by_index[i] for i in run},
+                        workflow_name=workflow_name,
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     log.warning(
@@ -1807,14 +1808,16 @@ def execute_director_batch(
 
     # Streaming merge: one allocation for the result, one copy-in per segment.
     if seg_export_active:
-        # 分段导出: never stitch the checked segments into one video. The images
-        # output already carries each clip separately (segments layout above, runs
-        # for continuous); ``combined`` is just a placeholder because the split
-        # layout never reads it.
-        if segment_outputs:
-            # ``segment_outputs`` holds the real per-segment frames loaded for the
-            # images output; use its shape for the placeholder (``export_segments_list``
-            # is a list of SegmentPlan, not frames).
+        # Export-to-node-output: stitch the checked segments into one video and emit
+        # it directly on the node's output (same as a normal run), instead of a
+        # 1-frame placeholder + disk file. The user wants the result in the OUTPUT
+        # slot, not written to disk.
+        if export_segments_list:
+            combined = concat_chunks_lazy(
+                node_id, plan, export_segments_list, overrides=merge_overrides,
+                workflow_name=workflow_name,
+            )
+        elif segment_outputs:
             hh, ww, cc = segment_outputs[0].shape[1], segment_outputs[0].shape[2], segment_outputs[0].shape[3]
             combined = torch.zeros((1, hh, ww, cc), dtype=torch.float32)
         else:
@@ -1834,7 +1837,8 @@ def execute_director_batch(
         merge_overrides = None
     else:
         combined = concat_chunks_lazy(
-            node_id, plan, export_segments_list, overrides=merge_overrides
+            node_id, plan, export_segments_list, overrides=merge_overrides,
+            workflow_name=workflow_name,
         )
         merge_overrides = None
     # Batch mode has no refine pass (pre_chunk is chunk), so the「一采」merge is
@@ -1853,33 +1857,16 @@ def execute_director_batch(
             seg_export.mode,
             seg_export.indices,
         )
-    try:
-        if seg_export is not None and seg_export.enabled and seg_export.indices:
-            from .segment_cache import run_segment_export
-
-            seg_export_report = run_segment_export(
-                node_id,
-                plan,
-                list(seg_export.indices),
-                mode=seg_export.normalized_mode(),
-                vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None,
-                workflow_name=workflow_name,
-            )
-            log.info(
-                "分段导出 done: files=%d skipped=%d mode=%s",
-                len(seg_export_report.get("files") or []),
-                len(seg_export_report.get("skipped") or []),
-                seg_export.normalized_mode(),
-            )
-            for path in seg_export_report.get("files") or []:
-                reports.append(f"  分段导出 → {path}")
-            for sk in seg_export_report.get("skipped") or []:
-                reports.append(
-                    f"  分段导出 #{(int(sk.get('index', -1)) + 1)} skipped: {sk.get('reason')}"
-                )
-    except Exception as exc:  # pragma: no cover - defensive
-        log.warning("分段导出 failed in batch mode: %s", exc)
-        reports.append(f"  分段导出 failed: {exc}")
+    # Node-output-only export: the merged video is already on ``combined`` (see the
+    # seg_export_active branch above). We intentionally do NOT write files to disk —
+    # the user wants the result directly on the node's OUTPUT slot, same as a normal
+    # run. Disk export via run_segment_export is disabled on purpose.
+    if seg_export is not None and seg_export.enabled:
+        log.info(
+            "分段导出 -> 节点输出模式: mode=%s indices=%s (不写磁盘)",
+            seg_export.normalized_mode(),
+            seg_export.indices,
+        )
 
     # Scratch intermediates (seg_*_scratch_*.pt) live in the same flat node cache dir
     # as the durable segments and are cleaned via _clear_batch_cache / iter_scratch_files,

@@ -1651,6 +1651,7 @@ def concat_chunks_lazy(
     overrides: dict[int, torch.Tensor] | None = None,
     *,
     fill: float = 0.5,
+    workflow_name: str | None = None,
 ) -> torch.Tensor:
     """Streaming merge: allocate the result once, then copy each segment in.
 
@@ -1686,6 +1687,8 @@ def concat_chunks_lazy(
         raise ValueError("concat_chunks_lazy: no export_segments")
     overrides = dict(overrides or {})
     continuity = getattr(plan, "continuity_enabled", False)
+    if workflow_name is None:
+        workflow_name = getattr(plan, "workflow_name", None)
     window = _seam_window() if continuity else 0
 
     def _miss(seg, label: int) -> RuntimeError:
@@ -1698,9 +1701,9 @@ def concat_chunks_lazy(
         # pop so the override reference is released once merged.
         chunk = overrides.pop(int(seg.index), None)
         if chunk is None:
-            chunk = _load_seg(node_id, seg, plan)
+            chunk = _load_seg(node_id, seg, plan, workflow_name=workflow_name)
         if chunk is None:
-            chunk = _load_seg(node_id, seg, plan, allow_stale=True)
+            chunk = _load_seg(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
         if chunk is None:
             raise _miss(seg, label)
         return chunk.float()
@@ -1714,15 +1717,15 @@ def concat_chunks_lazy(
         if in_mem is not None:
             shapes.append(tuple(int(d) for d in in_mem.shape))
             continue
-        shape = _probe_seg(node_id, seg, plan)
+        shape = _probe_seg(node_id, seg, plan, workflow_name=workflow_name)
         if shape is None:
-            shape = _probe_seg(node_id, seg, plan, allow_stale=True)
+            shape = _probe_seg(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
         if shape is None:
             # Legacy / unreadable header: fall back to a full read, and keep the
             # pixels in ``overrides`` so pass 2 does not read them twice.
-            chunk = _load_seg(node_id, seg, plan)
+            chunk = _load_seg(node_id, seg, plan, workflow_name=workflow_name)
             if chunk is None:
-                chunk = _load_seg(node_id, seg, plan, allow_stale=True)
+                chunk = _load_seg(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
             if chunk is None:
                 raise _miss(seg, len(shapes))
             overrides[int(seg.index)] = chunk

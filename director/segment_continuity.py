@@ -340,6 +340,7 @@ def resolve_prev_segment_output(
     seg_index: int,
     completed: dict[int, torch.Tensor],
     node_id: str | None,
+    workflow_name: str | None = None,
 ) -> torch.Tensor | None:
     prev_idx = seg_index - 1
     if prev_idx < 0:
@@ -349,7 +350,7 @@ def resolve_prev_segment_output(
     prev_seg = all_segments[prev_idx]
     # Pipeline-stale is ok; a different source video is not (load_segment_cache
     # refuses source-stale even with allow_stale=True).
-    cached = load_segment_cache(node_id, prev_seg, plan, allow_stale=True)
+    cached = load_segment_cache(node_id, prev_seg, plan, allow_stale=True, workflow_name=workflow_name)
     if cached is not None:
         return cached
     if not plan.continuity_enabled:

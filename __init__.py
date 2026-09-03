@@ -15,6 +15,7 @@ from .nodes.director_groups import (
     MiniMaxH3DirectorGroupReferenceToVideo,
     MiniMaxH3DirectorGroupsCombine,
 )
+from .nodes.fast_video_vae_decode import MiniMaxH3FastVideoVAE
 
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3Director": MiniMaxH3Director,
@@ -28,6 +29,7 @@ NODE_CLASS_MAPPINGS = {
     # Must stay in NODE_CLASS_MAPPINGS: ComfyUI skips comfy_entrypoint when
     # NODE_CLASS_MAPPINGS is present (if/elif in load_custom_node).
     "MiniMaxH3DirectorGroupsCombine": MiniMaxH3DirectorGroupsCombine,
+    "MiniMaxH3FastVideoVAE": MiniMaxH3FastVideoVAE,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -39,6 +41,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3DirectorGroupImageToVideo": "MiniMax H3 Director Group (Image to Video)",
     "MiniMaxH3DirectorGroupReferenceToVideo": "MiniMax H3 Director Group (Reference to Video)",
     "MiniMaxH3DirectorGroupsCombine": "MiniMax H3 Director Groups Combine",
+    "MiniMaxH3FastVideoVAE": "MiniMax H3 Fast Video VAE",
 }
 
 WEB_DIRECTORY = "./web/js"

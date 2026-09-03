@@ -271,6 +271,7 @@ function cacheStatusPayload(director) {
         scheduler: String(directorValue(director, "scheduler", "")),
         shift_video: Number(directorValue(director, "shift_video", 12)),
         shift_audio: Number(directorValue(director, "shift_audio", 3)),
+        workflow_name: String(directorValue(director, "workflow_name", "")),
     };
 }
 

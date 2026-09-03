@@ -269,6 +269,7 @@ def execute_director_plan_core(
     plan: DirectorPlan,
     *,
     node_id: str | None = None,
+    workflow_name: str | None = None,
     model,
     vae,
     audio_vae,
@@ -309,7 +310,7 @@ def execute_director_plan_core(
 
     # Conditioning cache management
     if clear_conditioning_cache_on_run:
-        cleared = clear_conditioning_cache(node_id)
+        cleared = clear_conditioning_cache(node_id, workflow_name=workflow_name)
         if cleared > 0:
             reports_init = [f"Conditioning cache: cleared {cleared} files."]
         else:
@@ -328,7 +329,7 @@ def execute_director_plan_core(
     all_segments = plan.segments
     # Drop caches for deleted/shortened timelines. Use every segment index (not
     # run_indices): unselected「选择运行」slots still fill merge/export from disk.
-    prune_segment_cache(node_id, [seg.index for seg in all_segments])
+    prune_segment_cache(node_id, [seg.index for seg in all_segments], workflow_name=workflow_name)
     # Strictly honor「选择运行」— never force-sample unselected segments.
     run_indices = plan.run_indices if plan.run_indices is not None else frozenset(range(len(all_segments)))
 
@@ -439,7 +440,7 @@ def execute_director_plan_core(
         will_refine = refine_will_sample(plan, seg)
         confirm_first = confirm_first_pass_enabled(plan)
         pre_cache = (
-            load_first_pass_cache(node_id, seg, plan)
+            load_first_pass_cache(node_id, seg, plan, workflow_name=workflow_name)
             if confirm_first and will_refine
             else None
         )
@@ -503,7 +504,7 @@ def execute_director_plan_core(
                     "请先运行该段，或将其纳入「选择运行」。"
                 )
             prev_tail = resolve_prev_segment_output(
-                plan, all_segments, seg.index, completed_outputs, node_id
+                plan, all_segments, seg.index, completed_outputs, node_id, workflow_name=workflow_name
             )
             # Hydrate prev into completed_* so phase-align trim can rewrite
             # in-memory exports + disk cache even on「分段导出」/ partial re-run
@@ -514,21 +515,21 @@ def execute_director_plan_core(
             prev_av = completed_av_latents.get(prev_idx)
             if prev_av is None and prev_seg is not None:
                 prev_av = load_segment_av_latent(
-                    node_id, prev_seg, plan, allow_stale=True
+                    node_id, prev_seg, plan, allow_stale=True, workflow_name=workflow_name
                 )
                 if prev_av is not None:
                     completed_av_latents[prev_idx] = prev_av
             prev_handoff = completed_av_handoff.get(prev_idx)
             if prev_handoff is None and prev_seg is not None:
                 prev_handoff = load_segment_handoff_meta(
-                    node_id, prev_seg, plan, allow_stale=True
+                    node_id, prev_seg, plan, allow_stale=True, workflow_name=workflow_name
                 )
                 if prev_handoff is not None:
                     completed_av_handoff[prev_idx] = prev_handoff
             prev_audio = completed_audios.get(prev_idx)
             if prev_audio is None and prev_seg is not None:
                 prev_audio = load_segment_audio(
-                    node_id, prev_seg, plan, allow_stale=True
+                    node_id, prev_seg, plan, allow_stale=True, workflow_name=workflow_name
                 )
                 if prev_audio is not None:
                     completed_audios[prev_idx] = prev_audio
@@ -640,6 +641,7 @@ def execute_director_plan_core(
                 task_key=seg.task_key,
                 ref_image_size=resolve_ref_image_size(seg, plan),
                 ref_images=ref_images,
+                workflow_name=workflow_name,
             )
 
         if cached_conditioning is not None:
@@ -686,6 +688,7 @@ def execute_director_plan_core(
                     task_key=seg.task_key,
                     ref_image_size=resolve_ref_image_size(seg, plan),
                     ref_images=ref_images,
+                    workflow_name=workflow_name,
                 )
                 reports.append(
                     f"Seg #{seg.index + 1}: conditioning SAVED to cache"
@@ -711,7 +714,7 @@ def execute_director_plan_core(
                     latent, seg, context_n=context_n
                 )
                 if tail_n > 0:
-                    next_latent = load_next_segment_av_latent(node_id, seg.index)
+                    next_latent = load_next_segment_av_latent(node_id, seg.index, workflow_name=workflow_name)
                     if next_latent is None:
                         log.info(
                             "Seg #%d: 对齐下段 skipped — next segment has no cached AV latent.",
@@ -762,13 +765,13 @@ def execute_director_plan_core(
                     )
                     if prev_seg_lazy is not None:
                         prev_chunk = load_segment_cache(
-                            node_id, prev_seg_lazy, plan, allow_stale=True
+                            node_id, prev_seg_lazy, plan, allow_stale=True, workflow_name=workflow_name
                         )
                         if prev_chunk is not None:
                             completed_outputs[prev_idx] = prev_chunk
                             if prev_idx not in completed_audios:
                                 lazy_aud = load_segment_audio(
-                                    node_id, prev_seg_lazy, plan, allow_stale=True
+                                    node_id, prev_seg_lazy, plan, allow_stale=True, workflow_name=workflow_name
                                 )
                                 if lazy_aud is not None:
                                     completed_audios[prev_idx] = lazy_aud
@@ -833,6 +836,7 @@ def execute_director_plan_core(
                             handoff=prev_handoff,
                             audio=completed_audios.get(prev_idx),
                             replace_audio=False,
+                            workflow_name=workflow_name,
                         )
                         # Rewrite incremental mp4 so mid-run files match trimmed length.
                         if hold_after_first:
@@ -1036,6 +1040,7 @@ def execute_director_plan_core(
                     "sample_frames": int(sample_len),
                     "official_mc_length": False,
                 },
+                workflow_name=workflow_name,
             )
         pass_clips: list[tuple[str, torch.Tensor]] = []
 
@@ -1181,12 +1186,13 @@ def execute_director_plan_core(
             av_latent=samples,
             handoff=handoff,
             audio=audio_dict if isinstance(audio_dict, dict) else None,
+            workflow_name=workflow_name,
         )
         # Segment video-clip cache for「分段导出」. ``chunk`` is the trimmed export
         # clip exactly as the merge/exports use it, so the encoded file needs no
         # re-decode or re-trim. Best-effort: a failed encode must not abort gen.
         try:
-            save_segment_clip(node_id, seg, plan, chunk, audio=audio_dict)
+            save_segment_clip(node_id, seg, plan, chunk, audio=audio_dict, workflow_name=workflow_name)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("Segment %d clip cache skipped: %s", int(seg.index) + 1, exc)
         completed_outputs[seg.index] = chunk
@@ -1284,28 +1290,28 @@ def execute_director_plan_core(
 
         # Prefer exact cache; pipeline-stale disk render is ok. A different
         # source video is rejected so v2v/rv2v can passthrough the new clip.
-        cached = load_segment_cache(node_id, seg, plan)
+        cached = load_segment_cache(node_id, seg, plan, workflow_name=workflow_name)
         used_stale = False
         if cached is None:
-            cached = load_segment_cache(node_id, seg, plan, allow_stale=True)
+            cached = load_segment_cache(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
             used_stale = cached is not None
         if cached is not None:
             cached = cached.float()
             completed_outputs[seg.index] = cached
             completed_pre_refine[seg.index] = cached
             cached_audio = load_segment_audio(
-                node_id, seg, plan, allow_stale=used_stale
+                node_id, seg, plan, allow_stale=used_stale, workflow_name=workflow_name
             )
             if cached_audio is not None:
                 completed_audios[seg.index] = cached_audio
             # Continuity for later sampled segments may need AV latent / handoff.
             cached_av = load_segment_av_latent(
-                node_id, seg, plan, allow_stale=used_stale
+                node_id, seg, plan, allow_stale=used_stale, workflow_name=workflow_name
             )
             if cached_av is not None:
                 completed_av_latents[seg.index] = cached_av
             cached_handoff = load_segment_handoff_meta(
-                node_id, seg, plan, allow_stale=used_stale
+                node_id, seg, plan, allow_stale=used_stale, workflow_name=workflow_name
             )
             if cached_handoff is not None:
                 completed_av_handoff[seg.index] = cached_handoff

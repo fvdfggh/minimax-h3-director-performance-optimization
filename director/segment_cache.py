@@ -19,6 +19,7 @@ import torch
 
 import folder_paths
 
+from . import cache_layout
 from .h3_motion_context import CONTINUITY_PIPELINE_ID
 from .plan import DirectorPlan, SegmentPlan, resolve_ref_image_size
 
@@ -80,11 +81,14 @@ def _reject_source_stale(
     return True
 
 
-def _cache_root(node_id: str) -> Path | None:
+def _cache_root(node_id: str, workflow_name: str | None = None) -> Path | None:
+    """Per-node directory inside the unified Director cache root.
+
+    Segments sit alongside the encoding caches and batch scratch files, all told
+    apart by file-name prefix (see :mod:`cache_layout`).
+    """
     try:
-        root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
-        root.mkdir(parents=True, exist_ok=True)
-        return root
+        return cache_layout.node_cache_dir(str(node_id), workflow_name)
     except OSError as exc:
         log.warning("Segment cache dir unavailable (%s); cache disabled for this run.", exc)
         return None
@@ -247,6 +251,7 @@ def save_segment_cache(
     handoff: dict[str, Any] | None = None,
     audio: dict[str, Any] | None = None,
     replace_audio: bool = True,
+    workflow_name: str | None = None,
 ) -> None:
     """Persist a segment tensor (+ optional AV latent / export audio). Never raises.
 
@@ -258,16 +263,17 @@ def save_segment_cache(
     """
     if not node_id:
         return
-    root = _cache_root(node_id)
+    root = _cache_root(node_id, workflow_name)
     if root is None:
         return
     fp = segment_cache_fingerprint(seg, plan)
     idx = seg.index
-    pt_path = root / f"seg_{idx:04d}.pt"
-    meta_path = root / f"seg_{idx:04d}.meta.json"
-    latent_path = root / f"seg_{idx:04d}.av.pt"
-    handoff_path = root / f"seg_{idx:04d}.handoff.json"
-    audio_path = root / f"seg_{idx:04d}.audio.pt"
+    paths = cache_layout.segment_paths(root, idx)
+    pt_path = paths["frames"]
+    meta_path = paths["meta"]
+    latent_path = paths["latent"]
+    handoff_path = paths["handoff"]
+    audio_path = paths["audio"]
     try:
         payload = _frames_to_disk(tensor)
         _write_via_temp(pt_path, lambda p: torch.save(payload, p))
@@ -352,16 +358,17 @@ def load_segment_handoff_meta(
     plan: DirectorPlan,
     *,
     allow_stale: bool = False,
+    workflow_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Load trim/export handoff metadata (fingerprint must match unless ``allow_stale``)."""
     if not node_id:
         return None
-    root = _cache_root(node_id)
+    root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.meta.json"
-    handoff_path = root / f"seg_{idx:04d}.handoff.json"
+    meta_path = root / f"seg_{idx:04d}_meta.json"
+    handoff_path = root / f"seg_{idx:04d}_handoff.json"
     if not handoff_path.is_file():
         return None
     # A handoff can exist without its ``.meta.json`` (latent-only leftovers). With
@@ -418,16 +425,17 @@ def load_segment_av_latent(
     plan: DirectorPlan,
     *,
     allow_stale: bool = False,
+    workflow_name: str | None = None,
 ) -> dict | None:
     """Load cached AV latent for continuity handoff (fingerprint must match unless stale-ok)."""
     if not node_id:
         return None
-    root = _cache_root(node_id)
+    root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.meta.json"
-    latent_path = root / f"seg_{idx:04d}.av.pt"
+    meta_path = root / f"seg_{idx:04d}_meta.json"
+    latent_path = root / f"seg_{idx:04d}_latent.pt"
     if not latent_path.is_file():
         return None
     # A latent can exist without its ``.meta.json`` (e.g. a latent written by an
@@ -458,27 +466,27 @@ def load_segment_av_latent(
         return None
 
 
-def next_segment_av_latent_path(node_id: str | None, seg_index: int) -> Path | None:
+def next_segment_av_latent_path(node_id: str | None, seg_index: int, workflow_name: str | None = None) -> Path | None:
     """Cache path of the AV latent one segment after ``seg_index``."""
     if not node_id:
         return None
-    root = _cache_root(node_id)
+    root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
-    return root / f"seg_{int(seg_index) + 1:04d}.av.pt"
+    return root / f"seg_{int(seg_index) + 1:04d}_latent.pt"
 
 
-def has_next_segment_av_latent(node_id: str | None, seg_index: int) -> bool:
+def has_next_segment_av_latent(node_id: str | None, seg_index: int, workflow_name: str | None = None) -> bool:
     """Whether the next segment holds a cached AV latent for「对齐下段」.
 
     Presence of the file is the whole contract: align-to-next is a cache-driven
     mode, so the UI disables the checkbox exactly when this returns False.
     """
-    path = next_segment_av_latent_path(node_id, seg_index)
+    path = next_segment_av_latent_path(node_id, seg_index, workflow_name)
     return path is not None and path.is_file()
 
 
-def load_next_segment_av_latent(node_id: str | None, seg_index: int) -> dict | None:
+def load_next_segment_av_latent(node_id: str | None, seg_index: int, workflow_name: str | None = None) -> dict | None:
     """Load the next segment's cached AV latent to pin into this segment's tail.
 
     Unlike :func:`load_segment_av_latent` this reads a *neighbour's* cache and
@@ -488,7 +496,7 @@ def load_next_segment_av_latent(node_id: str | None, seg_index: int) -> dict | N
     other settings. Being a reference for someone else's handoff does not
     require that neighbour to be reproducible by us.
     """
-    path = next_segment_av_latent_path(node_id, seg_index)
+    path = next_segment_av_latent_path(node_id, seg_index, workflow_name)
     if path is None or not path.is_file():
         return None
     idx = int(seg_index) + 1
@@ -512,14 +520,15 @@ def _fingerprint_matches(
     plan: DirectorPlan,
     *,
     allow_stale: bool = False,
+    workflow_name: str | None = None,
 ) -> bool:
     if not node_id:
         return False
-    root = _cache_root(node_id)
+    root = _cache_root(node_id, workflow_name)
     if root is None:
         return False
-    meta_path = root / f"seg_{seg.index:04d}.meta.json"
-    tensor_path = root / f"seg_{seg.index:04d}.pt"
+    meta_path = root / f"seg_{seg.index:04d}_meta.json"
+    tensor_path = root / f"seg_{seg.index:04d}_frames.pt"
     if not meta_path.is_file():
         return False
     try:
@@ -546,19 +555,24 @@ def _fingerprint_matches(
 CLIP_CACHE_SUFFIX = "clip.mp4"
 
 
-def clip_cache_path(node_id: str | None, seg_index: int) -> Path | None:
-    """``.../minimax_seg_cache/<node>/seg_XXXX.clip.mp4`` (does not create dirs)."""
+def clip_cache_path(
+    node_id: str | None, seg_index: int, workflow_name: str | None = None
+) -> Path | None:
+    """``.../minimax_director_cache/<slug>/node_<id>/seg_XXXX_clip.mp4``.
+
+    Does not create dirs — callers only stat/unlink this.
+    """
     if not node_id:
         return None
     try:
-        root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+        root = cache_layout.node_cache_dir(str(node_id), workflow_name, create=False)
     except Exception:
         return None
-    return root / f"seg_{int(seg_index):04d}.{CLIP_CACHE_SUFFIX}"
+    return root / f"seg_{int(seg_index):04d}{cache_layout.CLIP_SUFFIX}"
 
 
-def has_segment_clip(node_id: str | None, seg_index: int) -> bool:
-    path = clip_cache_path(node_id, seg_index)
+def has_segment_clip(node_id: str | None, seg_index: int, workflow_name: str | None = None) -> bool:
+    path = clip_cache_path(node_id, seg_index, workflow_name=workflow_name)
     if path is None:
         return False
     try:
@@ -573,6 +587,8 @@ def save_segment_clip(
     plan: DirectorPlan,
     frames: torch.Tensor,
     audio: dict[str, Any] | None = None,
+    *,
+    workflow_name: str | None = None,
 ) -> str | None:
     """Encode ``frames`` into the clip cache. Never raises.
 
@@ -584,7 +600,7 @@ def save_segment_clip(
         return None
     if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
         return None
-    dest = clip_cache_path(node_id, int(seg.index))
+    dest = clip_cache_path(node_id, int(seg.index), workflow_name=workflow_name)
     if dest is None:
         return None
     try:
@@ -617,9 +633,9 @@ def save_segment_clip(
         return None
 
 
-def clear_segment_clip(node_id: str | None, seg_index: int) -> bool:
+def clear_segment_clip(node_id: str | None, seg_index: int, workflow_name: str | None = None) -> bool:
     """Drop one segment's clip so a stale file can never be exported."""
-    path = clip_cache_path(node_id, seg_index)
+    path = clip_cache_path(node_id, seg_index, workflow_name=workflow_name)
     if path is None:
         return False
     return _safe_unlink(path)
@@ -629,18 +645,20 @@ def segment_export_availability(
     node_id: str | None,
     seg: SegmentPlan,
     plan: DirectorPlan,
+    *,
+    workflow_name: str | None = None,
 ) -> dict[str, Any]:
     """What「分段导出」can use for one segment, without loading pixel data."""
     idx = int(seg.index)
-    has_clip = has_segment_clip(node_id, idx)
+    has_clip = has_segment_clip(node_id, idx, workflow_name=workflow_name)
     # ``allow_stale=True``: an export can still serve the last render after
     # harmless fingerprint churn (same policy as the merge fill).
-    fp_ok = _fingerprint_matches(node_id, seg, plan, allow_stale=True)
-    tensor_path = resolve_segment_cache_path(node_id, seg, plan, allow_stale=True)
+    fp_ok = _fingerprint_matches(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
+    tensor_path = resolve_segment_cache_path(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
     latent_path = None
-    root = _cache_root(node_id) if node_id else None
+    root = _cache_root(node_id, workflow_name) if node_id else None
     if root is not None:
-        candidate = root / f"seg_{idx:04d}.av.pt"
+        candidate = root / f"seg_{idx:04d}_latent.pt"
         if candidate.is_file():
             latent_path = candidate
     frames = fp_ok and tensor_path is not None
@@ -654,17 +672,19 @@ def segment_export_availability(
         # counts even if the fingerprint drifted: it is still this segment's
         # last render, which is exactly what the user asked to export.
         "exportable": bool(has_clip or frames or latent),
-        "stale": bool((frames or latent) and not _fingerprint_matches(node_id, seg, plan)),
+        "stale": bool((frames or latent) and not _fingerprint_matches(node_id, seg, plan, workflow_name=workflow_name)),
     }
 
 
 def inspect_segment_export_status(
     node_id: str | None,
     plan: DirectorPlan,
+    *,
+    workflow_name: str | None = None,
 ) -> dict[str, Any]:
     """Per-segment export availability for the「分段导出」picker."""
     segments = list(getattr(plan, "segments", None) or [])
-    rows = [segment_export_availability(node_id, seg, plan) for seg in segments]
+    rows = [segment_export_availability(node_id, seg, plan, workflow_name=workflow_name) for seg in segments]
     return {
         "node_id": str(node_id or ""),
         "segments": rows,
@@ -682,6 +702,7 @@ def _load_segment_export_source(
     plan: DirectorPlan,
     *,
     vae: Any = None,
+    workflow_name: str | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any] | None] | None:
     """Frames + audio for one segment's export, or None if no frame source exists.
 
@@ -696,14 +717,14 @@ def _load_segment_export_source(
     with only a clip is still exportable without any ffmpeg/cv2 read.
     """
     # 1) raw frame cache (fastest, lossless)
-    frames = load_segment_cache(node_id, seg, plan, allow_stale=True)
+    frames = load_segment_cache(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
     if frames is not None:
-        audio = load_segment_audio(node_id, seg, plan, allow_stale=True)
+        audio = load_segment_audio(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
         return frames.float(), (audio if isinstance(audio, dict) else None)
 
     # 2) latent → decode (requires a VAE; supplied by the caller)
     if vae is not None:
-        decoded = _decode_latent_to_frames(node_id, seg, plan, vae)
+        decoded = _decode_latent_to_frames(node_id, seg, plan, vae, workflow_name=workflow_name)
         if decoded is not None:
             return decoded
 
@@ -715,6 +736,8 @@ def _decode_latent_to_frames(
     seg: SegmentPlan,
     plan: DirectorPlan,
     vae: Any,
+    *,
+    workflow_name: str | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any] | None] | None:
     """Decode the cached AV latent (the「仅有 latent 缓存」export path).
 
@@ -728,7 +751,7 @@ def _decode_latent_to_frames(
             int(seg.index) + 1,
         )
         return None
-    latent = load_segment_av_latent(node_id, seg, plan, allow_stale=True)
+    latent = load_segment_av_latent(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
     if not isinstance(latent, dict) or "samples" not in latent:
         log.warning(
             "Segment %d latent decode skipped: no AV latent cache (.av.pt) present.",
@@ -773,7 +796,7 @@ def _decode_latent_to_frames(
         # without this trim a「连续导出」merge of two segments would grow to
         # 158+158 frames instead of 120+120 — the "two 5s became 13s" symptom.
         images, audio = _trim_decoded_for_export(
-            node_id, seg, plan, images, audio,
+            node_id, seg, plan, images, audio, workflow_name=workflow_name,
         )
         # Segmented exports decode many segments in sequence. Drop the GPU decode
         # intermediates (separated video/audio latent, the GPU-moved latent dict)
@@ -820,7 +843,7 @@ def _expected_export_frames(plan, seg, fallback_n=0):
     return int(ctx), int(export_len)
 
 
-def _trim_decoded_for_export(node_id, seg, plan, images, audio):
+def _trim_decoded_for_export(node_id, seg, plan, images, audio, workflow_name=None):
     """Trim decoded (latent) frames + audio to the segment's export length.
 
     Prefers the persisted handoff (``trim_frames``/``export_frames``) which is
@@ -830,7 +853,7 @@ def _trim_decoded_for_export(node_id, seg, plan, images, audio):
     from .h3_motion_context import trim_context_prefix
 
     fps = float(getattr(plan, "frame_rate", 0) or 24)
-    handoff = load_segment_handoff_meta(node_id, seg, plan, allow_stale=True) or {}
+    handoff = load_segment_handoff_meta(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name) or {}
     try:
         trim_frames = int(handoff.get("trim_frames") or 0)
     except Exception:
@@ -925,6 +948,7 @@ def predecode_latent_segments(
     plan: DirectorPlan,
     indices: list[int],
     vae: Any = None,
+    workflow_name: str | None = None,
 ) -> dict[str, Any]:
     """Unified decode for「分段导出」: decode every checked segment that has only
     a latent (no ``seg_XXXX.pt`` frame cache) **once**, then write the decoded
@@ -951,7 +975,7 @@ def predecode_latent_segments(
         # A segment with a correctly-trimmed frame cache is authoritative — reuse
         # it, never re-decode. Only latent-only leftovers (no frame cache) need the
         # VAE; a leftover *untrimmed* frame cache (wrong frame count) is re-decoded.
-        cached = load_segment_cache(node_id, seg, plan, allow_stale=True)
+        cached = load_segment_cache(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
         if cached is not None:
             expected_trim, expected_export = _expected_export_frames(plan, seg)
             cached_n = int(cached.shape[0])
@@ -963,15 +987,15 @@ def predecode_latent_segments(
                 idx + 1, cached_n, expected_export,
             )
         # Only decode when a latent actually exists.
-        latent = load_segment_av_latent(node_id, seg, plan, allow_stale=True)
+        latent = load_segment_av_latent(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
         if latent is None:
             continue
-        result = _decode_latent_to_frames(node_id, seg, plan, vae)
+        result = _decode_latent_to_frames(node_id, seg, plan, vae, workflow_name=workflow_name)
         if result is None:
             failed.append((idx, "latent decode failed"))
             continue
         frames, audio = result
-        handoff = load_segment_handoff_meta(node_id, seg, plan, allow_stale=True) or {}
+        handoff = load_segment_handoff_meta(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name) or {}
         if not handoff:
             # Rebuild the boundary from the node's own parameters (matches Phase 2)
             # so it persists exactly.
@@ -992,6 +1016,7 @@ def predecode_latent_segments(
             av_latent=latent,
             handoff=handoff,
             audio=audio if isinstance(audio, dict) else None,
+            workflow_name=workflow_name,
         )
         decoded.append(idx)
         log.info(
@@ -1121,6 +1146,7 @@ def run_segment_export(
     mode: str = "piecewise",
     vae: Any = None,
     out_dir: str | None = None,
+    workflow_name: str | None = None,
 ) -> dict[str, Any]:
     """Execute a「分段导出」request.
 
@@ -1149,7 +1175,7 @@ def run_segment_export(
     # Unified decode first: any checked segment that has only a latent (no frames)
     # is decoded once and written back to the frame cache, so the exports below
     # read frames directly instead of re-decoding per consumer.
-    pre = predecode_latent_segments(node_id, plan, valid, vae=vae)
+    pre = predecode_latent_segments(node_id, plan, valid, vae=vae, workflow_name=workflow_name)
     if pre["decoded"]:
         log.info(
             "分段导出 predecode: unified-decoded %d latent-only segment(s) before export.",
@@ -1178,7 +1204,7 @@ def run_segment_export(
 
     def _export_clip_copy(idx: int) -> None:
         """Copy the encoded clip cache verbatim — no re-decode, no re-encode."""
-        clip = clip_cache_path(node_id, idx)
+        clip = clip_cache_path(node_id, idx, workflow_name=workflow_name)
         if clip is not None and clip.is_file() and clip.stat().st_size > 0:
             try:
                 stamp = uuid.uuid4().hex[:6]
@@ -1194,7 +1220,7 @@ def run_segment_export(
 
     def _export_standalone(idx: int) -> None:
         """Export one segment on its own: frames → latent decode → clip copy."""
-        source = _load_segment_export_source(node_id, segments[idx], plan, vae=vae)
+        source = _load_segment_export_source(node_id, segments[idx], plan, vae=vae, workflow_name=workflow_name)
         if source is None:
             # No frame source (no .pt, no latent). Fall back to copying the
             # encoded clip cache (seg_XXXX.clip.mp4) verbatim — no re-decode,
@@ -1204,7 +1230,7 @@ def run_segment_export(
         _export_one(segments[idx], source[0], source[1], tag=f"seg_{idx + 1:02d}")
 
     def _segment_audio(idx: int) -> dict[str, Any] | None:
-        audio = load_segment_audio(node_id, segments[idx], plan, allow_stale=True)
+        audio = load_segment_audio(node_id, segments[idx], plan, allow_stale=True, workflow_name=workflow_name)
         return audio if isinstance(audio, dict) else None
 
     if normalized != "continuous":
@@ -1308,6 +1334,7 @@ def resolve_segment_cache_path(
     plan: DirectorPlan,
     *,
     allow_stale: bool = False,
+    workflow_name: str | None = None,
 ) -> Path | None:
     """Validate a segment's disk cache and return its tensor path (no pixels read).
 
@@ -1318,12 +1345,12 @@ def resolve_segment_cache_path(
     """
     if not node_id:
         return None
-    root = _cache_root(node_id)
+    root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.meta.json"
-    tensor_path = root / f"seg_{idx:04d}.pt"
+    meta_path = root / f"seg_{idx:04d}_meta.json"
+    tensor_path = root / f"seg_{idx:04d}_frames.pt"
     if not tensor_path.is_file():
         return None
     try:
@@ -1369,6 +1396,7 @@ def probe_segment_cache_shape(
     plan: DirectorPlan,
     *,
     allow_stale: bool = False,
+    workflow_name: str | None = None,
 ) -> tuple[int, int, int, int] | None:
     """``(F, H, W, C)`` of the cached clip, reading only the file header.
 
@@ -1376,7 +1404,7 @@ def probe_segment_cache_shape(
     them. Returns ``None`` when the cache is unusable (same policy as
     :func:`load_segment_cache`) or the shape cannot be read cheaply.
     """
-    path = resolve_segment_cache_path(node_id, seg, plan, allow_stale=allow_stale)
+    path = resolve_segment_cache_path(node_id, seg, plan, allow_stale=allow_stale, workflow_name=workflow_name)
     if path is None:
         return None
     try:
@@ -1409,6 +1437,7 @@ def load_segment_cache(
     plan: DirectorPlan,
     *,
     allow_stale: bool = False,
+    workflow_name: str | None = None,
 ) -> torch.Tensor | None:
     """Load cached segment frames.
 
@@ -1419,7 +1448,7 @@ def load_segment_cache(
     the current clip (v2v/rv2v) or skip (gen timelines).
     """
     tensor_path = resolve_segment_cache_path(
-        node_id, seg, plan, allow_stale=allow_stale
+        node_id, seg, plan, allow_stale=allow_stale, workflow_name=workflow_name
     )
     if tensor_path is None:
         return None
@@ -1438,16 +1467,17 @@ def load_segment_audio(
     plan: DirectorPlan,
     *,
     allow_stale: bool = False,
+    workflow_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Load cached export audio for a segment (same fingerprint policy as video)."""
     if not node_id or not _fingerprint_matches(
-        node_id, seg, plan, allow_stale=allow_stale
+        node_id, seg, plan, allow_stale=allow_stale, workflow_name=workflow_name
     ):
         return None
-    root = _cache_root(node_id)
+    root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
-    audio_path = root / f"seg_{seg.index:04d}.audio.pt"
+    audio_path = root / f"seg_{seg.index:04d}_audio.pt"
     if not audio_path.is_file():
         return None
     try:
@@ -1472,21 +1502,22 @@ def save_first_pass_cache(
     av_latent: dict | None = None,
     frames: torch.Tensor | None = None,
     handoff: dict[str, Any] | None = None,
+    workflow_name: str | None = None,
 ) -> None:
     """Persist first-pass AV latent for confirm-then-refine. Never raises."""
     if not node_id:
         return
     if av_latent is None or not isinstance(av_latent, dict) or "samples" not in av_latent:
         return
-    root = _cache_root(node_id)
+    root = _cache_root(node_id, workflow_name)
     if root is None:
         return
     fp = first_pass_cache_fingerprint(seg, plan)
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.pre.meta.json"
-    latent_path = root / f"seg_{idx:04d}.pre.av.pt"
-    frames_path = root / f"seg_{idx:04d}.pre.pt"
-    handoff_path = root / f"seg_{idx:04d}.pre.handoff.json"
+    meta_path = root / f"seg_{idx:04d}_pre_meta.json"
+    latent_path = root / f"seg_{idx:04d}_pre_latent.pt"
+    frames_path = root / f"seg_{idx:04d}_pre_frames.pt"
+    handoff_path = root / f"seg_{idx:04d}_pre_handoff.json"
     try:
         cpu_latent = _av_latent_to_cpu(av_latent)
         _write_via_temp(latent_path, lambda p: torch.save(cpu_latent, p))
@@ -1523,18 +1554,20 @@ def load_first_pass_cache(
     node_id: str | None,
     seg: SegmentPlan,
     plan: DirectorPlan,
+    *,
+    workflow_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Load first-pass cache only on exact fingerprint match. Never stale."""
     if not node_id:
         return None
-    root = _cache_root(node_id)
+    root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}.pre.meta.json"
-    latent_path = root / f"seg_{idx:04d}.pre.av.pt"
-    frames_path = root / f"seg_{idx:04d}.pre.pt"
-    handoff_path = root / f"seg_{idx:04d}.pre.handoff.json"
+    meta_path = root / f"seg_{idx:04d}_pre_meta.json"
+    latent_path = root / f"seg_{idx:04d}_pre_latent.pt"
+    frames_path = root / f"seg_{idx:04d}_pre_frames.pt"
+    handoff_path = root / f"seg_{idx:04d}_pre_handoff.json"
     if not meta_path.is_file() or not latent_path.is_file():
         return None
     try:
@@ -1577,11 +1610,16 @@ def load_first_pass_cache(
         return None
 
 
-_SEG_CACHE_FILE_RE = re.compile(r"^seg_(\d+)\.")
+#: Matches durable per-segment artefacts (``seg_0000_latent.pt``,
+#: ``seg_0000_pre_frames.pt``, ...) while excluding per-run scratch
+#: (``seg_0000_scratch_cond.pt``), which has its own lifecycle.
+_SEG_CACHE_FILE_RE = re.compile(r"^seg_(\d+)_(?!scratch)")
 
 
-def prune_segment_cache(node_id: str | None, valid_indices) -> None:
-    """Remove ``seg_XXXX.*`` files whose index is no longer on the timeline.
+def prune_segment_cache(
+    node_id: str | None, valid_indices, workflow_name: str | None = None
+) -> None:
+    """Remove ``seg_XXXX_*`` files whose index is no longer on the timeline.
 
     Does not create the cache dir. Uses all current segment indices (not
     「选择运行」), so unselected slots keep merge/export fill. Never raises.
@@ -1589,7 +1627,7 @@ def prune_segment_cache(node_id: str | None, valid_indices) -> None:
     if not node_id:
         return
     try:
-        root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+        root = cache_layout.node_cache_dir(str(node_id), workflow_name, create=False)
         if not root.is_dir():
             return
         valid = {int(i) for i in valid_indices}
@@ -1610,7 +1648,9 @@ def prune_segment_cache(node_id: str | None, valid_indices) -> None:
         log.debug("Segment cache prune skipped (%s).", exc)
 
 
-def first_pass_cache_disk_signature(node_id: str | None) -> str:
+def first_pass_cache_disk_signature(
+    node_id: str | None, workflow_name: str | None = None
+) -> str:
     """Fingerprint confirm-first-pass ``*.pre.*`` files without creating the cache dir.
 
     Director ``IS_CHANGED`` cannot see the linked Refine pack (ComfyUI only
@@ -1619,12 +1659,12 @@ def first_pass_cache_disk_signature(node_id: str | None) -> str:
     """
     if not node_id:
         return ""
-    root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+    root = cache_layout.node_cache_dir(str(node_id), workflow_name, create=False)
     if not root.is_dir():
         return ""
     parts: list[str] = []
     try:
-        for path in sorted(root.glob("seg_*.pre.*")):
+        for path in sorted(root.glob("seg_*_pre_*")):
             try:
                 st = path.stat()
             except OSError:
@@ -1638,6 +1678,7 @@ def first_pass_cache_disk_signature(node_id: str | None) -> str:
 def inspect_first_pass_cache(
     node_id: str | None,
     plan: DirectorPlan,
+    workflow_name: str | None = None,
 ) -> dict[str, Any]:
     """Inspect first-pass cache files without loading their tensor payloads."""
     current_seed = int(getattr(plan, "sample_seed", 0) or 0)
@@ -1655,7 +1696,7 @@ def inspect_first_pass_cache(
     if not node_id:
         return result
 
-    root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+    root = cache_layout.node_cache_dir(str(node_id), workflow_name, create=False)
     all_segments = list(getattr(plan, "segments", None) or [])
     run_indices = getattr(plan, "run_indices", None)
     if run_indices is None:

@@ -516,14 +516,19 @@ async def minimax_detect_shots(request):
 
 
 async def minimax_clear_cache(request):
-    """Clear the per-node cache directories for the given Director node.
+    """Clear the per-node cache for the given Director node.
 
-    Default clears the transient caches: conditioning (``minimax_conditioning_cache/...``)
-    and batch scratch (``minimax_batch_cache/...``) for this workflow + node.
+    The Director now stores every cache kind (text/image/video conditioning,
+    batch scratch intermediates, and durable segment frames / latents / audio /
+    clips) in ONE flat directory: ``minimax_director_cache/<workflow_slug>/node_<id>/``.
 
-    With ``clear_all=true`` it additionally wipes this node's durable segment
-    cache (``minimax_seg_cache/<node_id>/``) — every rendered frame / AV latent /
-    audio / clip. That forces a full re-render on the next run.
+    Default clears only the transient data in that dir: text/image/video
+    conditioning files and the per-run batch scratch intermediates
+    (``seg_*_scratch_*.pt``). The durable rendered segments are kept.
+
+    With ``clear_all=true`` it additionally wipes every durable ``seg_*`` file —
+    every rendered frame / AV latent / audio / clip — forcing a full re-render on
+    the next run.
 
     ``workflow_name`` is resolved to the same slug the cache layer uses, so the
     button always hits exactly the directory that holds this workflow's data.
@@ -537,19 +542,16 @@ async def minimax_clear_cache(request):
     if not re.fullmatch(r"\d+", node_id):
         return web.Response(status=400, text="Invalid Director node id.")
 
-    from .conditioning_cache import (
-        clear_conditioning_cache,
-        slugify_workflow_name,
-    )
+    from .conditioning_cache import clear_conditioning_cache
+    from . import cache_layout
 
     workflow_name = str(body.get("workflow_name") or "").strip() or None
-    slug = slugify_workflow_name(workflow_name)
-
-    from folder_paths import get_output_directory
-
-    out_root = get_output_directory()
     clear_all = bool(body.get("clear_all"))
     cleared = {"conditioning": 0, "batch": 0, "segments": 0}
+
+    cache_dir = cache_layout.node_cache_dir(node_id, workflow_name, create=False)
+
+    # 1) text/image/video conditioning files (always cleared)
     try:
         cleared["conditioning"] = await asyncio.to_thread(
             clear_conditioning_cache,
@@ -559,33 +561,25 @@ async def minimax_clear_cache(request):
     except Exception as exc:
         log.warning("MiniMax H3 Director clear conditioning cache failed: %s", exc)
 
-    batch_dir = os.path.join(out_root, "minimax_batch_cache")
-    if slug:
-        batch_dir = os.path.join(batch_dir, slug)
-    batch_dir = os.path.join(batch_dir, f"node_{node_id}")
-    try:
-        if os.path.isdir(batch_dir):
-            shutil.rmtree(batch_dir, ignore_errors=True)
-            if os.path.isdir(batch_dir):
-                log.warning("Could not fully remove batch cache %s", batch_dir)
-            else:
-                cleared["batch"] = 1
-    except Exception as exc:
-        log.warning("MiniMax H3 Director clear batch cache failed: %s", exc)
+    # 2) per-run batch scratch intermediates (always cleared via _scratch_ marker)
+    if cache_dir.is_dir():
+        for path in cache_layout.iter_scratch_files(cache_dir):
+            try:
+                path.unlink()
+                cleared["batch"] += 1
+            except OSError as exc:
+                log.warning("MiniMax H3 Director clear scratch %s failed: %s", path, exc)
 
-    # clear_all → also wipe this node's durable segment cache so the next run
-    # must re-render every segment (frames / AV latent / audio / clip).
-    if clear_all:
-        seg_dir = os.path.join(out_root, "minimax_seg_cache", node_id)
-        try:
-            if os.path.isdir(seg_dir):
-                shutil.rmtree(seg_dir, ignore_errors=True)
-                if os.path.isdir(seg_dir):
-                    log.warning("Could not fully remove segment cache %s", seg_dir)
-                else:
-                    cleared["segments"] = 1
-        except Exception as exc:
-            log.warning("MiniMax H3 Director clear segment cache failed: %s", exc)
+    # 3) clear_all → also wipe durable segment files so the next run must re-render
+    if clear_all and cache_dir.is_dir():
+        for path in list(cache_dir.glob("seg_*")):
+            if not path.is_file():
+                continue
+            try:
+                path.unlink()
+                cleared["segments"] += 1
+            except OSError as exc:
+                log.warning("MiniMax H3 Director clear segment %s failed: %s", path, exc)
 
     log.info(
         "MiniMax H3 Director cleared caches for node %s (workflow '%s', clear_all=%s): %s",
@@ -629,7 +623,8 @@ async def minimax_first_pass_cache_status(request):
         plan.sample_scheduler = str(body.get("scheduler") or "")
         plan.sample_shift_video = float(body.get("shift_video") or 12.0)
         plan.sample_shift_audio = float(body.get("shift_audio") or 3.0)
-        return web.json_response(inspect_first_pass_cache(node_id, plan))
+        workflow_name = str(body.get("workflow_name") or "").strip() or None
+        return web.json_response(inspect_first_pass_cache(node_id, plan, workflow_name=workflow_name))
     except Exception as exc:
         log.warning("MiniMax H3 Director first-pass cache inspection failed: %s", exc)
         return web.json_response(
@@ -656,6 +651,8 @@ async def minimax_segment_export_status(request):
         from .plan import build_director_plan
         from .segment_cache import inspect_segment_export_status
 
+        workflow_name = str(body.get("workflow_name") or "").strip() or None
+
         plan = build_director_plan(
             str(timeline_data),
             global_task_type=str(body.get("task_type") or ""),
@@ -666,7 +663,7 @@ async def minimax_segment_export_status(request):
             height=int(body.get("height") or 480),
             ref_max_size=int(body.get("ref_max_size") or 864),
         )
-        return web.json_response(inspect_segment_export_status(node_id, plan))
+        return web.json_response(inspect_segment_export_status(node_id, plan, workflow_name=workflow_name))
     except Exception as exc:
         log.warning("MiniMax H3 Director segment-export status failed: %s", exc)
         return web.json_response({"segments": [], "error": str(exc)}, status=400)
@@ -697,6 +694,8 @@ async def minimax_align_to_next_status(request):
         from .segment_cache import has_next_segment_av_latent
         from .segment_continuity import is_continuity_active
 
+        workflow_name = str(body.get("workflow_name") or "").strip() or None
+
         plan = build_director_plan(
             str(timeline_data),
             global_task_type=str(body.get("task_type") or ""),
@@ -708,6 +707,25 @@ async def minimax_align_to_next_status(request):
             ref_max_size=int(body.get("ref_max_size") or 864),
         )
         segments = list(getattr(plan, "segments", None) or [])
+        if not segments:
+            # Selection-run is ON but nothing is ticked. Align-to-next availability
+            # only depends on the next segment's cached AV latent, not on the
+            # current run selection, so report status for *all* segments instead of
+            # erroring out (which would grey every「对齐下段」control).
+            _tl = json.loads(timeline_data) if timeline_data else {}
+            for _k in ("runSelection", "run_selection", "runSelectEnabled", "run_select_enabled"):
+                _tl.pop(_k, None)
+            plan = build_director_plan(
+                json.dumps(_tl),
+                global_task_type=str(body.get("task_type") or ""),
+                global_prompt=str(body.get("global_prompt") or ""),
+                total_frames=int(body.get("total_frames") or 124),
+                frame_rate=float(body.get("frame_rate") or 24.0),
+                width=int(body.get("width") or 864),
+                height=int(body.get("height") or 480),
+                ref_max_size=int(body.get("ref_max_size") or 864),
+            )
+            segments = list(getattr(plan, "segments", None) or [])
         rows = []
         for seg in segments:
             rows.append(
@@ -715,7 +733,7 @@ async def minimax_align_to_next_status(request):
                     "index": int(seg.index),
                     # Master「段间引导」must be on for the pin to mean anything.
                     "continuity": bool(is_continuity_active(plan, seg)),
-                    "canAlignToNext": bool(has_next_segment_av_latent(node_id, seg.index)),
+                    "canAlignToNext": bool(has_next_segment_av_latent(node_id, seg.index, workflow_name=workflow_name)),
                 }
             )
         return web.json_response({"node_id": node_id, "segments": rows})
@@ -779,6 +797,7 @@ async def minimax_segment_export(request):
             plan,
             indices,
             mode=mode,
+            workflow_name=str(body.get("workflow_name") or "").strip() or None,
         )
         return web.json_response(result)
     except Exception as exc:

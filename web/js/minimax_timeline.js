@@ -3606,6 +3606,7 @@ class MiniMaxH3DirectorEditor {
             width: this.timeline.output?.width || 864,
             height: this.timeline.output?.height || 480,
             ref_max_size: this.refMaxWidget?.value || this.timeline.output?.longEdge || 864,
+            workflow_name: getActiveWorkflowName() || "",
         };
         try {
             const resp = await api.fetchApi("/minimax/director/align_to_next_status", {
@@ -3617,11 +3618,17 @@ class MiniMaxH3DirectorEditor {
             const data = await resp.json();
             const map = {};
             (data?.segments || []).forEach((row) => {
-                map[row.index] = !!row.canAlignToNext && row.continuity !== false;
+                // Align-to-next availability depends only on the next segment's
+                // cached AV latent; it is independent of this segment's continuity
+                // flag. Do NOT gate it on `row.continuity` — the first segment has
+                // continuity=false (no predecessor to pin) and must stay selectable.
+                map[row.index] = !!row.canAlignToNext;
             });
             this._alignToNextCache = map;
         } catch (e) {
-            this._alignToNextCache = {};
+            // Keep the last-known align-to-next state instead of wiping it; a
+            // transient failure shouldn't grey every「对齐下段」control.
+            console.warn("[MiniMax H3 Director] align-to-next status refresh failed:", e);
         }
         if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.scheduleRender();
@@ -3790,6 +3797,7 @@ class MiniMaxH3DirectorEditor {
             width: this.timeline.output?.width || 864,
             height: this.timeline.output?.height || 480,
             ref_max_size: this.refMaxWidget?.value || this.timeline.output?.longEdge || 864,
+            workflow_name: getActiveWorkflowName() || "",
         };
         try {
             const resp = await api.fetchApi("/minimax/director/segment_export_status", {
@@ -12255,10 +12263,11 @@ app.registerExtension({
             // 「清空缓存」 / 「清空节点所有缓存」 buttons. Unlike the old checkbox they
             // fire immediately via the HTTP route instead of riding a run's edge — so
             // clearing works even when the timeline has nothing to run.
-            //   · 清空缓存           → this node's conditioning + batch scratch dirs only
-            //                          (transient; never touches minimax_seg_cache).
-            //   · 清空节点所有缓存   → additionally wipes minimax_seg_cache/<node>/,
-            //                          forcing a full re-render of every segment.
+            //   · 清空缓存           → this node's conditioning + batch scratch files only
+            //                          (transient; never touches the durable segment files).
+            //   · 清空节点所有缓存   → additionally wipes every durable seg_* file in the
+            //                          unified minimax_director_cache dir, forcing a full
+            //                          re-render of every segment.
             const runClearCache = (clearAll) => {
                 const nodeId = String(this.id ?? "");
                 const wfName = getActiveWorkflowName();
@@ -12267,7 +12276,7 @@ app.registerExtension({
                     ? [
                         "· 文本编码缓存（conditioning）",
                         "· batch 中间缓存（scratch）",
-                        "· 片段帧 / 音频 / AV latent / clip（minimax_seg_cache）",
+                        "· 片段帧 / 音频 / AV latent / clip（统一缓存目录内）",
                     ]
                     : [
                         "· 文本编码缓存（conditioning）",
@@ -12279,7 +12288,7 @@ app.registerExtension({
                     "节点 ID：" + nodeId + "\n\n" +
                     "将删除：\n" +
                     willDelete.join("\n") +
-                    (clearAll ? "\n\n警告：片段缓存删除后需重新渲染所有片段！" : "\n\n不影响 minimax_seg_cache 的片段帧/音频/AV latent。")
+                    (clearAll ? "\n\n警告：片段缓存删除后需重新渲染所有片段！" : "\n\n不影响统一缓存目录内的片段帧/音频/AV latent。")
                 )) {
                     return;
                 }

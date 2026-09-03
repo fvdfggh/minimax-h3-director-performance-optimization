@@ -160,14 +160,14 @@ class MiniMaxH3Director:
         return True
 
     @classmethod
-    def IS_CHANGED(cls, unique_id=None, **kwargs):
+    def IS_CHANGED(cls, unique_id=None, workflow_name=None, **kwargs):
         # Do not return NaN: that would re-run every Director queue even when
         # confirm_first_pass is off. Linked Refine is None here, so fingerprint
         # the .pre cache files that only the confirmation hold writes.
         del kwargs
         from ..director.segment_cache import first_pass_cache_disk_signature
 
-        return first_pass_cache_disk_signature(unique_id)
+        return first_pass_cache_disk_signature(unique_id, workflow_name=workflow_name)
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE")
     RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report", "images_pre_refine")
@@ -262,6 +262,7 @@ class MiniMaxH3Director:
                 execute_director_plan_core(
                     plan,
                     node_id=unique_id,
+                    workflow_name=workflow_name,
                     model=model,
                     vae=video_vae,
                     audio_vae=audio_vae,
@@ -308,6 +309,7 @@ class MiniMaxH3Director:
                     vae=(video_vae, audio_vae)
                     if (video_vae is not None or audio_vae is not None)
                     else None,
+                    workflow_name=workflow_name,
                 )
                 for path in seg_export_report.get("files") or []:
                     log.info("MiniMax H3 Director 分段导出 → %s", path)

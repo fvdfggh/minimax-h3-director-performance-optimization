@@ -12,61 +12,43 @@ from typing import Any
 
 import torch
 
+from . import cache_layout
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director-Cached.conditioning_cache")
 
-# Cache directory relative to ComfyUI output
-CACHE_SUBDIR = "minimax_conditioning_cache"
-
-# Windows-illegal path characters, Windows reserved device names.
-_WIN_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
-_WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$", re.I)
+# Cache directory relative to ComfyUI output. Encoding caches share the one
+# Director cache root with segments and batch scratch, so a workflow's whole
+# state lives in a single folder.
+CACHE_SUBDIR = cache_layout.CACHE_ROOT
 
 # Cache file prefix. The name carries NO segment index on purpose: two segments
 # with identical text inputs must resolve to the same file so the second one is
-# served from disk instead of being encoded again.
-_TEXT_PREFIX = "cond"
+# served from disk instead of being encoded again. The ``text``/``image``/``video``
+# split is what distinguishes the three encoding kinds once they share a folder.
+_TEXT_PREFIX = cache_layout.TEXT_PREFIX
+_IMAGE_PREFIX = cache_layout.IMAGE_PREFIX
+_VIDEO_PREFIX = cache_layout.VIDEO_PREFIX
+#: Backwards-compatible alias for callers that glob every encoding cache.
+_ENC_PREFIXES = cache_layout.ENC_PREFIXES
 
 
-def slugify_workflow_name(name: str) -> str:
+def slugify_workflow_name(name: str | None) -> str:
     """Turn a workflow name into a single safe path component.
 
-    CJK names are kept as-is because the directory names are user-facing —
-    someone with several workflows wants to recognise them in Explorer. Only
-    path separators and Windows-illegal characters are stripped, and the result
-    is capped so the full path stays well inside Windows' 260-char limit.
-
-    Returns "" when nothing usable remains, which means "no workflow namespace".
+    Thin re-export of the shared implementation in :mod:`cache_layout`, kept
+    because several modules import it from here.
     """
-    text = str(name or "").strip()
-    if not text:
-        return ""
-    text = os.path.basename(text.replace("\\", "/"))
-    text = _WIN_ILLEGAL.sub("_", text)
-    text = re.sub(r"\s+", " ", text).strip(" .")
-    # Keep it short: this nests under output/ and above node_<id>/.
-    text = text[:60]
-    if not text or _WIN_RESERVED.match(text):
-        return ""
-    return text
+    return cache_layout.slugify_workflow_name(name)
 
 
 def _get_cache_dir(node_id: str | None = None, workflow_name: str | None = None) -> Path:
-    """Get or create the conditioning cache directory.
+    """Get or create the cache directory shared by every artefact kind.
 
-    Layout is ``<cache>/[<workflow slug>/]node_<id>/``. The workflow layer keeps
-    caches from differently named workflows from colliding on the same
+    Layout is ``<cache root>/[<workflow slug>/]node_<id>/``. The workflow layer
+    keeps caches from differently named workflows from colliding on the same
     ``node_<id>`` — node ids are per-graph and routinely reused across files.
     """
-    from folder_paths import output_directory
-
-    base = Path(output_directory) / CACHE_SUBDIR
-    slug = slugify_workflow_name(workflow_name)
-    if slug:
-        base = base / slug
-    if node_id:
-        base = base / f"node_{node_id}"
-    base.mkdir(parents=True, exist_ok=True)
-    return base
+    return cache_layout.node_cache_dir(node_id, workflow_name)
 
 
 def _hash_ref_images(ref_images: Any) -> str:

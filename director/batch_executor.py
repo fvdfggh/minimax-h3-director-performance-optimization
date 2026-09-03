@@ -21,9 +21,9 @@ import torch
 
 from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
+from . import cache_layout
 from .conditioning_cache import (
     load_conditioning_cache,
-    prune_unused_conditioning_cache,
     save_conditioning_cache,
     slugify_workflow_name,
     text_cache_key,
@@ -82,10 +82,10 @@ def _unpack_node_output(out):
     raise RuntimeError(f"Unexpected node output: {type(out)!r}")
 
 
-def _save_export_clip(node_id, seg, plan, chunk, audio_dict) -> None:
+def _save_export_clip(node_id, seg, plan, chunk, audio_dict, workflow_name=None) -> None:
     """Best-effort clip-cache write right after a decode, for「分段导出」."""
     try:
-        save_segment_clip(node_id, seg, plan, chunk, audio=audio_dict)
+        save_segment_clip(node_id, seg, plan, chunk, audio=audio_dict, workflow_name=workflow_name)
     except Exception as exc:  # pragma: no cover - defensive
         log.debug("Segment %d clip cache skipped: %s", int(seg.index) + 1, exc)
 
@@ -189,42 +189,49 @@ def _build_minimax_inputs(plan, seg, *, clip_frames, ctx_w, ctx_h, prev_tail):
 # ---------------------------------------------------------------------------
 
 def _batch_cache_dir(node_id: int, workflow_name: str | None = None) -> Path:
-    """Scratch dir for this run's intermediates.
+    """Directory holding this run's intermediates.
 
-    Namespaced by workflow name just like the conditioning cache: node ids are
+    Shares the one Director cache folder with the durable segment artefacts, so
+    scratch files are marked ``seg_XXXX_scratch_<kind>.pt`` and told apart by
+    that prefix alone — see :mod:`cache_layout`.
+
+    Namespaced by workflow name just like the encoding cache: node ids are
     per-graph and get reused across workflow files, so without this two
     workflows would overwrite each other's scratched latents.
 
-    File names stay fixed per segment (``seg_XXXX_latent.pt``), so a re-run
-    overwrites in place rather than accumulating.
+    File names stay fixed per segment, so a re-run overwrites in place rather
+    than accumulating.
     """
-    import folder_paths
-    base = Path(folder_paths.get_output_directory()) / "minimax_batch_cache"
-    slug = slugify_workflow_name(workflow_name)
-    if slug:
-        base = base / slug
-    base = base / f"node_{node_id}"
-    base.mkdir(parents=True, exist_ok=True)
-    return base
+    return cache_layout.node_cache_dir(str(node_id), workflow_name)
 
 
 def _clear_batch_cache(cache_dir: Path, reports: list[str]) -> None:
     """Delete this run's scratch cache (Phase 1/2/3 intermediates).
 
-    Only ``minimax_batch_cache/node_<id>/`` is removed. The durable artifacts in
-    ``minimax_seg_cache/`` (frames, audio, av latents) are never touched, so every
-    segment stays reusable for motion context and「全部导出」.
+    Scratch files now live beside the durable segment artefacts, so this removes
+    only the ``seg_*_scratch_*`` files — never the whole directory. Deleting the
+    directory would take the rendered frames / AV latents with it, which is what
+    motion context and「全部导出」read back.
 
-    When the option is off, files keep fixed names (``seg_XXXX_latent.pt`` etc.)
-    and are simply overwritten by the next run.
+    When the option is off, files keep fixed names and are simply overwritten by
+    the next run.
     """
-    import shutil
     try:
-        shutil.rmtree(cache_dir, ignore_errors=True)
-        if cache_dir.exists():
-            reports.append(f"Batch cache: could not fully remove {cache_dir}")
+        if not cache_dir.is_dir():
+            reports.append("Batch cache: nothing to clear")
+            return
+        removed = 0
+        failed = 0
+        for path in cache_layout.iter_scratch_files(cache_dir):
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                failed += 1
+        if failed:
+            reports.append(f"Batch cache: removed {removed} file(s), {failed} locked")
         else:
-            reports.append(f"Batch cache cleared: {cache_dir}")
+            reports.append(f"Batch cache cleared: {removed} scratch file(s) in {cache_dir}")
     except Exception as exc:  # never fail the run over cache cleanup
         log.warning("Director batch: failed to clear batch cache %s: %s", cache_dir, exc)
         reports.append(f"Batch cache: cleanup failed ({exc})")
@@ -575,8 +582,8 @@ def _latent_for_cache(node_id, seg_index, completed_av_latents, cache_dir):
 
 
 def _save_batch_conditioning(node_id, seg_index, positive, negative, latent, cache_dir):
-    """Save pre-encoded conditioning to disk."""
-    path = cache_dir / f"seg_{seg_index:04d}_cond.pt"
+    """Save pre-encoded conditioning to disk (per-run scratch)."""
+    path = cache_layout.scratch_path(cache_dir, seg_index, "cond")
     torch.save({
         "positive": positive,
         "negative": negative,
@@ -586,8 +593,8 @@ def _save_batch_conditioning(node_id, seg_index, positive, negative, latent, cac
 
 
 def _load_batch_conditioning(node_id, seg_index, cache_dir):
-    """Load pre-encoded conditioning from disk."""
-    path = cache_dir / f"seg_{seg_index:04d}_cond.pt"
+    """Load pre-encoded conditioning from disk (per-run scratch)."""
+    path = cache_layout.scratch_path(cache_dir, seg_index, "cond")
     if not path.exists():
         return None
     data = torch.load(path, map_location="cpu", weights_only=False)
@@ -595,23 +602,30 @@ def _load_batch_conditioning(node_id, seg_index, cache_dir):
 
 
 def _save_batch_ref(node_id, seg_index, ref_data, cache_dir):
-    """Save pre-processed reference data to disk."""
-    path = cache_dir / f"seg_{seg_index:04d}_ref.pt"
+    """Save pre-processed reference data to disk (per-run scratch)."""
+    path = cache_layout.scratch_path(cache_dir, seg_index, "ref")
     torch.save(ref_data, path, _use_new_zipfile_serialization=True)
     return path
 
 
 def _load_batch_ref(node_id, seg_index, cache_dir):
-    """Load pre-processed reference data from disk."""
-    path = cache_dir / f"seg_{seg_index:04d}_ref.pt"
+    """Load pre-processed reference data from disk (per-run scratch)."""
+    path = cache_layout.scratch_path(cache_dir, seg_index, "ref")
     if not path.exists():
         return None
     return torch.load(path, map_location="cpu", weights_only=False)
 
 
 def _save_batch_latent(node_id, seg_index, samples, cache_dir):
-    """Save sampled AV latent to disk."""
-    path = cache_dir / f"seg_{seg_index:04d}_latent.pt"
+    """Save sampled AV latent to disk (per-run scratch intermediate).
+
+    NB: this is a *scratch* file (``seg_XXXX_scratch_latent.pt``), distinct from
+    the durable ``seg_XXXX_latent.pt`` that ``segment_cache.save_segment_cache``
+    writes in Phase 3. Keeping them separate means an interrupted run only leaves
+    scratch behind (cleaned by ``iter_scratch_files``) and never spoofs a finished
+    segment cache that a later continuity pin would trust.
+    """
+    path = cache_layout.scratch_path(cache_dir, seg_index, "latent")
     # Move to CPU for disk storage
     cpu_samples = {}
     for k, v in samples.items():
@@ -624,8 +638,8 @@ def _save_batch_latent(node_id, seg_index, samples, cache_dir):
 
 
 def _load_batch_latent(node_id, seg_index, cache_dir):
-    """Load sampled AV latent from disk."""
-    path = cache_dir / f"seg_{seg_index:04d}_latent.pt"
+    """Load sampled AV latent from disk (per-run scratch intermediate)."""
+    path = cache_layout.scratch_path(cache_dir, seg_index, "latent")
     if not path.exists():
         return None
     return torch.load(path, map_location="cpu", weights_only=False)
@@ -664,6 +678,7 @@ def _prev_context_available(
     completed_av_latents: dict,
     width: int = 0,
     height: int = 0,
+    workflow_name: str | None = None,
 ) -> bool:
     """Can segment ``seg_index`` pin its timeline predecessor?
 
@@ -692,7 +707,7 @@ def _prev_context_available(
     prev_seg = next((s for s in all_segments if s.index == prev_idx), None)
     if prev_seg is None:
         return False
-    prev_av = load_segment_av_latent(node_id, prev_seg, plan, allow_stale=True)
+    prev_av = load_segment_av_latent(node_id, prev_seg, plan, allow_stale=True, workflow_name=workflow_name)
     if prev_av is None:
         return False
     # A canvas mismatch would send apply_motion_context down its pixel path,
@@ -711,6 +726,7 @@ def _assemble_export_list(
     decoded_frames: dict[int, int],
     completed_audios: dict[int, dict],
     reports: list[str],
+    workflow_name: str | None = None,
 ) -> tuple[list, list[dict], list[int], dict[int, torch.Tensor]]:
     """Timeline-ordered export list for「全部导出」.
 
@@ -742,16 +758,16 @@ def _assemble_export_list(
         # Probe the header only: this branch used to load the whole clip just to
         # read ``shape[0]`` and then throw the pixels away, so every unselected
         # segment was read twice per run (once here, once by the merge).
-        cached_shape = probe_segment_cache_shape(node_id, seg, plan)
+        cached_shape = probe_segment_cache_shape(node_id, seg, plan, workflow_name=workflow_name)
         used_stale = False
         if cached_shape is None:
             cached_shape = probe_segment_cache_shape(
-                node_id, seg, plan, allow_stale=True
+                node_id, seg, plan, allow_stale=True, workflow_name=workflow_name
             )
             used_stale = cached_shape is not None
         if cached_shape is not None:
             n_frames = int(cached_shape[0])
-            cached_audio = load_segment_audio(node_id, seg, plan, allow_stale=used_stale)
+            cached_audio = load_segment_audio(node_id, seg, plan, allow_stale=used_stale, workflow_name=workflow_name)
             if not isinstance(cached_audio, dict):
                 cached_audio = {}
             segments.append(seg)
@@ -969,7 +985,7 @@ def execute_director_batch(
         # conditioning below, so the pin decision cannot be revised later.
         prev_context_available = _prev_context_available(
             node_id, plan, all_segments, seg.index, run_indices, completed_av_latents,
-            width=ctx_w, height=ctx_h,
+            width=ctx_w, height=ctx_h, workflow_name=workflow_name,
         )
         use_motion_context = (
             continuity_active
@@ -1118,15 +1134,9 @@ def execute_director_batch(
     elif cache_hits:
         reports.append(f"  all {cache_hits} segment(s) served from conditioning cache")
 
-    # Any encoding this run did not consume is stale: a revised prompt, or a
-    # segment deleted from a longer timeline. Drop it so revisions do not pile
-    # up one ~140 MB file at a time.
-    if use_conditioning_cache and used_text_keys:
-        n_pruned = prune_unused_conditioning_cache(
-            node_id, workflow_name, used_text_keys
-        )
-        if n_pruned:
-            reports.append(f"  conditioning cache: pruned {n_pruned} unused file(s)")
+    # NOTE: unused conditioning files are NOT pruned automatically after a run.
+    # The "Clear cache" button in the UI handles cleanup on demand
+    # (minimax_clear_cache → clear_conditioning_cache), which is sufficient.
 
     # Release the staged pixels/captions; Phase 2 only needs the latents now.
     pending.clear()
@@ -1204,7 +1214,7 @@ def execute_director_batch(
             if prev_av is None:
                 prev_seg = next((s for s in all_segments if s.index == prev_idx), None)
                 if prev_seg is not None:
-                    prev_av = load_segment_av_latent(node_id, prev_seg, plan, allow_stale=True)
+                    prev_av = load_segment_av_latent(node_id, prev_seg, plan, allow_stale=True, workflow_name=workflow_name)
             if prev_av is None:
                 prev_av = _load_batch_latent(node_id, prev_idx, cache_dir)
                 if prev_av is not None:
@@ -1229,14 +1239,14 @@ def execute_director_batch(
                 # so no segment is decoded to pixels yet — the predecessor's tail can
                 # only come from the segment cache on disk.
                 prev_tail = resolve_prev_segment_output(
-                    plan, all_segments, seg.index, {}, node_id
+                    plan, all_segments, seg.index, {}, node_id, workflow_name=workflow_name
                 )
 
             prev_audio = completed_audios.get(prev_idx)
             if prev_audio is None:
                 prev_seg = next((s for s in all_segments if s.index == prev_idx), None)
                 if prev_seg is not None:
-                    prev_audio = load_segment_audio(node_id, prev_seg, plan, allow_stale=True)
+                    prev_audio = load_segment_audio(node_id, prev_seg, plan, allow_stale=True, workflow_name=workflow_name)
                     if prev_audio is not None:
                         completed_audios[prev_idx] = prev_audio
 
@@ -1244,7 +1254,7 @@ def execute_director_batch(
             if prev_handoff is None:
                 prev_seg = next((s for s in all_segments if s.index == prev_idx), None)
                 if prev_seg is not None:
-                    prev_handoff = load_segment_handoff_meta(node_id, prev_seg, plan, allow_stale=True)
+                    prev_handoff = load_segment_handoff_meta(node_id, prev_seg, plan, allow_stale=True, workflow_name=workflow_name)
                     if prev_handoff is not None:
                         completed_av_handoff[prev_idx] = prev_handoff
 
@@ -1271,7 +1281,7 @@ def execute_director_batch(
                     latent, int(seg.frame_count), context_n=context_n
                 )
                 if tail_n > 0:
-                    next_latent = load_next_segment_av_latent(node_id, seg.index)
+                    next_latent = load_next_segment_av_latent(node_id, seg.index, workflow_name=workflow_name)
                     if next_latent is None:
                         log.info(
                             "Seg #%d: 对齐下段 skipped — next segment has no cached AV latent.",
@@ -1479,12 +1489,13 @@ def execute_director_batch(
             av_latent=_latent_for_cache(node_id, seg.index, completed_av_latents, cache_dir),
             handoff=handoff,
             audio=audio_dict if isinstance(audio_dict, dict) else None,
+            workflow_name=workflow_name,
         )
         # Segment video-clip cache for「分段导出」. Best-effort: ``chunk`` is the
         # exact trimmed export clip the user sees, so the encoded file is
         # byte-equivalent to a piecewise export of this segment — no re-decode,
         # no re-trim needed later.
-        _save_export_clip(node_id, seg, plan, chunk, audio_dict)
+        _save_export_clip(node_id, seg, plan, chunk, audio_dict, workflow_name=workflow_name)
 
         # Export mp4
         if mp4_run_dir is not None:
@@ -1602,6 +1613,7 @@ def execute_director_batch(
                     handoff=ph,
                     audio=new_audio if isinstance(new_audio, dict) else None,
                     replace_audio=False,
+                    workflow_name=workflow_name,
                 )
                 if mp4_run_dir is not None:
                     maybe_export_segment_mp4s(
@@ -1663,6 +1675,7 @@ def execute_director_batch(
             plan,
             list(seg_export.indices),
             vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None,
+            workflow_name=workflow_name,
         )
         wanted_segs = [s for s in all_segments if int(s.index) in set(seg_export.indices)]
         export_segments_list, segment_audios, export_frame_counts, merge_overrides = (
@@ -1671,6 +1684,7 @@ def execute_director_batch(
                 decoded_frames=decoded_frames,
                 completed_audios=completed_audios,
                 reports=reports,
+                workflow_name=workflow_name,
             )
         )
         # 「分段导出」must NOT merge the checked segments into one video on the
@@ -1773,6 +1787,7 @@ def execute_director_batch(
                 decoded_frames=decoded_frames,
                 completed_audios=completed_audios,
                 reports=reports,
+                workflow_name=workflow_name,
             )
         )
     else:
@@ -1848,6 +1863,7 @@ def execute_director_batch(
                 list(seg_export.indices),
                 mode=seg_export.normalized_mode(),
                 vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None,
+                workflow_name=workflow_name,
             )
             log.info(
                 "分段导出 done: files=%d skipped=%d mode=%s",
@@ -1865,9 +1881,10 @@ def execute_director_batch(
         log.warning("分段导出 failed in batch mode: %s", exc)
         reports.append(f"  分段导出 failed: {exc}")
 
-    # Scratch dir keeps this run's intermediates; the segments themselves live on
-    # in minimax_seg_cache. Clearing is driven by the node's 「清空缓存」button
-    # rather than a per-run flag, so the scratch survives failed runs for debugging.
+    # Scratch intermediates (seg_*_scratch_*.pt) live in the same flat node cache dir
+    # as the durable segments and are cleaned via _clear_batch_cache / iter_scratch_files,
+    # driven by the node's 「清空缓存」button rather than a per-run flag, so they survive
+    # failed runs for debugging.
 
     return (
         combined,

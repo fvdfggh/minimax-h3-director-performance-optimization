@@ -15,7 +15,8 @@ text encoding               ``cond_text_<hash>.pt``                 reusable
 image encoding              ``cond_image_<hash>.pt``                reusable
 video encoding              ``cond_video_<hash>.pt``                reusable
 sampled latent              ``seg_XXXX_latent.pt``                  durable
-decoded frames              ``seg_XXXX_frames.pt``                  durable
+decoded frames              ``seg_XXXX_frames.pt``                  legacy/optional
+head+tail frames            ``seg_XXXX_frames_ht.pt``               durable
 audio latent                ``seg_XXXX_audio.pt``                   durable
 rendered clip               ``seg_XXXX_clip.mp4``                   durable
 segment meta / handoff      ``seg_XXXX_meta.json`` / ``_handoff``   durable
@@ -58,9 +59,30 @@ VIDEO_PREFIX = "cond_video"
 #: Glob matching every encoding cache regardless of kind.
 ENC_PREFIXES = (TEXT_PREFIX, IMAGE_PREFIX, VIDEO_PREFIX)
 
+# --- vision-tower (ViT) output cache, persisted ACROSS runs -------------------
+#
+# Reference images/videos enter the text encoder (Qwen3-VL) as vision entries and
+# each one runs through the ViT in ``preprocess_embed`` -- that pass, not the VAE,
+# dominates conditioning cost. Its output depends only on the pixels, the shape
+# (which fixes ``grid``), the model variant and the image/video flag, so it is
+# cached globally under its own directory rather than per workflow/node: the same
+# media reused by any segment or any workflow hits the same entry.
+VIT_CACHE_DIRNAME = "_vit"
+VIT_PREFIX = "vit"
+VIT_SUFFIX = ".pt"
+#: Soft cap for the whole ViT cache in bytes. Cached ViT output is *larger* than
+#: the source pixels (DeepStack carries one tensor per injected layer), so this
+#: needs an explicit ceiling and LRU trimming.
+VIT_CACHE_MAX_BYTES = 8 * 1024**3
+
 # --- per-segment durable artefacts -------------------------------------------
 LATENT_SUFFIX = "_latent.pt"
 FRAMES_SUFFIX = "_frames.pt"
+FRAMES_HT_SUFFIX = "_frames_ht.pt"
+#: Number of leading/trailing frames kept in ``frames_ht`` (mirrors
+#: ``segment_continuity._seam_window()`` so the seam pipeline has real pixels
+#: without persisting the whole segment tensor).
+FRAMES_HT_N = 16
 AUDIO_SUFFIX = "_audio.pt"
 CLIP_SUFFIX = "_clip.mp4"
 META_SUFFIX = "_meta.json"
@@ -150,6 +172,7 @@ def segment_paths(root: Path, seg_index: int) -> dict[str, Path]:
     return {
         "latent": root / f"{stem}{LATENT_SUFFIX}",
         "frames": root / f"{stem}{FRAMES_SUFFIX}",
+        "frames_ht": root / f"{stem}{FRAMES_HT_SUFFIX}",
         "audio": root / f"{stem}{AUDIO_SUFFIX}",
         "clip": root / f"{stem}{CLIP_SUFFIX}",
         "meta": root / f"{stem}{META_SUFFIX}",

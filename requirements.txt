@@ -1,5 +1,8 @@
-# Source-video decode for v2v / timeline loading
-opencv-python-headless>=4.8
+# Source-video decode for v2v / timeline loading uses PyAV, which ships with the
+# ComfyUI portable build. OpenCV is intentionally NOT a dependency: the portable
+# launcher runs `python -s`, which hides the user-level site-packages where cv2
+# is installed, so `import cv2` fails inside ComfyUI.
+av>=13.0
 
 # Source-audio extract + incremental segment mp4 encode (「分段导出」边生成边保存)
 imageio-ffmpeg>=0.4

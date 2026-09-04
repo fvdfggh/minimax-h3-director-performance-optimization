@@ -118,6 +118,16 @@ def run_minimax_conditioning(
     """Build positive conditioning + AV latent via official MiniMax H3 nodes."""
     MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo = _load_minimax_nodes()
 
+    # Memoise the text encoder's ViT pass (reference images/videos) to disk. The
+    # call is idempotent and a no-op when already installed or when the encoder
+    # module is unavailable, so it is safe on every segment.
+    try:
+        from ..director import vision_cache
+
+        vision_cache.install()
+    except Exception:  # pragma: no cover - cache is an optimisation, never fatal
+        pass
+
     ref_images = ref_images or _reference_images_dict_from_kwargs(kwargs)
     ref_videos = _reference_videos_dict(ref_videos)
 

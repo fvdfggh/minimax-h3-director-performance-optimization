@@ -434,6 +434,15 @@ def encode_text_batch(clip, prepared: list[dict]) -> int:
 
     Returns how many segments reused an encoding instead of paying for a new one.
     """
+    # This path calls ``clip.tokenize`` directly and bypasses
+    # ``run_minimax_conditioning``, so the ViT cache has to be installed here too
+    # (idempotent, no-op if already installed).
+    try:
+        from . import vision_cache
+
+        vision_cache.install()
+    except Exception:  # pragma: no cover - optimisation only
+        pass
     by_key: dict[str, Any] = {}
     reused = 0
     for item in prepared:
@@ -858,12 +867,25 @@ def execute_director_batch(
     # export-only run must avoid. We sample zero segments; the export reads
     # frames / latents from disk and decodes with the already-loaded VAE.
     seg_export = getattr(plan, "segment_export", None)
-    # Trigger purely on whether the user checked segments (indices), NOT on the
-    # one-shot `enabled` flag. `enabled` is set by the UI picker and is prone to a
-    # clear-before-queue race (the picker clears it right after queueing), which
-    # made every export silently fall through to a placeholder. `indices` is the
-    # stable signal of user intent and survives the round trip to the backend.
-    seg_export_active = seg_export is not None and bool(seg_export.indices)
+    # Trigger on the one-shot ``enabled`` flag AND the checked ``indices``. The
+    #「分段导出」button sets both; a plain 运行 must not export.
+    #
+    # ``indices`` alone is NOT a valid trigger: it is persisted in the timeline so
+    # the picker reopens with the last selection, so once anything was ever checked
+    # every subsequent run became an export-only pass (run_indices emptied → zero
+    # sampling). The flag is safe to trust: ``app.queuePrompt`` is patched to flush
+    # every Director timeline synchronously *before* the prompt is built, so the
+    # widget snapshot always carries the flag as it was when the button was pressed.
+    seg_export_active = (
+        seg_export is not None and bool(seg_export.enabled) and bool(seg_export.indices)
+    )
+    if seg_export is not None and seg_export.indices and not seg_export.enabled:
+        # Checked but not triggered: a normal generation run. Log it so an
+        # accidental no-op export is visible rather than silent.
+        log.info(
+            "分段导出: %d 个片段已勾选，但未由「分段导出」按钮触发 — 按正常生成运行。",
+            len(seg_export.indices),
+        )
     if seg_export_active:
         run_indices = set()
 
@@ -1663,7 +1685,12 @@ def execute_director_batch(
     # ===================================================================
     report_director_finish(node_id, len(run_list))
 
-    if seg_export is not None and seg_export.enabled and seg_export.indices:
+    # Trigger on the checked indices (``seg_export_active``), consistent with the
+    # Phase-1 decision above — NOT on ``seg_export.enabled``. The picker clears
+    # ``enabled`` right after queueing, so a run that already skipped sampling
+    # (run_indices = set()) used to fall through to the「全部导出」branch here and
+    # crash on the unbound ``combined``.
+    if seg_export_active:
         # 「分段导出」: only the checked segments participate — no full-timeline
         # merge. This keeps an export-only run fast (it never renders or encodes
         # the other 30+ segments) and returns a combined clip of just the checked
@@ -1723,17 +1750,27 @@ def execute_director_batch(
                 audio_by_index[idx] = a
 
         _seg_mode = seg_export.normalized_mode()
+        log.info(
+            "分段导出: mode=%s checked=%s frames_loaded=%s",
+            _seg_mode, sorted(set(int(i) for i in seg_export.indices)), sorted(frame_by_index),
+        )
         if _seg_mode == "continuous":
             # 连续导出: one clip per contiguous run (stitched with the streaming
             # merge), standalone for a checked segment with no checked neighbour —
             # matching exactly what ``run_segment_export`` writes to disk.
+            #
+            # NOTE: only *timeline-adjacent* checked segments are stitched.
+            # Checking #1,#5,#9,#13 yields four standalone clips by design —
+            # the run breakdown is logged below so this is never a silent guess.
             from .segment_cache import continuous_export_runs as _runs
             from .segment_cache import merge_run_audio as _merge_audio
 
             outputs: list[torch.Tensor] = []
             counts: list[int] = []
             run_audios: list[dict] = []
-            for run in _runs(frame_by_index.keys()):
+            _all_runs = _runs(frame_by_index.keys())
+            log.info("分段导出 连续导出: %d run(s) → %s", len(_all_runs), _all_runs)
+            for run in _all_runs:
                 run = [i for i in run if i in frame_by_index]
                 if not run:
                     continue
@@ -1762,12 +1799,22 @@ def execute_director_batch(
                         counts.append(int(frame_by_index[i].shape[0]))
                         run_audios.append(audio_by_index.get(i) or {})
                     continue
+                log.info(
+                    "分段导出 连续导出: merged #%d–#%d (%df + %df + … → %df)",
+                    run[0] + 1, run[-1] + 1, run_counts[0],
+                    run_counts[1] if len(run_counts) > 1 else 0,
+                    int(merged.shape[0]),
+                )
                 outputs.append(merged)
                 counts.append(int(merged.shape[0]))
                 run_audios.append(
                     _merge_audio(plan, [audio_by_index.get(i) or {} for i in run], run_counts)
                     or {}
                 )
+            log.info(
+                "分段导出 连续导出: %d clip(s) on images output (frame counts %s)",
+                len(outputs), counts,
+            )
             segment_outputs = outputs
             export_frame_counts = counts
             segment_audios = run_audios
@@ -1778,7 +1825,12 @@ def execute_director_batch(
             # Keep audio 1:1 with the frames actually emitted (a segment whose
             # frames could not be loaded must not shift the alignment).
             segment_audios = [audio_by_index.get(i) or {} for i in ordered]
-    elif plan.export_mode == "all" or (not run_list and seg_export is not None and bool(seg_export.indices)):
+    elif plan.export_mode == "all" or (
+        not run_list
+        and seg_export is not None
+        and bool(seg_export.enabled)
+        and bool(seg_export.indices)
+    ):
         # Batch mode only samples「选择运行」—「全部导出」still needs the whole
         # timeline, so unselected slots are filled from cache / source.
         # (An export-only run with every selected segment cached has an empty
@@ -1815,9 +1867,21 @@ def execute_director_batch(
              plan.export_mode, seg_export_active,
              len(export_segments_list) if export_segments_list else 0,
              len(segment_outputs) if segment_outputs else 0)
-    if plan.export_mode == "all":
-        # （上面 1810 行已释放 segment_outputs；这里合并全部段为单个 combined）
-        pass
+    # Streaming merge: one allocation for the result, one copy-in per segment.
+    # Every branch must bind ``combined`` — the old ``pass`` on the「全部导出」
+    # path left it unbound and killed the node with UnboundLocalError.
+    if seg_export_active and plan.export_mode == "segments":
+        # 分段导出: the split layout emits every clip straight from
+        # ``segment_outputs`` and never reads ``combined`` — a second merge would
+        # just double peak RAM. Bind it to a real clip (no placeholder) so the
+        # slot always carries actual frames.
+        if segment_outputs:
+            combined = segment_outputs[0]
+        else:
+            hh = int(getattr(plan, "height", 480) or 480)
+            ww = int(getattr(plan, "width", 864) or 864)
+            combined = torch.zeros((1, hh, ww, 3), dtype=torch.float32)
+        merge_overrides = None
     elif not export_segments_list:
         # 「分段导出」of latent-only segments (no .pt) has nothing to merge here —
         # the per-segment files are still produced by run_segment_export below.

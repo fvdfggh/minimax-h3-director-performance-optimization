@@ -4,7 +4,7 @@ Independent of video tensors (does not touch decode / 娈甸棿寮曞). Same 
 selection as ``load_video_resampled``, with PCM-safe clocks:
 
   1. logical 鈫?frameMap 鈫?source index
-  2. native = round((src / timeline_fps) * opencv_fps)  # same as video decode
+  2. native = round((src / timeline_fps) * file_fps)  # same as video decode
   3. seek PCM at container time of that native, converted to the audio stream:
        pcm_start = video_pts0 + native0 * frame_dur 鈭?audio_start
      (full-file decode starts at sample 0 鈮?audio_start, not video_pts0)
@@ -43,7 +43,7 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.audio")
 _ENCODE_ARGS = ("utf-8", "backslashreplace")
 
 _FULL_AUDIO_CACHE: dict[str, dict[str, Any]] = {}
-_OPENCV_FPS_CACHE: dict[str, float] = {}
+_FILE_FPS_CACHE: dict[str, float] = {}
 # path -> (video_pts0, audio_start, frame_dur)
 _AV_TIMING_CACHE: dict[str, tuple[float, float, float]] = {}
 
@@ -158,24 +158,21 @@ def _clip_probe_fps(clip: dict, timeline_fps: float) -> float:
     return file_fps
 
 
-def _opencv_file_fps(path: str, fallback: float) -> float:
-    """Same FPS ``load_video_resampled`` reads via ``cv2.CAP_PROP_FPS``."""
-    cached = _OPENCV_FPS_CACHE.get(path)
+def _file_fps(path: str, fallback: float) -> float:
+    """Same FPS the video decoder reads (PyAV stream rate, no OpenCV)."""
+    cached = _FILE_FPS_CACHE.get(path)
     if cached is not None:
         return cached
     fps = 0.0
     try:
-        import cv2
+        from .video_io import av_video_meta
 
-        cap = cv2.VideoCapture(path)
-        if cap.isOpened():
-            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-            cap.release()
+        fps = float(av_video_meta(path).get("native_fps") or 0.0)
     except Exception as exc:
-        log.debug("OpenCV FPS probe failed for %s: %s", path, exc)
+        log.debug("PyAV FPS probe failed for %s: %s", path, exc)
     if fps <= 0:
         fps = float(fallback or 24.0)
-    _OPENCV_FPS_CACHE[path] = fps
+    _FILE_FPS_CACHE[path] = fps
     return fps
 
 
@@ -416,7 +413,7 @@ def _resolve_pcm_start_sample(
     file_fps: float,
     sr: int,
 ) -> int:
-    """Pick a PCM sample index; fall back to OpenCV-index clock if PTS seek EOFs."""
+    """Pick a PCM sample index; fall back to the file-fps clock if a PTS seek EOFs."""
     have = int(wave.shape[-1])
     i0 = max(0, int(round(float(pcm_start_sec) * sr)))
     if i0 < have:
@@ -498,7 +495,7 @@ def _timeline_audio_spans(
             flush_run()
             continue
         fallback_fps = _clip_probe_fps(clip, fps)
-        file_fps = _opencv_file_fps(path, fallback_fps)
+        file_fps = _file_fps(path, fallback_fps)
         native = _src_frame_to_native(src_frame, timeline_fps=fps, file_fps=file_fps)
         video_pts0, audio_start, frame_dur = _probe_av_timing(
             path, fallback_fps=file_fps

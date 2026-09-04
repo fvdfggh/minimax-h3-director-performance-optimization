@@ -17,15 +17,21 @@ from .image_prep import resolve_output_dimensions
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.video_io")
 
 
-def _require_cv2():
-    try:
-        import cv2
+def _require_av():
+    """PyAV is bundled with this ComfyUI build — no OpenCV dependency.
 
-        return cv2
-    except ImportError as exc:
+    The portable launcher runs ``python -s``, which hides the user-level
+    site-packages where ``cv2`` usually lives, so every video I/O path here goes
+    through PyAV instead.
+    """
+    try:
+        import av
+
+        return av
+    except ImportError as exc:  # pragma: no cover - packaging guard
         raise ImportError(
-            "OpenCV is required for MiniMax H3 Director video loading. "
-            "Install: pip install opencv-python-headless"
+            "PyAV is required for MiniMax H3 Director video loading. "
+            "Install: pip install av"
         ) from exc
 
 
@@ -141,7 +147,7 @@ def peek_video_size(path: str) -> tuple[int, int]:
     except Exception:
         pass
     try:
-        meta = _opencv_probe(path)
+        meta = av_video_meta(path)
         return int(meta.get("width") or 0), int(meta.get("height") or 0)
     except Exception:
         return 0, 0
@@ -179,26 +185,171 @@ def _ffprobe_count_frames(path: str) -> int | None:
     return None
 
 
-def _opencv_probe(path: str) -> dict:
-    cv2 = _require_cv2()
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {path}")
+def _av_stream_fps(stream) -> float:
+    rate = getattr(stream, "average_rate", None) or getattr(stream, "guessed_rate", None)
     try:
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        native_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        duration = float(frame_count / native_fps) if frame_count > 0 and native_fps > 0 else 0.0
+        return float(rate) if rate else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+class _AvVideoReader:
+    """Frame-accurate reader indexed by decode order (``cv2.CAP_PROP_POS_FRAMES`` semantics).
+
+    Callers ask for frames in ascending order, so the common case is one forward
+    pass with a single decode iterator; a backward jump re-seeks the container.
+    Invariant: ``_last`` holds the frame at index ``_next_index - 1``.
+    """
+
+    def __init__(self, path: str):
+        _require_av()
+        self.path = path
+        self._open()
+
+    def _open(self) -> None:
+        import av
+
+        self.container = av.open(self.path)
+        try:
+            stream = self.container.streams.video[0]
+        except (IndexError, AttributeError) as exc:
+            self.container.close()
+            raise ValueError(f"No video stream in: {self.path}") from exc
+        stream.thread_type = "AUTO"
+        self.stream = stream
+        self.fps = _av_stream_fps(stream)
+        self.width = int(stream.codec_context.width or 0)
+        self.height = int(stream.codec_context.height or 0)
+        self._iter = self.container.decode(stream)
+        self._next_index = 0
+        self._last: np.ndarray | None = None
+        self._eof = False
+
+    def close(self) -> None:
+        try:
+            self.container.close()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    def __enter__(self) -> _AvVideoReader:
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def _pts_index(self, frame) -> int | None:
+        pts = getattr(frame, "pts", None)
+        tb = self.stream.time_base
+        if pts is None or not tb or self.fps <= 0:
+            return None
+        return int(round(float(pts) * float(tb) * self.fps))
+
+    def seek(self, index: int) -> None:
+        """Position the iterator so the next produced frame is ``index``."""
+        tb = float(self.stream.time_base)
+        offset = int(round(index / self.fps / tb)) if (self.fps > 0 and tb > 0) else int(index)
+        try:
+            self.container.seek(max(0, offset), stream=self.stream, backward=True, any_frame=False)
+        except Exception as exc:
+            log.debug("PyAV seek to %d failed for %s (%s); rewinding", index, self.path, exc)
+            try:
+                self.container.seek(0, stream=self.stream, backward=True, any_frame=True)
+            except Exception:  # pragma: no cover - defensive
+                pass
+        self._iter = self.container.decode(self.stream)
+        self._last = None
+        self._eof = False
+        frame = next(self._iter, None)
+        if frame is None:
+            self._eof = True
+            self._next_index = index
+            return
+        k = self._pts_index(frame)
+        if k is None:
+            log.debug("PyAV: stream has no PTS for %s; frame indices may drift.", self.path)
+            k = 0
+        while k < index:
+            frame = next(self._iter, None)
+            if frame is None:
+                self._eof = True
+                self._next_index = index
+                return
+            k += 1
+        self._last = frame.to_ndarray(format="rgb24")
+        self._next_index = index + 1
+
+    def read(self, index: int) -> np.ndarray | None:
+        """uint8 RGB frame ``index``; repeats the last decoded frame past EOF."""
+        index = max(0, int(index))
+        if index < self._next_index - 1:
+            self.seek(index)
+        while self._next_index <= index:
+            frame = next(self._iter, None)
+            if frame is None:
+                self._eof = True
+                break
+            self._last = frame.to_ndarray(format="rgb24")
+            self._next_index += 1
+        return self._last
+
+
+def _resize_rgb(arr: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
+    """Resize ``HWC`` uint8 RGB without OpenCV (BOX ≈ ``cv2.INTER_AREA``)."""
+    from PIL import Image
+
+    src_h, src_w = int(arr.shape[0]), int(arr.shape[1])
+    shrink = out_w < src_w or out_h < src_h
+    resample = Image.Resampling.BOX if shrink else Image.Resampling.LANCZOS
+    img = Image.fromarray(np.ascontiguousarray(arr))
+    return np.asarray(img.resize((int(out_w), int(out_h)), resample=resample))
+
+
+def av_video_meta(path: str) -> dict:
+    """Container metadata via PyAV. Raises when the file has no decodable video."""
+    if not path or not os.path.isfile(path):
+        raise ValueError(f"Video file not found: {path}")
+    with _AvVideoReader(path) as reader:
+        stream = reader.stream
+        fps = reader.fps
+        frame_count = int(getattr(stream, "frames", 0) or 0)
+        duration = 0.0
+        if getattr(stream, "duration", None):
+            duration = float(stream.duration) * float(stream.time_base)
+        if duration <= 0 and getattr(reader.container, "duration", None):
+            duration = float(reader.container.duration) / 1_000_000.0
+        if frame_count <= 0 and duration > 0 and fps > 0:
+            frame_count = int(round(duration * fps))
+        if fps <= 0 and duration > 0 and frame_count > 0:
+            fps = frame_count / duration
         return {
-            "width": width,
-            "height": height,
+            "width": reader.width,
+            "height": reader.height,
             "duration": duration,
-            "native_fps": native_fps,
+            "native_fps": fps,
             "frame_count": max(0, frame_count),
         }
+
+
+def decode_video_frames(path) -> torch.Tensor | None:
+    """Decode a whole video file to a float32 [0,1] RGB frame tensor.
+
+    ``None`` when nothing could be decoded (empty / unreadable container).
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    container = _require_av().open(str(path))
+    try:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        frames = [
+            torch.from_numpy(frame.to_ndarray(format="rgb24")).to(torch.float32).div(255.0)
+            for frame in container.decode(stream)
+        ]
     finally:
-        cap.release()
+        container.close()
+    if not frames:
+        return None
+    return torch.stack(frames, dim=0).contiguous()
 
 
 def probe_video_file(path: str) -> dict:
@@ -208,7 +359,7 @@ def probe_video_file(path: str) -> dict:
 
     method = "estimated"
     stream = _ffprobe_stream_info(path)
-    opencv_meta = None
+    container_meta = None
 
     width = height = 0
     duration = 0.0
@@ -233,21 +384,22 @@ def probe_video_file(path: str) -> dict:
 
     if frame_count <= 0 or width <= 0 or height <= 0 or native_fps <= 0:
         try:
-            opencv_meta = _opencv_probe(path)
-        except ImportError:
-            opencv_meta = None
-        if opencv_meta:
-            width = width or int(opencv_meta["width"])
-            height = height or int(opencv_meta["height"])
-            native_fps = native_fps or float(opencv_meta["native_fps"])
-            if frame_count <= 0 and int(opencv_meta["frame_count"]) > 0:
-                frame_count = int(opencv_meta["frame_count"])
-                method = "opencv"
+            container_meta = av_video_meta(path)
+        except Exception as exc:
+            log.debug("PyAV probe failed for %s: %s", path, exc)
+            container_meta = None
+        if container_meta:
+            width = width or int(container_meta["width"])
+            height = height or int(container_meta["height"])
+            native_fps = native_fps or float(container_meta["native_fps"])
+            if frame_count <= 0 and int(container_meta["frame_count"]) > 0:
+                frame_count = int(container_meta["frame_count"])
+                method = "pyav"
 
     if duration <= 0 and frame_count > 0 and native_fps > 0:
         duration = frame_count / native_fps
-    elif duration <= 0 and opencv_meta:
-        duration = float(opencv_meta.get("duration") or 0.0)
+    elif duration <= 0 and container_meta:
+        duration = float(container_meta.get("duration") or 0.0)
 
     if frame_count <= 0 and duration > 0 and native_fps > 0:
         frame_count = max(1, int(round(duration * native_fps)))
@@ -284,54 +436,44 @@ def load_video_resampled(
     storage_height: int | None = None,
     long_edge: int = 848,
 ) -> torch.Tensor:
-    """Decode selected resampled frame indices from a video file."""
+    """Decode selected resampled frame indices from a video file (PyAV, no OpenCV)."""
     if not frame_indices:
         raise ValueError("No frames requested from video.")
 
-    cv2 = _require_cv2()
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {path}")
+    with _AvVideoReader(path) as reader:
+        native_fps = float(reader.fps or 0.0)
+        if native_fps <= 0:
+            native_fps = float(frame_rate or 24.0)
 
-    native_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-    if native_fps <= 0:
-        native_fps = float(frame_rate or 24.0)
+        out_w, out_h, rotate_90_cw = _resolve_load_dimensions(
+            reader.width,
+            reader.height,
+            storage_width=storage_width,
+            storage_height=storage_height,
+            long_edge=long_edge,
+        )
 
-    source_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-    source_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        unique = sorted({int(i) for i in frame_indices})
+        decoded: dict[int, np.ndarray] = {}
+        fallback: np.ndarray | None = None
 
-    out_w, out_h, rotate_90_cw = _resolve_load_dimensions(
-        source_w,
-        source_h,
-        storage_width=storage_width,
-        storage_height=storage_height,
-        long_edge=long_edge,
-    )
+        for src_idx in unique:
+            t_sec = max(0.0, src_idx / float(frame_rate or 24.0))
+            native_frame = int(round(t_sec * native_fps))
+            rgb = reader.read(native_frame)
+            if rgb is None:
+                log.warning("Failed to read frame %d (t=%.3fs) from %s", native_frame, t_sec, path)
+                if fallback is not None:
+                    decoded[src_idx] = fallback
+                continue
 
-    unique = sorted({int(i) for i in frame_indices})
-    decoded: dict[int, np.ndarray] = {}
-    fallback: np.ndarray | None = None
-
-    for src_idx in unique:
-        t_sec = max(0.0, src_idx / float(frame_rate or 24.0))
-        native_frame = int(round(t_sec * native_fps))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, native_frame)
-        ok, bgr = cap.read()
-        if not ok or bgr is None:
-            log.warning("Failed to read frame %d (t=%.3fs) from %s", native_frame, t_sec, path)
-            if fallback is not None:
-                decoded[src_idx] = fallback
-            continue
-
-        if rotate_90_cw:
-            bgr = cv2.rotate(bgr, cv2.ROTATE_90_CLOCKWISE)
-        if (bgr.shape[1], bgr.shape[0]) != (out_w, out_h):
-            bgr = cv2.resize(bgr, (out_w, out_h), interpolation=cv2.INTER_AREA)
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        decoded[src_idx] = rgb
-        fallback = rgb
-
-    cap.release()
+            if rotate_90_cw:
+                rgb = np.ascontiguousarray(np.rot90(rgb, k=-1))
+            if (rgb.shape[1], rgb.shape[0]) != (out_w, out_h):
+                rgb = _resize_rgb(rgb, out_w, out_h)
+            rgb = rgb.astype(np.float32) / 255.0
+            decoded[src_idx] = rgb
+            fallback = rgb
 
     if not decoded:
         raise ValueError(f"No frames decoded from video: {path}")

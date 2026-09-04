@@ -555,15 +555,15 @@ def _parse_segment_export(timeline: dict, segment_count: int) -> SegmentExportRe
             if 0 <= idx < segment_count and idx not in indices:
                 indices.append(idx)
 
-    # NOTE: `enabled` is a one-shot UI flag that the picker clears immediately after
-    # queueing, so by the time the backend reads the timeline it can already be
-    # False even though the user *did* choose segments to export. We therefore gate
-    # purely on `indices`: if the user checked any segment, the request is live and
-    # `enabled` is forced True so downstream call sites (and the
-    # `seg_export_active` check in batch_executor) activate correctly.
     if not indices:
         return SegmentExportRequest(enabled=False, mode=mode, indices=())
-    return SegmentExportRequest(enabled=True, mode=mode, indices=tuple(sorted(indices)))
+    # ``enabled`` is the ONE-SHOT trigger set by the「分段导出」button; ``indices``
+    # is persistent on purpose (the picker reopens with the last selection).
+    # Both must be live. Forcing ``enabled`` True here (as this used to do) made
+    # every later 运行 an export-only pass, because the checked indices never stop
+    # being checked — the export button's flag is the only thing that distinguishes
+    # "export this run" from "generate this run".
+    return SegmentExportRequest(enabled=enabled, mode=mode, indices=tuple(sorted(indices)))
 
 
 def _clip_segment_ranges(

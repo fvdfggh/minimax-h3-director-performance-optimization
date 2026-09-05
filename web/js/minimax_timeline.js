@@ -417,10 +417,11 @@ function stripTimelineEphemeralFields(timeline) {
     }
 }
 
+// 仅隐藏内部序列化字段 timeline_data，以及和时间轴面板重复的只读/派生参数。
+// cfg 与“声音”控制按用户要求可见（不在此列表）。bd_grp_* 分组头本就不在此列表，永远可见。
 const HIDDEN_WIDGETS = [
     "timeline_data", "total_frames", "width", "height", "ref_max_size",
-    "task_type", "global_prompt", "frame_rate", "cfg",
-    // seed stays visible under 采样设置 (with control_after_generate)
+    "task_type", "global_prompt", "frame_rate",
 ];
 
 const DIRECTOR_WIDGET_LABEL_KEYS = {
@@ -2518,7 +2519,7 @@ class MiniMaxH3DirectorEditor {
             </select>
             <label data-i18n="output.fpsLabel" data-i18n-title="tooltip.fps">帧率</label>
             <input type="number" class="bd-num" data-r="timeline-fps" min="1" max="240" step="0.01" value="24" style="width:64px" data-i18n-title="tooltip.timelineFps">
-            <span class="bd-out-audio-wrap hidden" data-r="out-audio-wrap" data-i18n-title="tooltip.audioMode">
+            <span class="bd-out-audio-wrap" data-r="out-audio-wrap" data-i18n-title="tooltip.audioMode">
                 <label data-i18n="output.audio.label">声音</label>
                 <select class="bd-select" data-r="out-audio-mode" style="max-width:120px">
                     <option value="generate" data-i18n="output.audio.generate">生成声音</option>
@@ -4926,7 +4927,12 @@ class MiniMaxH3DirectorEditor {
             this.outHint.textContent = showHint ? genLayoutHint(this.getTaskKey()) : "";
         }
         const isVideoEditTask = taskKey === "v2v" || taskKey === "rv2v";
-        this.outAudioWrap?.classList.toggle("hidden", !isVideoEditTask);
+        // 声音控制对所有任务可见：生成类任务可“生成声音/静音”，编辑类任务额外可用“使用原声”
+        this.outAudioWrap?.classList.remove("hidden");
+        if (this.outAudioMode) {
+            const srcOpt = this.outAudioMode.querySelector('option[value="source"]');
+            if (srcOpt) srcOpt.disabled = !isVideoEditTask;
+        }
         if (this.outExportMode) {
             this.outExportMode.disabled = (isBatch || isFl2v) && !showBatchExport;
             this.outExportMode.classList.toggle("hidden", (isBatch || isFl2v) && !showBatchExport);

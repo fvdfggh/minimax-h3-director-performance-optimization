@@ -20,6 +20,68 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.nodes")
 
 _DEFAULT_GLOBAL_PROMPT = "A cinematic scene with natural motion and synchronized ambience"
 
+# Which wired MODEL slot the run should sample with. ``model`` stays the
+# required main UNET and is also the fallback when the picked slot is unwired.
+RUN_MODEL_MAIN = "主模型 (model)"
+RUN_MODEL_B = "备用模型 1 (model_b)"
+RUN_MODEL_C = "备用模型 2 (model_c)"
+RUN_MODEL_CHOICES = (RUN_MODEL_MAIN, RUN_MODEL_B, RUN_MODEL_C)
+
+
+def resolve_run_model(run_model, *, model, model_b=None, model_c=None):
+    """Pick the UNET for this run. Unwired / unknown slot falls back to ``model``.
+
+    Returns ``(model, note)`` where ``note`` is a short label for the run report.
+    """
+    key = str(run_model or RUN_MODEL_MAIN).strip()
+    if key == RUN_MODEL_B:
+        picked, label = model_b, "model_b"
+    elif key == RUN_MODEL_C:
+        picked, label = model_c, "model_c"
+    else:
+        picked, label = model, "model"
+    if picked is None:
+        return model, f"{label} 未接线 → 已回退到主模型 model"
+    return picked, label
+
+
+def _sanitize_timeline(width, height, total_frames):
+    """Clamp absurd timeline dimensions that a legacy widget-shift can produce.
+
+    A workflow saved while ``run_model`` sat at the top of the widget list shifts
+    every timeline value by one slot, so width/height/total_frames can become
+    nonsense (e.g. a frame_rate value landing in width). That blows the token
+    sequence up and makes Star7's Sol path overflow on SM75. Pull the obvious
+    outliers back into a sane MiniMax H3 range so the run at least proceeds.
+    """
+    changed = []
+
+    def _clamp_int(v, lo, hi, default, name):
+        try:
+            iv = int(round(float(v)))
+        except (TypeError, ValueError):
+            return default, True
+        if iv < lo or iv > hi:
+            return default, True
+        return iv, False
+
+    width, c1 = _clamp_int(width, 64, 4096, 864, "width")
+    if c1:
+        changed.append("width")
+    height, c2 = _clamp_int(height, 64, 4096, 480, "height")
+    if c2:
+        changed.append("height")
+    total_frames, c3 = _clamp_int(total_frames, 1, 500, 124, "total_frames")
+    if c3:
+        changed.append("total_frames")
+    if changed:
+        log.warning(
+            "MiniMax H3 Director: 检测到异常 timeline 参数（疑似旧版控件错位），"
+            "已回退到安全默认值: %s。请重新保存工作流以固化正确参数。",
+            ", ".join(changed),
+        )
+    return width, height, total_frames
+
 
 def director_timeline_required_inputs() -> dict:
     """Timeline widgets — defaults aligned with official MiniMax H3 workflow templates."""
@@ -57,7 +119,7 @@ class MiniMaxH3Director:
             "required": {
                 "model": (
                     "MODEL",
-                    {"tooltip": "MiniMax H3 UNET (UNETLoader)."},
+                    {"tooltip": "MiniMax H3 UNET (UNETLoader)。主模型，也是备用口未接线时的兜底。"},
                 ),
                 "video_vae": (
                     "VAE",
@@ -74,6 +136,35 @@ class MiniMaxH3Director:
                 **director_timeline_required_inputs(),
             },
             "optional": {
+                "run_model": (
+                    list(RUN_MODEL_CHOICES),
+                    {
+                        "default": RUN_MODEL_MAIN,
+                        "tooltip": (
+                            "本次运行用哪个 MODEL 口：主模型 model，或备用口 model_b / model_c。"
+                            "选中的口没接线时自动回退到主模型 model。"
+                            "Refine 未接 refine_model 时，二采也用这里选中的模型。"
+                        ),
+                    },
+                ),
+                "model_b": (
+                    "MODEL",
+                    {
+                        "tooltip": (
+                            "备用 UNET 1。run_model 选「备用模型 1」时使用；"
+                            "未接线则回退到主模型 model。"
+                        ),
+                    },
+                ),
+                "model_c": (
+                    "MODEL",
+                    {
+                        "tooltip": (
+                            "备用 UNET 2。run_model 选「备用模型 2」时使用；"
+                            "未接线则回退到主模型 model。"
+                        ),
+                    },
+                ),
                 "i2v_groups": (
                     "MMX_DIR_GROUP",
                     {
@@ -149,6 +240,8 @@ class MiniMaxH3Director:
         if input_types is not None:
             expected = {
                 "model": "MODEL",
+                "model_b": "MODEL",
+                "model_c": "MODEL",
                 "video_vae": "VAE",
                 "audio_vae": "VAE",
                 "clip": "CLIP",
@@ -181,6 +274,8 @@ class MiniMaxH3Director:
         "Optional i2v_groups / r2v_groups accept multi-group packs from Director Group nodes "
         "(external priority over UI cards). Optional refine accepts MiniMax H3 Director Refine "
         "(second sample / upscale). images_pre_refine is the first-pass video before refine. "
+        "run_model picks which wired MODEL slot samples: model (main, required) or the "
+        "optional model_b / model_c; an unwired pick falls back to model. "
         "Defaults: 0.4MP 16:9 (864×480), 5s / 124 frames @ 24 fps."
     )
 
@@ -202,6 +297,9 @@ class MiniMaxH3Director:
         i2v_groups=None,
         r2v_groups=None,
         refine=None,
+        model_b=None,
+        model_c=None,
+        run_model=RUN_MODEL_MAIN,
         steps=25,
         sampler="res_multistep",
         scheduler="simple",
@@ -219,6 +317,8 @@ class MiniMaxH3Director:
     ):
         del kwargs
 
+        width, height, total_frames = _sanitize_timeline(width, height, total_frames)
+
         plan = prepare_director_plan(
             timeline_data=timeline_data,
             task_type=task_type,
@@ -233,6 +333,11 @@ class MiniMaxH3Director:
             r2v_groups=r2v_groups,
             refine=refine,
         )
+
+        model, model_note = resolve_run_model(
+            run_model, model=model, model_b=model_b, model_c=model_c
+        )
+        log.info("MiniMax H3 Director: 运行模型 %s", model_note)
 
         if batch_mode:
             # Batch mode: three-phase execution
@@ -279,6 +384,9 @@ class MiniMaxH3Director:
                     clear_conditioning_cache_on_run=clear_conditioning_cache_on_run,
                 )
             )
+
+        if model_note:
+            report = f"{report}\n\n运行模型: {model_note}"
 
         result = finalize_director_outputs(
             plan,

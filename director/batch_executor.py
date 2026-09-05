@@ -1934,6 +1934,15 @@ def execute_director_batch(
     # driven by the node's 「清空缓存」button rather than a per-run flag, so they survive
     # failed runs for debugging.
 
+    # Now — and only now — advance the cache generation: this run has just written
+    # fresh renders, so the file groups it superseded are expendable. The pre-run
+    # sync and every read-only HTTP probe leave them in place, otherwise re-wording
+    # a prompt would delete the last render before a replacement exists.
+    try:
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name, gc=True)
+    except Exception as exc:  # pragma: no cover - GC is best-effort
+        log.warning("Segment cache cleanup after batch run skipped (%s).", exc)
+
     return (
         combined,
         segment_outputs,

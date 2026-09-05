@@ -198,6 +198,8 @@ def sync_segment_slots(
     node_id: str | None,
     plan: DirectorPlan,
     workflow_name: str | None = None,
+    *,
+    gc: bool = False,
 ) -> None:
     """Reconcile this node's cache files with the current timeline.
 
@@ -205,6 +207,13 @@ def sync_segment_slots(
     a group deleted in the middle of the timeline takes its own files with it,
     while every other group keeps — or re-adopts — the render matching its
     content. Never raises; a failed sync only costs cache reuse.
+
+    ``gc`` controls whether the *generation is advanced*, i.e. whether file
+    groups that no slot references any more are deleted from disk. It defaults
+    to ``False``: editing a prompt re-hashes that position, which hands it a
+    fresh empty stem and demotes the rendered group to ``prev`` — deleting
+    then would discard the last render before anything has been re-generated.
+    Only call sites that have just produced fresh cache pass ``gc=True``.
     """
     if not node_id:
         return
@@ -219,7 +228,7 @@ def sync_segment_slots(
             # First run after upgrading: adopt the positional caches by content
             # so nothing is re-rendered just because the file names changed.
             adoptable = _adoptable_stems(root)
-        segment_slots.sync_slots(root, hashes, adoptable=adoptable)
+        segment_slots.sync_slots(root, hashes, adoptable=adoptable, gc=gc)
     except Exception as exc:
         log.warning("Segment cache slot sync skipped (%s).", exc)
 
@@ -800,13 +809,23 @@ CLIP_CACHE_SUFFIX = "clip.mp4"
 
 
 def clip_cache_path(
-    node_id: str | None, seg_index: int, workflow_name: str | None = None
+    node_id: str | None,
+    seg_index: int,
+    workflow_name: str | None = None,
+    *,
+    allow_prev: bool = False,
 ) -> Path | None:
     """``.../minimax_director_cache/<slug>/node_<id>/seg_<hash>_clip.mp4``.
 
     Resolved through the slot map, so it follows the segment living at
     ``seg_index`` rather than the index itself. Does not create dirs — callers
     only stat/unlink this.
+
+    ``allow_prev=True``: when the current file group holds no clip, fall back to
+    the superseded group (one generation back). A plan edit re-hashes a position
+    and hands it a fresh, still-empty stem, so the newest clip on disk is then
+    the one under ``prev``. Read-only probes (export status) use this; writers
+    must not, or they would overwrite the previous render.
     """
     if not node_id:
         return None
@@ -815,11 +834,24 @@ def clip_cache_path(
     except Exception:
         return None
     paths = segment_slots.slot_paths(root, int(seg_index))
-    return paths["clip"] if paths else None
+    if paths is None:
+        return None
+    clip = paths["clip"]
+    if allow_prev and not clip.is_file():
+        previous = segment_slots.slot_paths(root, int(seg_index), stale=True)
+        if previous is not None:
+            clip = previous["clip"]
+    return clip
 
 
-def has_segment_clip(node_id: str | None, seg_index: int, workflow_name: str | None = None) -> bool:
-    path = clip_cache_path(node_id, seg_index, workflow_name=workflow_name)
+def has_segment_clip(
+    node_id: str | None,
+    seg_index: int,
+    workflow_name: str | None = None,
+    *,
+    allow_prev: bool = False,
+) -> bool:
+    path = clip_cache_path(node_id, seg_index, workflow_name=workflow_name, allow_prev=allow_prev)
     if path is None:
         return False
     try:
@@ -915,9 +947,11 @@ def segment_export_availability(
 ) -> dict[str, Any]:
     """What「分段导出」can use for one segment, without loading pixel data."""
     idx = int(seg.index)
-    has_clip = has_segment_clip(node_id, idx, workflow_name=workflow_name)
-    # ``allow_stale=True``: an export can still serve the last render after
-    # harmless fingerprint churn (same policy as the merge fill).
+    # ``allow_prev=True`` / ``allow_stale=True``: right after a plan edit the
+    # position has been handed a fresh empty stem, so everything exportable is
+    # under the superseded group. Falling back keeps the last render available
+    # until a new run produces a replacement (same policy as the merge fill).
+    has_clip = has_segment_clip(node_id, idx, workflow_name=workflow_name, allow_prev=True)
     fp_ok = _fingerprint_matches(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
     tensor_path = resolve_segment_cache_path(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
     latent_path = None
@@ -926,9 +960,12 @@ def segment_export_availability(
         candidate = paths["latent"]
         if candidate.is_file():
             latent_path = candidate
-        elif paths["meta"].is_file():
+        else:
             # The latent may live in the superseded file group (one generation
             # back) after a fingerprint churn —「仅有 latent」exports still work.
+            # No ``paths["meta"]`` guard here: a fresh stem has no meta *because*
+            # nothing has been rendered into it yet, which is exactly when the
+            # previous group's latent is the newest one on disk.
             prev = _slot_paths(node_id, workflow_name, idx, stale=True)
             if prev is not None and prev["latent"].is_file():
                 latent_path = prev["latent"]
@@ -943,7 +980,15 @@ def segment_export_availability(
         # counts even if the fingerprint drifted: it is still this segment's
         # last render, which is exactly what the user asked to export.
         "exportable": bool(has_clip or frames or latent),
-        "stale": bool((frames or latent) and not _fingerprint_matches(node_id, seg, plan, workflow_name=workflow_name)),
+        # ``stale`` means "what you would export is the *previous* render": the
+        # current group is empty (a plan edit moved this position to a fresh
+        # stem) and every source we found came from the superseded group. The
+        # clip counts too — a「分段导出」copying a verbatim clip from ``prev`` is
+        # serving old frames just as much as a latent decode would.
+        "stale": bool(
+            (has_clip or frames or latent)
+            and not _fingerprint_matches(node_id, seg, plan, workflow_name=workflow_name)
+        ),
     }
 
 
@@ -1515,7 +1560,11 @@ def run_segment_export(
 
     def _export_clip_copy(idx: int) -> None:
         """Copy the encoded clip cache verbatim — no re-decode, no re-encode."""
-        clip = clip_cache_path(node_id, idx, workflow_name=workflow_name)
+        # ``allow_prev``: right after a plan edit the newest clip lives under the
+        # superseded group, and that is exactly what the availability probe just
+        # reported as exportable. Without the fallback the export would skip a
+        # segment the UI marked as ready.
+        clip = clip_cache_path(node_id, idx, workflow_name=workflow_name, allow_prev=True)
         if clip is not None and clip.is_file() and clip.stat().st_size > 0:
             try:
                 stamp = uuid.uuid4().hex[:6]
@@ -1667,7 +1716,20 @@ def resolve_segment_cache_path(
     meta_path = paths["meta"]
     tensor_path = paths["frames"]
     if not tensor_path.is_file():
-        return None
+        # Mirror :func:`load_segment_cache`: the current group can be empty
+        # because a plan edit just handed this position a fresh stem, in which
+        # case the newest render lives in the superseded group. Probing has to
+        # see it — otherwise「分段导出」reports nothing exportable right after
+        # the user re-words a prompt.
+        if not allow_stale:
+            return None
+        previous = _slot_paths(node_id, workflow_name, idx, stale=True)
+        if previous is None:
+            return None
+        meta_path = previous["meta"]
+        tensor_path = previous["frames"]
+        if not tensor_path.is_file():
+            return None
     try:
         expected = segment_cache_fingerprint(seg, plan)
         if meta_path.is_file():

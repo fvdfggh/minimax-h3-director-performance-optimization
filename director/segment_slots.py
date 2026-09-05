@@ -322,7 +322,7 @@ def sync_slots(
     hashes: Sequence[str],
     *,
     adoptable: dict[str, list[str]] | None = None,
-    gc: bool = True,
+    gc: bool = False,
 ) -> list[dict[str, Any]]:
     """Reconcile the slot list against the current timeline content hashes.
 
@@ -333,11 +333,23 @@ def sync_slots(
     2. otherwise adopts an existing file group holding the same content — this
        is what makes reordering free and lets a re-added group reclaim its old
        render;
-    3. otherwise allocates a fresh ``seg_<hash>[_n]`` stem.
+    3. otherwise allocates a fresh ``seg_<hash>[_n]`` stem
 
-    Files not referenced by any slot (or its one-generation ``prev``) are then
-    deleted, which is how a group deleted in the middle of the timeline takes
-    its cache with it.
+    and remembers the superseded group as ``prev`` so a fingerprint churn still
+    leaves the last render reachable for「选择运行」fills and for export.
+
+    ``gc`` defaults to **False** on purpose. A plan edit (e.g. re-wording one
+    prompt) changes that position's content hash, which allocates a fresh,
+    still-empty stem and demotes the rendered group to ``prev``. Deleting files
+    right there would throw away the only existing render before the user has
+    run anything — and every read-only HTTP route (``cached-segments``,
+    ``segment-export-status``, ``align-to-next-status``) calls this on each
+    poll, so the second poll after an edit would already have destroyed it.
+
+    The generation is therefore only advanced — i.e. unreferenced file groups
+    are only deleted — by the call sites that have just produced fresh cache
+    (``gc=True`` after a completed run). Until then the orphaned groups stay on
+    disk and remain re-adoptable by content hash.
     """
     wanted = [str(item) for item in (hashes or [])]
     with _LOCK:

@@ -1444,6 +1444,16 @@ def execute_director_plan_core(
         pre_source = list(segment_outputs)
     pre_combined = concat_continuous_chunks(pre_source, export_segments, plan)
     export_pre_chunks.clear()
+    # Now — and only now — advance the cache generation. The run has just
+    # written fresh renders, so the file groups it superseded are expendable.
+    # The pre-run sync above and every read-only HTTP probe deliberately leave
+    # them alone, otherwise re-wording a prompt would delete the last render
+    # before a replacement exists.
+    if not held_for_confirmation:
+        try:
+            sync_segment_slots(node_id, plan, workflow_name=workflow_name, gc=True)
+        except Exception as exc:  # pragma: no cover - GC is best-effort
+            log.warning("Segment cache cleanup after run skipped (%s).", exc)
     return (
         combined,
         segment_outputs,

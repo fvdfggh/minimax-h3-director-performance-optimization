@@ -14,17 +14,23 @@ Kind                        File name                               Lifetime
 text encoding               ``cond_text_<hash>.pt``                 reusable
 image encoding              ``cond_image_<hash>.pt``                reusable
 video encoding              ``cond_video_<hash>.pt``                reusable
-sampled latent              ``seg_XXXX_latent.pt``                  durable
-decoded frames              ``seg_XXXX_frames.pt``                  legacy/optional
-head+tail frames            ``seg_XXXX_frames_ht.pt``               durable
-audio latent                ``seg_XXXX_audio.pt``                   durable
-rendered clip               ``seg_XXXX_clip.mp4``                   durable
-segment meta / handoff      ``seg_XXXX_meta.json`` / ``_handoff``   durable
+sampled latent              ``seg_<hash>_latent.pt``                durable
+decoded frames              ``seg_<hash>_frames.pt``                legacy/optional
+head+tail frames            ``seg_<hash>_frames_ht.pt``             durable
+audio latent                ``seg_<hash>_audio.pt``                 durable
+rendered clip               ``seg_<hash>_clip.mp4``                 durable
+segment meta / handoff      ``seg_<hash>_meta.json`` / ``_handoff`` durable
+first-pass (Refine)         ``seg_<hash>_pre_*.{pt,json}``          durable
+slot map (position→files)   ``segment_slots.json``                  durable
 batch scratch               ``seg_XXXX_scratch_*.pt``               per-run
 ==========================  ======================================  ==========
 
+``<hash>`` is the segment's **content** hash (prompt + references + duration +
+sampling + refine), not its position — see :mod:`segment_slots`, which owns the
+timeline-position → file-group mapping. Repeated content appends ``_1``, ``_2``.
+
 The split matters for clearing: scratch files are regenerate-in-place working
-state, while ``seg_XXXX_*`` are what motion context and「全部导出」read back, so
+state, while ``seg_<hash>_*`` are what motion context and「全部导出」read back, so
 ``SCRATCH_PREFIX`` is the only prefix a run may delete on its own.
 
 Historically these lived in three sibling roots (``minimax_seg_cache``,
@@ -166,9 +172,18 @@ def node_cache_dir(
     return base
 
 
-def segment_paths(root: Path, seg_index: int) -> dict[str, Path]:
-    """Every per-segment artefact path for ``seg_index`` under ``root``."""
-    stem = f"{SCRATCH_PREFIX}{int(seg_index):04d}"
+def legacy_stem(seg_index: int) -> str:
+    """``seg_0003`` — the pre-slot-map name, kept for migration and fallbacks."""
+    return f"{SCRATCH_PREFIX}{int(seg_index):04d}"
+
+
+def segment_paths(root: Path, stem: str) -> dict[str, Path]:
+    """Every per-segment artefact path for one file *stem* under ``root``.
+
+    ``stem`` comes from the slot map (:mod:`segment_slots`) and names the
+    segment's **content**, never its position — so a group deleted in the middle
+    of the timeline does not move anyone else's files.
+    """
     return {
         "latent": root / f"{stem}{LATENT_SUFFIX}",
         "frames": root / f"{stem}{FRAMES_SUFFIX}",
@@ -178,6 +193,47 @@ def segment_paths(root: Path, seg_index: int) -> dict[str, Path]:
         "meta": root / f"{stem}{META_SUFFIX}",
         "handoff": root / f"{stem}{HANDOFF_SUFFIX}",
     }
+
+
+def first_pass_paths(root: Path, stem: str) -> dict[str, Path]:
+    """confirm-first-pass artefacts (``<stem>_pre_*``) for one file stem."""
+    return {
+        "meta": root / f"{stem}_pre_meta.json",
+        "latent": root / f"{stem}_pre_latent.pt",
+        "frames": root / f"{stem}_pre_frames.pt",
+        "handoff": root / f"{stem}_pre_handoff.json",
+    }
+
+
+#: Suffixes of every durable per-segment artefact, **longest first** so
+#: :func:`stem_of_filename` cannot mistake ``_pre_meta.json`` for ``_meta.json``.
+SEGMENT_SUFFIXES = (
+    "_pre_handoff.json",
+    "_pre_frames.pt",
+    "_pre_latent.pt",
+    "_pre_meta.json",
+    "_frames_ht.pt",
+    "_handoff.json",
+    "_latent.pt",
+    "_frames.pt",
+    "_audio.pt",
+    "_clip.mp4",
+    "_meta.json",
+)
+
+
+def stem_of_filename(name: str) -> str | None:
+    """File stem of a durable per-segment artefact, else ``None``.
+
+    Scratch files and the encoding cache are excluded on purpose: they have
+    their own lifecycle and must never be garbage-collected by the slot map.
+    """
+    if not name.startswith(SCRATCH_PREFIX) or SCRATCH_MARK in name:
+        return None
+    for suffix in SEGMENT_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)] or None
+    return None
 
 
 def scratch_path(root: Path, seg_index: int, kind: str) -> Path:

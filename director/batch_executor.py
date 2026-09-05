@@ -58,6 +58,7 @@ from .segment_cache import (
     load_segment_audio, load_segment_av_latent,
     load_segment_handoff_meta, probe_segment_cache_shape,
     save_first_pass_cache, save_segment_cache, save_segment_clip,
+    sync_segment_slots,
 )
 from .segment_mp4_export import (
     copy_segment_mp4_suffix, maybe_export_segment_mp4, maybe_export_segment_mp4s,
@@ -843,6 +844,9 @@ def execute_director_batch(
     Returns the same tuple as execute_director_plan_core.
     """
     all_segments = plan.segments
+    # Reconcile cache files with the current timeline first: a group deleted in
+    # the middle takes its own files, everyone else keeps their own render.
+    sync_segment_slots(node_id, plan, workflow_name=workflow_name)
     # ``ext_meta`` is the raw externalGroups payload — a plain dict, NOT a plan.
     # Audio mode must be resolved from the plan, which owns raw["output"]["audioMode"].
     ext_meta = (plan.raw or {}).get("externalGroups") or {}

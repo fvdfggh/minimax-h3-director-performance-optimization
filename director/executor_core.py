@@ -72,10 +72,10 @@ from .segment_cache import (
     load_segment_av_latent,
     load_segment_cache,
     load_segment_handoff_meta,
-    prune_segment_cache,
     save_first_pass_cache,
     save_segment_cache,
     save_segment_clip,
+    sync_segment_slots,
 )
 from .segment_mp4_export import (
     copy_segment_mp4_suffix,
@@ -327,9 +327,12 @@ def execute_director_plan_core(
             )
 
     all_segments = plan.segments
-    # Drop caches for deleted/shortened timelines. Use every segment index (not
+    # Reconcile cache files with the current timeline *before* anything reads or
+    # writes them. Content-addressed, so a group deleted in the middle takes its
+    # own files and every other group keeps (or re-adopts) the render that
+    # matches its content — no positional reshuffle. Uses every segment (not
     # run_indices): unselected「选择运行」slots still fill merge/export from disk.
-    prune_segment_cache(node_id, [seg.index for seg in all_segments], workflow_name=workflow_name)
+    sync_segment_slots(node_id, plan, workflow_name=workflow_name)
     # Strictly honor「选择运行」— never force-sample unselected segments.
     run_indices = plan.run_indices if plan.run_indices is not None else frozenset(range(len(all_segments)))
 

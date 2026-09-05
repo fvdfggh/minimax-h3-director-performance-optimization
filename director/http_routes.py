@@ -543,7 +543,7 @@ async def minimax_clear_cache(request):
         return web.Response(status=400, text="Invalid Director node id.")
 
     from .conditioning_cache import clear_conditioning_cache
-    from . import cache_layout
+    from . import cache_layout, segment_slots
 
     workflow_name = str(body.get("workflow_name") or "").strip() or None
     clear_all = bool(body.get("clear_all"))
@@ -580,6 +580,9 @@ async def minimax_clear_cache(request):
                 cleared["segments"] += 1
             except OSError as exc:
                 log.warning("MiniMax H3 Director clear segment %s failed: %s", path, exc)
+        # The slot map names those files; drop it too so the next run rebuilds
+        # the position → files mapping from scratch.
+        segment_slots.clear_slots(cache_dir)
 
     log.info(
         "MiniMax H3 Director cleared caches for node %s (workflow '%s', clear_all=%s): %s",
@@ -604,7 +607,7 @@ async def minimax_first_pass_cache_status(request):
         timeline_data = json.dumps(timeline_data, ensure_ascii=False)
     try:
         from .plan import build_director_plan
-        from .segment_cache import inspect_first_pass_cache
+        from .segment_cache import inspect_first_pass_cache, sync_segment_slots
 
         plan = build_director_plan(
             str(timeline_data),
@@ -624,6 +627,9 @@ async def minimax_first_pass_cache_status(request):
         plan.sample_shift_video = float(body.get("shift_video") or 12.0)
         plan.sample_shift_audio = float(body.get("shift_audio") or 3.0)
         workflow_name = str(body.get("workflow_name") or "").strip() or None
+        # Drop caches orphaned by timeline edits (e.g. a group deleted in the
+        # middle) before reporting what is actually available.
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name)
         return web.json_response(inspect_first_pass_cache(node_id, plan, workflow_name=workflow_name))
     except Exception as exc:
         log.warning("MiniMax H3 Director first-pass cache inspection failed: %s", exc)
@@ -649,7 +655,7 @@ async def minimax_segment_export_status(request):
         timeline_data = json.dumps(timeline_data, ensure_ascii=False)
     try:
         from .plan import build_director_plan
-        from .segment_cache import inspect_segment_export_status
+        from .segment_cache import inspect_segment_export_status, sync_segment_slots
 
         workflow_name = str(body.get("workflow_name") or "").strip() or None
 
@@ -663,6 +669,9 @@ async def minimax_segment_export_status(request):
             height=int(body.get("height") or 480),
             ref_max_size=int(body.get("ref_max_size") or 864),
         )
+        # Reconcile first: the picker must not offer a render that belongs to a
+        # group deleted from the middle of the timeline.
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name)
         return web.json_response(inspect_segment_export_status(node_id, plan, workflow_name=workflow_name))
     except Exception as exc:
         log.warning("MiniMax H3 Director segment-export status failed: %s", exc)
@@ -691,7 +700,7 @@ async def minimax_align_to_next_status(request):
         timeline_data = json.dumps(timeline_data, ensure_ascii=False)
     try:
         from .plan import build_director_plan
-        from .segment_cache import has_next_segment_av_latent
+        from .segment_cache import has_next_segment_av_latent, sync_segment_slots
         from .segment_continuity import is_continuity_active
 
         workflow_name = str(body.get("workflow_name") or "").strip() or None
@@ -726,6 +735,9 @@ async def minimax_align_to_next_status(request):
                 ref_max_size=int(body.get("ref_max_size") or 864),
             )
             segments = list(getattr(plan, "segments", None) or [])
+        # The next segment's latent must be the neighbour's own render, so the
+        # slot map is reconciled before anything is probed.
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name)
         rows = []
         for seg in segments:
             rows.append(
@@ -769,7 +781,7 @@ async def minimax_segment_export(request):
 
     try:
         from .plan import build_director_plan, normalize_segment_export_mode
-        from .segment_cache import run_segment_export
+        from .segment_cache import run_segment_export, sync_segment_slots
 
         mode = normalize_segment_export_mode(mode)
         try:
@@ -787,6 +799,10 @@ async def minimax_segment_export(request):
             height=int(body.get("height") or 480),
             ref_max_size=int(body.get("ref_max_size") or 864),
         )
+        workflow_name = str(body.get("workflow_name") or "").strip() or None
+        # Reconcile before exporting: never copy out a file group that belongs
+        # to a group already deleted from the timeline.
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name)
         # Disk-only export: clip cache / raw frame cache. Latent-only segments
         # cannot be decoded here (no VAE in an HTTP request), so they are skipped
         # with a hint — the full latent decode happens during node execution when
@@ -797,7 +813,7 @@ async def minimax_segment_export(request):
             plan,
             indices,
             mode=mode,
-            workflow_name=str(body.get("workflow_name") or "").strip() or None,
+            workflow_name=workflow_name,
         )
         return web.json_response(result)
     except Exception as exc:

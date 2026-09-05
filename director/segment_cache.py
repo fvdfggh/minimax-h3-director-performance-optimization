@@ -20,12 +20,14 @@ import torch
 import folder_paths
 
 from . import cache_layout
+from . import segment_slots
 from .h3_motion_context import CONTINUITY_PIPELINE_ID
 from .plan import DirectorPlan, SegmentPlan, resolve_ref_image_size
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache")
 
-SOURCE_VIDEO_FP_KEY = "source_video"
+#: Re-exported so the rest of the package keeps importing it from here.
+SOURCE_VIDEO_FP_KEY = segment_slots.SOURCE_VIDEO_FP_KEY
 
 
 def source_video_identity(plan: DirectorPlan) -> list[str]:
@@ -113,10 +115,8 @@ def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[
         or seg.reference_video_meta.get("fileName")
         or ""
     ).strip()
-    return {
-        "index": seg.index,
-        "start": seg.start_frame,
-        "end": seg.end_frame,
+    source_identity = source_video_identity(plan)
+    identity: dict[str, Any] = {
         "prompt": seg.prompt,
         "negative": seg.negative_prompt,
         "task_key": seg.task_key,
@@ -131,7 +131,7 @@ def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[
         "ref_videos": ref_video_files,
         "ref_video": ref_video_file,
         "ref_video_start": seg.reference_video_start_frame,
-        SOURCE_VIDEO_FP_KEY: source_video_identity(plan),
+        SOURCE_VIDEO_FP_KEY: source_identity,
         "continuity": plan.continuity_enabled,
         "continuity_overlap": plan.continuity_overlap_frames if plan.continuity_enabled else 0,
         "continuity_from_prev": bool(getattr(seg, "continuity_from_prev", True)),
@@ -141,6 +141,20 @@ def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[
         "continuity_to_next": bool(getattr(seg, "continuity_to_next", False)),
         "continuity_pipeline": CONTINUITY_PIPELINE_ID,
     }
+    # Position-free on purpose. ``index``, and (without a source video) the
+    # absolute ``start``/``end``, describe *where a segment sits* rather than
+    # *what it renders*. Keeping them here made every cache belong to a slot, so
+    # deleting a group in the middle silently re-pointed every later render at
+    # the deleted group's files. The slot map now owns position → files; this
+    # fingerprint only describes content.
+    if source_identity:
+        # A source timeline: the absolute range selects real source frames.
+        identity["start"] = seg.start_frame
+        identity["end"] = seg.end_frame
+    else:
+        # Gen timelines: only the duration changes the render.
+        identity["length"] = max(0, int(seg.end_frame) - int(seg.start_frame))
+    return identity
 
 
 def first_pass_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
@@ -166,6 +180,114 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
 
     fp.update(refine_fingerprint(plan))
     return fp
+
+
+def slot_content_hash(seg: SegmentPlan, plan: DirectorPlan) -> str:
+    """Content hash behind a segment's cache file names.
+
+    Built from the identity fingerprint only, so it is independent of the
+    segment's position (that is the slot map's job) and of the Refine knobs
+    (so confirm-first-pass ``.pre`` files survive a Refine change).
+    """
+    return segment_slots.content_hash_of_fingerprint(
+        _segment_identity_fingerprint(seg, plan), defaults=_fingerprint_defaults()
+    )
+
+
+def sync_segment_slots(
+    node_id: str | None,
+    plan: DirectorPlan,
+    workflow_name: str | None = None,
+) -> None:
+    """Reconcile this node's cache files with the current timeline.
+
+    The slot-aware replacement for the old index-based ``prune_segment_cache``:
+    a group deleted in the middle of the timeline takes its own files with it,
+    while every other group keeps — or re-adopts — the render matching its
+    content. Never raises; a failed sync only costs cache reuse.
+    """
+    if not node_id:
+        return
+    root = _cache_root(node_id, workflow_name)
+    if root is None:
+        return
+    try:
+        segments = list(getattr(plan, "segments", None) or [])
+        hashes = [slot_content_hash(seg, plan) for seg in segments]
+        adoptable = None
+        if not segment_slots.has_manifest(root):
+            # First run after upgrading: adopt the positional caches by content
+            # so nothing is re-rendered just because the file names changed.
+            adoptable = _adoptable_stems(root)
+        segment_slots.sync_slots(root, hashes, adoptable=adoptable)
+    except Exception as exc:
+        log.warning("Segment cache slot sync skipped (%s).", exc)
+
+
+def _adoptable_stems(root: Path) -> dict[str, list[str]]:
+    """``content hash -> file stems`` for caches written before the slot map.
+
+    Those files are named after a *position*, so the only way to know which
+    render one holds is to read the fingerprint it stored.
+    """
+    out: dict[str, list[str]] = {}
+    try:
+        for meta_path in sorted(root.glob("*_meta.json")):
+            if meta_path.name.endswith("_pre_meta.json"):
+                continue
+            stem = cache_layout.stem_of_filename(meta_path.name)
+            if not stem or segment_slots.stem_content_hash(stem):
+                continue
+            try:
+                stored = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(stored, dict):
+                continue
+            content_hash = segment_slots.content_hash_of_fingerprint(
+                stored, defaults=_fingerprint_defaults()
+            )
+            out.setdefault(content_hash, []).append(stem)
+    except OSError:
+        return out
+    return out
+
+
+def _slot_paths(
+    node_id: str | None,
+    workflow_name: str | None,
+    position: int,
+    *,
+    stale: bool = False,
+) -> dict[str, Path] | None:
+    """Durable artefact paths for timeline ``position``.
+
+    ``None`` means this position owns no cache (timeline shrank / never ran) —
+    deliberately distinct from "paths that do not exist yet".
+    """
+    if not node_id:
+        return None
+    root = _cache_root(node_id, workflow_name)
+    if root is None:
+        return None
+    return segment_slots.slot_paths(root, position, stale=stale)
+
+
+def _first_pass_paths(
+    node_id: str | None,
+    workflow_name: str | None,
+    position: int,
+) -> dict[str, Path] | None:
+    """confirm-first-pass artefact paths for timeline ``position``."""
+    if not node_id:
+        return None
+    root = _cache_root(node_id, workflow_name)
+    if root is None:
+        return None
+    stem = segment_slots.resolve_stem(root, position)
+    if not stem:
+        return None
+    return cache_layout.first_pass_paths(root, stem)
 
 
 def _safe_unlink(path: Path) -> bool:
@@ -326,7 +448,12 @@ def save_segment_cache(
         return
     fp = segment_cache_fingerprint(seg, plan)
     idx = seg.index
-    paths = cache_layout.segment_paths(root, idx)
+    # Resolve through the slot map: the files follow this segment's content,
+    # not its position, so a group removed elsewhere cannot touch them.
+    stem = segment_slots.resolve_stem(root, idx)
+    if not stem:
+        return
+    paths = cache_layout.segment_paths(root, stem)
     pt_path = paths["frames"]
     ht_path = paths["frames_ht"]
     meta_path = paths["meta"]
@@ -383,7 +510,7 @@ def save_segment_cache(
             idx + 1,
             exc,
         )
-        for stray in root.glob(f".seg_{idx:04d}.*"):
+        for stray in root.glob(f".{stem}.*"):
             _safe_unlink(stray)
 
 
@@ -434,8 +561,11 @@ def load_segment_handoff_meta(
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}_meta.json"
-    handoff_path = root / f"seg_{idx:04d}_handoff.json"
+    paths = _slot_paths(node_id, workflow_name, idx)
+    if paths is None:
+        return None
+    meta_path = paths["meta"]
+    handoff_path = paths["handoff"]
     if not handoff_path.is_file():
         return None
     # A handoff can exist without its ``.meta.json`` (latent-only leftovers). With
@@ -501,8 +631,11 @@ def load_segment_av_latent(
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}_meta.json"
-    latent_path = root / f"seg_{idx:04d}_latent.pt"
+    paths = _slot_paths(node_id, workflow_name, idx)
+    if paths is None:
+        return None
+    meta_path = paths["meta"]
+    latent_path = paths["latent"]
     if not latent_path.is_file():
         return None
     # A latent can exist without its ``.meta.json`` (e.g. a latent written by an
@@ -540,7 +673,8 @@ def next_segment_av_latent_path(node_id: str | None, seg_index: int, workflow_na
     root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
-    return root / f"seg_{int(seg_index) + 1:04d}_latent.pt"
+    paths = segment_slots.slot_paths(root, int(seg_index) + 1)
+    return paths["latent"] if paths else None
 
 
 def has_next_segment_av_latent(node_id: str | None, seg_index: int, workflow_name: str | None = None) -> bool:
@@ -581,14 +715,13 @@ def load_next_segment_av_latent(node_id: str | None, seg_index: int, workflow_na
     return payload
 
 
-def _render_present(root: Path, idx: int) -> bool:
-    """Whether a usable rendered segment exists on disk for ``idx``.
+def _render_present(paths: dict[str, Path]) -> bool:
+    """Whether a usable rendered segment exists in this file group.
 
     The full ``frames.pt`` is no longer written (space), so presence is
     satisfied by ANY source that can reproduce frames: the legacy full tensor,
     or the encoded ``clip.mp4`` that :func:`load_segment_cache` rebuilds from.
     """
-    paths = cache_layout.segment_paths(root, idx)
     if paths["frames"].is_file():
         return True
     return paths["clip"].is_file()
@@ -604,31 +737,38 @@ def _fingerprint_matches(
 ) -> bool:
     if not node_id:
         return False
-    root = _cache_root(node_id, workflow_name)
-    if root is None:
-        return False
-    meta_path = root / f"seg_{seg.index:04d}_meta.json"
-    if not meta_path.is_file():
-        return False
-    try:
-        stored = json.loads(meta_path.read_text(encoding="utf-8"))
-        expected = segment_cache_fingerprint(seg, plan)
-        if _fingerprint_compatible(stored, expected):
-            return True
-        if _reject_source_stale(stored, expected, seg_index=seg.index, quiet=True):
-            return False
-        return bool(allow_stale and _render_present(root, seg.index))
-    except Exception:
-        return False
+    idx = int(seg.index)
+    # Current generation first; with ``allow_stale`` the superseded file group
+    # (kept for exactly one generation) is accepted too — that is what keeps a
+    # fingerprint churn from blanking an unselected slot on「全部导出」.
+    for stale in ((False, True) if allow_stale else (False,)):
+        paths = _slot_paths(node_id, workflow_name, idx, stale=stale)
+        if paths is None:
+            continue
+        meta_path = paths["meta"]
+        if not meta_path.is_file():
+            continue
+        try:
+            stored = json.loads(meta_path.read_text(encoding="utf-8"))
+            expected = segment_cache_fingerprint(seg, plan)
+            if _fingerprint_compatible(stored, expected):
+                return True
+            if _reject_source_stale(stored, expected, seg_index=idx, quiet=True):
+                continue
+            if allow_stale and _render_present(paths):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 # --------------------------------------------------------------------------
 # Segment video-clip cache (seg_XXXX.clip.mp4)
 #
 # An encoded clip kept beside the latent/frame cache so「分段导出」can serve a
-# segment straight from disk. Same lifetime as the other ``seg_XXXX.*`` files:
-# ``prune_segment_cache`` matches ``^seg_(\d+)\.`` so a removed timeline index
-# takes its clip with it, and a fresh decode overwrites it in place.
+# segment straight from disk. Same lifetime as the other ``seg_<hash>.*`` files:
+# the slot map's garbage collection drops a removed group's clip, and a fresh
+# decode overwrites it in place.
 # --------------------------------------------------------------------------
 
 CLIP_CACHE_SUFFIX = "clip.mp4"
@@ -637,9 +777,11 @@ CLIP_CACHE_SUFFIX = "clip.mp4"
 def clip_cache_path(
     node_id: str | None, seg_index: int, workflow_name: str | None = None
 ) -> Path | None:
-    """``.../minimax_director_cache/<slug>/node_<id>/seg_XXXX_clip.mp4``.
+    """``.../minimax_director_cache/<slug>/node_<id>/seg_<hash>_clip.mp4``.
 
-    Does not create dirs — callers only stat/unlink this.
+    Resolved through the slot map, so it follows the segment living at
+    ``seg_index`` rather than the index itself. Does not create dirs — callers
+    only stat/unlink this.
     """
     if not node_id:
         return None
@@ -647,7 +789,8 @@ def clip_cache_path(
         root = cache_layout.node_cache_dir(str(node_id), workflow_name, create=False)
     except Exception:
         return None
-    return root / f"seg_{int(seg_index):04d}{cache_layout.CLIP_SUFFIX}"
+    paths = segment_slots.slot_paths(root, int(seg_index))
+    return paths["clip"] if paths else None
 
 
 def has_segment_clip(node_id: str | None, seg_index: int, workflow_name: str | None = None) -> bool:
@@ -714,11 +857,11 @@ def save_segment_clip(
         # every later export would re-run the VAE. Keep the full tensor instead —
         # rare (ffmpeg missing / encode error) and worth the disk.
         try:
-            root = _cache_root(node_id, workflow_name)
-            if root is not None:
+            fallback_paths = _slot_paths(node_id, workflow_name, int(seg.index))
+            if fallback_paths is not None:
                 payload = _frames_to_disk(frames)
                 _write_via_temp(
-                    cache_layout.segment_paths(root, int(seg.index))["frames"],
+                    fallback_paths["frames"],
                     lambda p: torch.save(payload, p),
                 )
                 log.warning(
@@ -753,11 +896,17 @@ def segment_export_availability(
     fp_ok = _fingerprint_matches(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
     tensor_path = resolve_segment_cache_path(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
     latent_path = None
-    root = _cache_root(node_id, workflow_name) if node_id else None
-    if root is not None:
-        candidate = root / f"seg_{idx:04d}_latent.pt"
+    paths = _slot_paths(node_id, workflow_name, idx)
+    if paths is not None:
+        candidate = paths["latent"]
         if candidate.is_file():
             latent_path = candidate
+        elif paths["meta"].is_file():
+            # The latent may live in the superseded file group (one generation
+            # back) after a fingerprint churn —「仅有 latent」exports still work.
+            prev = _slot_paths(node_id, workflow_name, idx, stale=True)
+            if prev is not None and prev["latent"].is_file():
+                latent_path = prev["latent"]
     frames = fp_ok and tensor_path is not None
     latent = latent_path is not None
     return {
@@ -1078,9 +1227,8 @@ def predecode_latent_segments(
         # mp4 just to count its frames, which is the very cost this predecode
         # exists to avoid.
         expected_trim, expected_export = _expected_export_frames(plan, seg)
-        root = _cache_root(node_id, workflow_name)
-        if root is not None:
-            paths = cache_layout.segment_paths(root, seg.index)
+        paths = _slot_paths(node_id, workflow_name, int(seg.index))
+        if paths is not None:
             cached_n = 0
             if paths["frames"].is_file():
                 shape = probe_segment_cache_shape(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
@@ -1111,7 +1259,7 @@ def predecode_latent_segments(
         # it behind makes every later consumer (node output, merge, mp4) read the
         # old untrimmed frames instead of the frames just decoded.
         try:
-            if root is not None and paths["frames"].is_file():
+            if paths is not None and paths["frames"].is_file():
                 _safe_unlink(paths["frames"])
                 log.info(
                     "分段导出 predecode: seg #%d dropped stale frames.pt "
@@ -1487,9 +1635,12 @@ def resolve_segment_cache_path(
     root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
-    idx = seg.index
-    meta_path = root / f"seg_{idx:04d}_meta.json"
-    tensor_path = root / f"seg_{idx:04d}_frames.pt"
+    idx = int(seg.index)
+    paths = _slot_paths(node_id, workflow_name, idx)
+    if paths is None:
+        return None
+    meta_path = paths["meta"]
+    tensor_path = paths["frames"]
     if not tensor_path.is_file():
         return None
     try:
@@ -1539,10 +1690,10 @@ def _probe_clip_shape(
     Mirrors what :func:`load_segment_cache` would rebuild, so callers measuring
     a merge get the same numbers without decoding a single pixel.
     """
-    root = _cache_root(node_id, workflow_name)
-    if root is None:
+    paths = _slot_paths(node_id, workflow_name, int(seg.index))
+    if paths is None:
         return None
-    clip_path = cache_layout.segment_paths(root, seg.index)["clip"]
+    clip_path = paths["clip"]
     if not clip_path.is_file():
         return None
     # PyAV only — the portable build runs ``python -s``, which hides the
@@ -1631,36 +1782,58 @@ def load_segment_cache(
     root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
-    idx = seg.index
-    paths = cache_layout.segment_paths(root, idx)
-    # 1) Legacy full tensor (older runs) — still valid, used as-is.
-    if paths["frames"].is_file():
-        try:
-            return _frames_from_disk(
-                torch.load(paths["frames"], map_location="cpu", weights_only=True)
-            )
-        except Exception as exc:
-            log.warning("Failed to load legacy segment %d frames: %s", idx + 1, exc)
-    # 2) Rebuild full segment from the rendered clip; restore exact head/tail.
-    clip_path = paths["clip"]
-    full = _load_full_segment_via_clip(clip_path) if clip_path.is_file() else None
-    if full is not None:
-        ht_path = paths["frames_ht"]
-        if ht_path.is_file():
+    idx = int(seg.index)
+    paths = _slot_paths(node_id, workflow_name, idx)
+    if paths is None:
+        return None
+
+    def _load_from(group: dict[str, Path]) -> torch.Tensor | None:
+        # 1) Legacy full tensor (older runs) — still valid, used as-is.
+        if group["frames"].is_file():
             try:
-                ht = torch.load(ht_path, map_location="cpu", weights_only=True)
-                if torch.is_tensor(ht) and ht.ndim == 4:
-                    n = int(ht.shape[0])
-                    hn = min(HEADTAIL_N, n // 2, int(full.shape[0]))
-                    head = ht[:hn].float().div(255.0) if ht.dtype == torch.uint8 else ht[:hn].float()
-                    tail = ht[n - hn:].float().div(255.0) if ht.dtype == torch.uint8 else ht[n - hn:].float()
-                    if int(head.shape[0]) <= int(full.shape[0]):
-                        full[:hn] = head.to(full.dtype)
-                    if int(tail.shape[0]) <= int(full.shape[0]):
-                        full[int(full.shape[0]) - hn:] = tail.to(full.dtype)
+                return _frames_from_disk(
+                    torch.load(group["frames"], map_location="cpu", weights_only=True)
+                )
             except Exception as exc:
-                log.debug("Segment %d head/tail restore skipped: %s", idx + 1, exc)
-        return full
+                log.warning("Failed to load legacy segment %d frames: %s", idx + 1, exc)
+        # 2) Rebuild full segment from the rendered clip; restore exact head/tail.
+        clip_path = group["clip"]
+        full = _load_full_segment_via_clip(clip_path) if clip_path.is_file() else None
+        if full is not None:
+            ht_path = group["frames_ht"]
+            if ht_path.is_file():
+                try:
+                    ht = torch.load(ht_path, map_location="cpu", weights_only=True)
+                    if torch.is_tensor(ht) and ht.ndim == 4:
+                        n = int(ht.shape[0])
+                        hn = min(HEADTAIL_N, n // 2, int(full.shape[0]))
+                        head = ht[:hn].float().div(255.0) if ht.dtype == torch.uint8 else ht[:hn].float()
+                        tail = ht[n - hn:].float().div(255.0) if ht.dtype == torch.uint8 else ht[n - hn:].float()
+                        if int(head.shape[0]) <= int(full.shape[0]):
+                            full[:hn] = head.to(full.dtype)
+                        if int(tail.shape[0]) <= int(full.shape[0]):
+                            full[int(full.shape[0]) - hn:] = tail.to(full.dtype)
+                except Exception as exc:
+                    log.debug("Segment %d head/tail restore skipped: %s", idx + 1, exc)
+            return full
+        return None
+
+    found = _load_from(paths)
+    if found is not None:
+        return found
+    if allow_stale:
+        # The current file group is empty but the superseded one (kept for one
+        # generation) still holds this segment's last render — that is exactly
+        # the「选择运行」fill case after a fingerprint churn.
+        previous = _slot_paths(node_id, workflow_name, idx, stale=True)
+        if previous is not None:
+            found = _load_from(previous)
+            if found is not None:
+                log.warning(
+                    "Segment %d: no current cache; filled from its previous render.",
+                    idx + 1,
+                )
+                return found
     # 3) Nothing usable (clip missing + no legacy frames).
     log.debug("Segment %d cache miss: no clip.mp4 and no legacy frames.pt", idx + 1)
     return None
@@ -1683,8 +1856,11 @@ def load_segment_tail(
     root = _cache_root(node_id, workflow_name)
     if root is None:
         return None
-    idx = seg.index
-    ht_path = cache_layout.segment_paths(root, idx)["frames_ht"]
+    idx = int(seg.index)
+    paths = _slot_paths(node_id, workflow_name, idx)
+    if paths is None:
+        return None
+    ht_path = paths["frames_ht"]
     if not ht_path.is_file():
         # Fall back to the full segment's tail if only legacy frames exist.
         full = load_segment_cache(node_id, seg, plan, workflow_name=workflow_name)
@@ -1720,11 +1896,16 @@ def load_segment_audio(
         node_id, seg, plan, allow_stale=allow_stale, workflow_name=workflow_name
     ):
         return None
-    root = _cache_root(node_id, workflow_name)
-    if root is None:
-        return None
-    audio_path = root / f"seg_{seg.index:04d}_audio.pt"
-    if not audio_path.is_file():
+    idx = int(seg.index)
+    paths = _slot_paths(node_id, workflow_name, idx)
+    audio_path = paths["audio"] if paths else None
+    if allow_stale and (audio_path is None or not audio_path.is_file()):
+        # The fingerprint may have matched the superseded group, whose audio is
+        # the one that belongs to that render.
+        previous = _slot_paths(node_id, workflow_name, idx, stale=True)
+        if previous is not None and previous["audio"].is_file():
+            audio_path = previous["audio"]
+    if audio_path is None or not audio_path.is_file():
         return None
     try:
         payload = torch.load(audio_path, map_location="cpu", weights_only=False)
@@ -1760,10 +1941,14 @@ def save_first_pass_cache(
         return
     fp = first_pass_cache_fingerprint(seg, plan)
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}_pre_meta.json"
-    latent_path = root / f"seg_{idx:04d}_pre_latent.pt"
-    frames_path = root / f"seg_{idx:04d}_pre_frames.pt"
-    handoff_path = root / f"seg_{idx:04d}_pre_handoff.json"
+    stem = segment_slots.resolve_stem(root, idx)
+    if not stem:
+        return
+    paths = cache_layout.first_pass_paths(root, stem)
+    meta_path = paths["meta"]
+    latent_path = paths["latent"]
+    frames_path = paths["frames"]
+    handoff_path = paths["handoff"]
     try:
         cpu_latent = _av_latent_to_cpu(av_latent)
         _write_via_temp(latent_path, lambda p: torch.save(cpu_latent, p))
@@ -1792,7 +1977,7 @@ def save_first_pass_cache(
             idx + 1,
             exc,
         )
-        for stray in root.glob(f".seg_{idx:04d}.pre.*"):
+        for stray in root.glob(f".{stem}.*"):
             _safe_unlink(stray)
 
 
@@ -1810,10 +1995,13 @@ def load_first_pass_cache(
     if root is None:
         return None
     idx = seg.index
-    meta_path = root / f"seg_{idx:04d}_pre_meta.json"
-    latent_path = root / f"seg_{idx:04d}_pre_latent.pt"
-    frames_path = root / f"seg_{idx:04d}_pre_frames.pt"
-    handoff_path = root / f"seg_{idx:04d}_pre_handoff.json"
+    paths = _first_pass_paths(node_id, workflow_name, idx)
+    if paths is None:
+        return None
+    meta_path = paths["meta"]
+    latent_path = paths["latent"]
+    frames_path = paths["frames"]
+    handoff_path = paths["handoff"]
     if not meta_path.is_file() or not latent_path.is_file():
         return None
     try:
@@ -1856,42 +2044,30 @@ def load_first_pass_cache(
         return None
 
 
-#: Matches durable per-segment artefacts (``seg_0000_latent.pt``,
-#: ``seg_0000_pre_frames.pt``, ...) while excluding per-run scratch
-#: (``seg_0000_scratch_cond.pt``), which has its own lifecycle.
-_SEG_CACHE_FILE_RE = re.compile(r"^seg_(\d+)_(?!scratch)")
+def prune_orphan_segment_files(node_id: str | None, workflow_name: str | None = None) -> int:
+    """Delete per-segment files that no slot in the map claims.
 
-
-def prune_segment_cache(
-    node_id: str | None, valid_indices, workflow_name: str | None = None
-) -> None:
-    """Remove ``seg_XXXX_*`` files whose index is no longer on the timeline.
-
-    Does not create the cache dir. Uses all current segment indices (not
-    「选择运行」), so unselected slots keep merge/export fill. Never raises.
+    The slot-aware successor to the old index-based ``prune_segment_cache``:
+    orphan detection is driven by the slot map instead of by which numeric
+    indices still exist, so a file displaced by a mid-timeline deletion is
+    removed rather than silently inherited by the segment that slid into its
+    place. Never raises.
     """
     if not node_id:
-        return
+        return 0
     try:
         root = cache_layout.node_cache_dir(str(node_id), workflow_name, create=False)
         if not root.is_dir():
-            return
-        valid = {int(i) for i in valid_indices}
-        removed = 0
-        for path in root.iterdir():
-            if not path.is_file():
-                continue
-            m = _SEG_CACHE_FILE_RE.match(path.name)
-            if not m or int(m.group(1)) in valid:
-                continue
-            if _safe_unlink(path):
-                removed += 1
-        if removed:
-            log.info(
-                "Segment cache pruned %d stale file(s) for node %s.", removed, node_id
-            )
+            return 0
+        keep: set[str] = set()
+        for slot in segment_slots.read_slots(root):
+            keep.add(str(slot.get("stem") or ""))
+            if slot.get("prev"):
+                keep.add(str(slot["prev"]))
+        return segment_slots.gc_orphan_files(root, keep)
     except Exception as exc:
         log.debug("Segment cache prune skipped (%s).", exc)
+        return 0
 
 
 def first_pass_cache_disk_signature(
@@ -1960,10 +2136,14 @@ def inspect_first_pass_cache(
     rows: list[dict[str, Any]] = []
     for seg in selected:
         idx = int(seg.index)
-        meta_path = root / f"seg_{idx:04d}.pre.meta.json"
-        latent_path = root / f"seg_{idx:04d}.pre.av.pt"
-        meta_exists = meta_path.is_file()
-        latent_exists = latent_path.is_file()
+        # ``_pre_*`` names, resolved through the slot map like every other
+        # per-segment artefact (these two used an older ``.pre.`` spelling that
+        # the writer no longer produced, so the probe never found anything).
+        pre_paths = _first_pass_paths(node_id, workflow_name, idx)
+        meta_path = pre_paths["meta"] if pre_paths else None
+        latent_path = pre_paths["latent"] if pre_paths else None
+        meta_exists = bool(meta_path and meta_path.is_file())
+        latent_exists = bool(latent_path and latent_path.is_file())
         cache_exists = meta_exists and latent_exists
         stored: Any = None
         read_error = ""

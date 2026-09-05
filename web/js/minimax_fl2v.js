@@ -682,11 +682,13 @@ export function addFl2vShot(editor, overrides = {}) {
 export function removeFl2vShot(editor, index) {
     const shots = editor.timeline.shots || [];
     const idx = clamp(parseInt(index, 10) || 0, 0, Math.max(0, shots.length - 1));
-    if (!shots[idx]) return;
+    if (!shots[idx]) return false;
     shots.splice(idx, 1);
     syncFl2vFromShots(editor);
     editor.selectedIndex = clamp(idx, 0, Math.max(0, shots.length - 1));
     if (!shots.length) editor.selectedIndex = 0;
+    // True when a shot really went away — callers rebase「选择运行」/ cache on it.
+    return true;
 }
 
 export function openFl2vUpload(editor) {

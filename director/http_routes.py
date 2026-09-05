@@ -754,6 +754,40 @@ async def minimax_align_to_next_status(request):
         return web.json_response({"segments": [], "error": str(exc)}, status=400)
 
 
+async def minimax_remove_segment_slot(request):
+    """Drop the cached artefacts of one timeline position (UI delete).
+
+    The UI calls this the moment a group is removed so the deleted group's
+    render cannot be inherited by the group that slides into its place.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+    try:
+        index = int(body.get("index"))
+    except (TypeError, ValueError):
+        return web.Response(status=400, text="Invalid segment index.")
+
+    try:
+        from .segment_cache import remove_segment_slot
+
+        removed = await asyncio.to_thread(
+            remove_segment_slot,
+            node_id,
+            index,
+            workflow_name=str(body.get("workflow_name") or "").strip() or None,
+        )
+        return web.json_response({"removed": bool(removed)})
+    except Exception as exc:
+        log.warning("MiniMax H3 Director segment cache drop failed: %s", exc)
+        return web.json_response({"removed": False, "error": str(exc)}, status=400)
+
+
 async def minimax_segment_export(request):
     """Run a「分段导出」request against the cached segments.
 
@@ -885,6 +919,12 @@ def register_routes() -> bool:
         "POST",
         "/minimax/director/segment_export",
         minimax_segment_export,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/remove_segment_slot",
+        minimax_remove_segment_slot,
     )
     _ROUTES_REGISTERED = True
     log.info("MiniMax H3 Director HTTP routes registered")

@@ -893,6 +893,8 @@ export function deleteImageBatchGroup(editor, index) {
     flushBatchPromptInputs(editor);
     flushBatchDurationInputs(editor);
     editor.timeline.segments.splice(index, 1);
+    // Drop the group's own cache files and rebase「选择运行」ticks.
+    editor.onSegmentRemoved?.(index);
     normalizeImageBatchSegments(editor);
     editor.selectedIndex = clamp(
         editor.selectedIndex > index ? editor.selectedIndex - 1 : editor.selectedIndex,

@@ -3570,6 +3570,72 @@ class MiniMaxH3DirectorEditor {
         )].sort((a, b) => a - b);
     }
 
+    /**
+     * Re-base「选择运行」after the group at ``removedIndex`` is removed.
+     *
+     * ``runSelection`` is a plain list of array positions, so removing a group in
+     * the middle used to hand its tick to the next group and silently drop the
+     * last one. Everything above the removed position shifts down by one; the
+     * removed position itself is dropped.
+     */
+    dropRunSelectionIndex(removedIndex) {
+        if (!this.isRunSelectEnabled()) return;
+        const removed = parseInt(removedIndex, 10);
+        if (!Number.isFinite(removed)) return;
+        this.timeline.runSelection = [...new Set(
+            (this.timeline.runSelection || [])
+                .map((i) => (i > removed ? i - 1 : i))
+                .filter((i) => i !== removed && i >= 0),
+        )].sort((a, b) => a - b);
+    }
+
+    /**
+     * Re-base「选择运行」after a group moves from ``fromRank`` to ``toRank``
+     * (splice-out then splice-in). Without this the ticks stay on the old
+     * positions and end up selecting whichever group landed there.
+     */
+    moveRunSelectionIndex(fromRank, toRank) {
+        if (!this.isRunSelectEnabled()) return;
+        const from = parseInt(fromRank, 10);
+        const to = parseInt(toRank, 10);
+        if (!Number.isFinite(from) || !Number.isFinite(to) || from === to) return;
+        this.timeline.runSelection = [...new Set(
+            (this.timeline.runSelection || []).map((i) => {
+                if (i === from) return to;
+                if (from < to) return (i > from && i <= to) ? i - 1 : i;
+                return (i >= to && i < from) ? i + 1 : i;
+            }),
+        )].sort((a, b) => a - b);
+    }
+
+    /**
+     * Ask the backend to drop the cache files of the group at ``index``.
+     *
+     * Fire-and-forget: the cache is content-addressed now, so a failed call only
+     * leaves orphaned files behind — the next run's slot sync removes them.
+     */
+    dropSegmentSlotCache(index) {
+        const nodeId = String(this.node?.id ?? "");
+        if (!nodeId) return;
+        api.fetchApi("/minimax/director/remove_segment_slot", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                node_id: nodeId,
+                workflow_name: getStableWorkflowId(),
+                index: parseInt(index, 10) || 0,
+            }),
+        }).catch((err) => {
+            console.warn("[MiniMax H3 Director] segment cache drop failed:", err);
+        });
+    }
+
+    /** Bookkeeping every group / segment deletion must do. */
+    onSegmentRemoved(index) {
+        this.dropSegmentSlotCache(index);
+        this.dropRunSelectionIndex(index);
+    }
+
     isSegmentRunEnabled(index) {
         if (!this.isRunSelectEnabled()) return true;
         return (this.timeline.runSelection || []).includes(index);
@@ -5178,8 +5244,10 @@ class MiniMaxH3DirectorEditor {
 
     genDeleteSelectedSegment() {
         if (this.timeline.segments.length <= 1) return;
-        this.timeline.segments.splice(this.selectedIndex, 1);
+        const removed = this.selectedIndex;
+        this.timeline.segments.splice(removed, 1);
         this.selectedIndex = clamp(this.selectedIndex, 0, this.timeline.segments.length - 1);
+        this.onSegmentRemoved(removed);
         this.commit();
     }
 
@@ -5427,6 +5495,8 @@ class MiniMaxH3DirectorEditor {
         if (fromRank < 0 || fromRank >= ordered.length) return;
         if (toRank < 0 || toRank >= ordered.length) return;
         if (fromRank === toRank) return;
+        // Ticks are positions, not identities — carry them across the move.
+        this.moveRunSelectionIndex(fromRank, toRank);
 
         // fl2v: reorder shots[] (source of truth), then rebuild segments.
         if (this.isFl2vMode()) {
@@ -9035,6 +9105,8 @@ class MiniMaxH3DirectorEditor {
         left.length = (parseInt(left.length, 10) || 0) + (parseInt(right.length, 10) || 0);
         segs.splice(rightIdx, 1);
         this.timeline.segments = segs;
+        // The right-hand segment is gone: drop its cache and rebase the ticks.
+        this.onSegmentRemoved(rightIdx);
         this.selectedSplitFrame = null;
         this.selectedIndex = Math.max(0, rightIdx - 1);
         this.commit();
@@ -9168,7 +9240,8 @@ class MiniMaxH3DirectorEditor {
             const idx = this.selectedIndex;
             const shots = this.timeline.shots || [];
             if (!shots[idx] && !(this.timeline.segments || [])[idx]) return;
-            removeFl2vShot(this, idx);
+            // Only rebase ticks / drop the cache when a shot really went away.
+            if (removeFl2vShot(this, idx)) this.onSegmentRemoved(idx);
             this.currentFrame = clamp(this.currentFrame, 0, Math.max(0, this.getTotalFrames() - 1));
             if (this.seekBar) {
                 this.seekBar.max = Math.max(0, this.getTotalFrames() - 1);
@@ -9191,6 +9264,7 @@ class MiniMaxH3DirectorEditor {
         // Remove segment UI entry first, then cut matching frames from the
         // logical timeline so preview / export no longer include that range.
         this.timeline.segments.splice(idx, 1);
+        this.onSegmentRemoved(idx);
 
         let total = this.getTotalFrames();
         let map = [];

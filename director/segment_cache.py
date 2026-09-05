@@ -224,6 +224,31 @@ def sync_segment_slots(
         log.warning("Segment cache slot sync skipped (%s).", exc)
 
 
+def remove_segment_slot(
+    node_id: str | None,
+    index: int,
+    workflow_name: str | None = None,
+) -> bool:
+    """Drop the cache of the group living at timeline ``index``.
+
+    Called when the UI deletes a group: only that group's file group is
+    unlinked, every other group keeps the files it already owns, and the slot
+    list closes the gap so the following groups keep their own position → files
+    mapping (the next :func:`sync_segment_slots` re-adopts them by content).
+    Never raises — a failed drop only leaves files behind.
+    """
+    if not node_id:
+        return False
+    root = _cache_root(node_id, workflow_name)
+    if root is None:
+        return False
+    try:
+        return segment_slots.remove_slot(root, int(index))
+    except Exception as exc:
+        log.warning("Segment cache drop at position %s skipped (%s).", index, exc)
+        return False
+
+
 def _adoptable_stems(root: Path) -> dict[str, list[str]]:
     """``content hash -> file stems`` for caches written before the slot map.
 

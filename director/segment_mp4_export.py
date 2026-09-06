@@ -29,12 +29,17 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.mp4_export")
 VIDEO_EXPORT_TASKS = frozenset({"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"})
 
 
-def new_segment_mp4_run_dir(plan: DirectorPlan) -> Path | None:
+def new_segment_mp4_run_dir(plan: DirectorPlan, *, for_selection: bool = False) -> Path | None:
     """Create ``minimax_seg_export/<YYYYMMDD_HHMMSS>/`` for one Director execute.
 
-    Returns None when not in segments mode or the output dir is unavailable.
+    「分段导出」always gets a folder. A partial「选择运行」gets one too: the
+    VAE-decoded clips are the whole point of the run, and under「全部导出」they
+    used to be buried inside one full-timeline merge that also spliced in
+    unselected segments read back from cache.
+
+    Returns None when neither applies or the output dir is unavailable.
     """
-    if getattr(plan, "export_mode", "all") != "segments":
+    if getattr(plan, "export_mode", "all") != "segments" and not for_selection:
         return None
     try:
         base = Path(folder_paths.get_output_directory()) / "minimax_seg_export"
@@ -166,6 +171,67 @@ def maybe_export_segment_mp4s(
         if pre_path:
             paths.append(pre_path)
     return paths
+
+
+def run_mp4_path(run_dir: Path, first_index: int, last_index: int) -> Path:
+    """``seg_0003.mp4`` for a lone segment, ``seg_0003-0005.mp4`` for a run.
+
+    A one-segment run reuses the per-segment name, so「选择运行」of a single
+    segment lands on the same filename「分段导出」would have written.
+    """
+    first = int(first_index) + 1
+    last = int(last_index) + 1
+    name = f"seg_{first:04d}.mp4" if first == last else f"seg_{first:04d}-{last:04d}.mp4"
+    return Path(run_dir) / name
+
+
+def export_run_mp4(
+    run_dir: Path | None,
+    plan: DirectorPlan,
+    first_seg: SegmentPlan | None,
+    last_seg: SegmentPlan | None,
+    frames: torch.Tensor,
+    audio_dict: dict[str, Any] | None = None,
+) -> str | None:
+    """Write one contiguous「选择运行」run as a single mp4. Never raises.
+
+    Unlike :func:`maybe_export_segment_mp4` this is deliberately *not* gated on
+    the export mode: the caller decides, because a partial「选择运行」writes its
+    runs even under「全部导出」— that is the only place those decoded clips are
+    preserved on disk.
+    """
+    if run_dir is None:
+        return None
+    task = str(
+        getattr(first_seg, "task_key", "") or getattr(plan, "global_task_key", "") or ""
+    )
+    if task and task not in VIDEO_EXPORT_TASKS:
+        return None
+    if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
+        return None
+    first_index = int(getattr(first_seg, "index", 0) or 0)
+    last_index = int(getattr(last_seg, "index", first_index) or first_index)
+    dest = run_mp4_path(run_dir, first_index, last_index)
+    try:
+        from ..lib.video_export import write_frames_to_mp4
+
+        path = write_frames_to_mp4(
+            dest,
+            frames.detach().cpu().float(),
+            fps=float(getattr(plan, "frame_rate", 24) or 24),
+            audio=audio_dict,
+        )
+        log.info(
+            "MiniMax H3 Director run mp4 saved (#%d–#%d, %d frames): %s",
+            first_index + 1, last_index + 1, int(frames.shape[0]), path,
+        )
+        return str(path)
+    except Exception as exc:
+        log.warning(
+            "Run mp4 export failed for #%d–#%d (generation continues): %s",
+            first_index + 1, last_index + 1, exc,
+        )
+        return None
 
 
 def copy_segment_mp4_suffix(

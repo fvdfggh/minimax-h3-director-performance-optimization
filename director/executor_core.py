@@ -66,6 +66,8 @@ from .h3_motion_context import (
     trim_export_tail,
 )
 from .segment_cache import (
+    build_run_selection_clips,
+    continuous_export_runs,
     load_first_pass_cache,
     load_next_segment_av_latent,
     load_segment_audio,
@@ -74,7 +76,6 @@ from .segment_cache import (
     load_segment_handoff_meta,
     save_first_pass_cache,
     save_segment_cache,
-    save_segment_clip,
     sync_segment_slots,
 )
 from .segment_mp4_export import (
@@ -338,6 +339,10 @@ def execute_director_plan_core(
 
     run_list = sorted(run_indices)
     seg_total = len(run_list)
+    # A「选择运行」that leaves segments out. Under「全部导出」those slots used to be
+    # re-read from cache / source and spliced back into one full-timeline clip;
+    # instead we export one clip per contiguous run of what actually ran.
+    partial_run = plan.run_indices is not None and len(run_list) < len(all_segments)
     progress_pos = {idx: pos for pos, idx in enumerate(run_list)}
     passthrough_indices: list[int] = []
     # External groups may compact selected packs to 0..N-1 while UI still shows
@@ -365,7 +370,8 @@ def execute_director_plan_core(
     if use_conditioning_cache:
         reports.append("Conditioning cache: ENABLED — skip CLIP encoding for cached segments.")
     # One timestamp folder per execute so all segments of this run stay together.
-    mp4_run_dir = new_segment_mp4_run_dir(plan)
+    # A partial「选择运行」also gets one: those VAE-decoded clips are the output.
+    mp4_run_dir = new_segment_mp4_run_dir(plan, for_selection=partial_run)
     if mp4_run_dir is not None:
         reports.append(f"Segment mp4 export dir: {mp4_run_dir}")
     if clear_vram_between_segments:
@@ -820,8 +826,12 @@ def execute_director_plan_core(
                                     if oi < len(output_pre_chunks):
                                         output_pre_chunks[oi] = prev_pre
                                     break
-                    # Persist trimmed export so partial re-runs reload the same A/V lengths.
-                    # replace_audio=False: do not unlink audio.pt when only video was hydrated.
+                    # Persist the trimmed export so partial re-runs reload the same
+                    # A/V lengths — the head/tail window and the segment's clip.mp4
+                    # are rewritten together, so the disk cache cannot end up
+                    # holding the pre-trim body with the post-trim head/tail.
+                    # replace_audio=False: do not unlink audio.pt when only video
+                    # was hydrated.
                     prev_seg = next(
                         (s for s in all_segments if s.index == prev_idx), None
                     )
@@ -1144,8 +1154,18 @@ def execute_director_plan_core(
             if trim_frames > 0
             else int(num_frames)
         )
+        # ``decoded_full`` is the raw VAE decode (158 frames, motion-context
+        # extended) and is only the input to the trim below. What gets persisted
+        # is ``decoded``: the continuity prefix (the ~22 replayed frames of the
+        # previous segment) is DROPPED, so a standalone segment download starts at
+        # its own first frame instead of replaying ~1s of the previous segment —
+        # that prefix replay is what made every non-first segment look ~1s short
+        # ("4s instead of 5s"). The merge reads this same trimmed body and does not
+        # re-trim it (see ``concat_chunks_lazy``), so total merge length is
+        # unchanged: first segment 124f + each following 119f = 481f for 4x5s.
+        decoded_full = decoded
         decoded, audio_dict = _trim_decoded_to_export(
-            decoded,
+            decoded_full,
             audio_dict,
             trim_frames=trim_frames,
             export_len=export_len,
@@ -1181,23 +1201,22 @@ def execute_director_plan_core(
         completed_av_handoff[seg.index] = handoff
         if isinstance(audio_dict, dict) and audio_dict.get("waveform") is not None:
             completed_audios[seg.index] = audio_dict
+        # Persist the trimmed body (continuity prefix dropped), so a standalone
+        # segment starts at its own first frame. The merge reads this same body and
+        # does not re-trim it, keeping the merged length identical.
+        # save_segment_cache writes the head/tail window *and* the segment's
+        # clip.mp4 from this one tensor, so「分段导出」serves this exact body
+        # without a re-decode and the two can never fall out of sync.
         save_segment_cache(
             node_id,
             seg,
             plan,
-            chunk,
+            decoded,
             av_latent=samples,
             handoff=handoff,
             audio=audio_dict if isinstance(audio_dict, dict) else None,
             workflow_name=workflow_name,
         )
-        # Segment video-clip cache for「分段导出」. ``chunk`` is the trimmed export
-        # clip exactly as the merge/exports use it, so the encoded file needs no
-        # re-decode or re-trim. Best-effort: a failed encode must not abort gen.
-        try:
-            save_segment_clip(node_id, seg, plan, chunk, audio=audio_dict, workflow_name=workflow_name)
-        except Exception as exc:  # pragma: no cover - defensive
-            log.debug("Segment %d clip cache skipped: %s", int(seg.index) + 1, exc)
         completed_outputs[seg.index] = chunk
         completed_pre_refine[seg.index] = pre_chunk
         completed_refine_passes[seg.index] = pass_clips
@@ -1282,7 +1301,7 @@ def execute_director_plan_core(
             segment_outputs.append(chunk)
             segment_pre_refine.append(pre_chunk)
             segment_audios.append(audio_dict or {})
-            if plan.export_mode == "all":
+            if plan.export_mode == "all" and not partial_run:
                 output_chunks.append(chunk)
                 output_pre_chunks.append(pre_chunk)
                 output_segments.append(seg)
@@ -1290,6 +1309,8 @@ def execute_director_plan_core(
 
         if plan.export_mode != "all":
             continue
+        # Unselected slots are still hydrated below (continuity needs their AV
+        # latent / handoff), they just no longer join the exported clips.
 
         # Prefer exact cache; pipeline-stale disk render is ok. A different
         # source video is rejected so v2v/rv2v can passthrough the new clip.
@@ -1323,10 +1344,12 @@ def execute_director_plan_core(
             reports.append(
                 f"Segment {seg.index + 1}/{len(all_segments)}: loaded from cache "
                 f"({cached.shape[0]} frames{audio_note}{stale_note})"
+                + (" — continuity only, not exported" if partial_run else "")
             )
-            output_chunks.append(cached)
-            output_pre_chunks.append(cached)
-            output_segments.append(seg)
+            if not partial_run:
+                output_chunks.append(cached)
+                output_pre_chunks.append(cached)
+                output_segments.append(seg)
             continue
 
         # Not selected + no cache: v2v/rv2v may fill from source video; gen batch must not
@@ -1349,20 +1372,22 @@ def execute_director_plan_core(
             f"Segment {seg.index + 1}/{len(all_segments)}: source passthrough "
             f"({fill.shape[0]} frames, not sampled — outside run selection)"
         )
-        output_chunks.append(fill)
-        output_pre_chunks.append(fill)
-        output_segments.append(seg)
+        if not partial_run:
+            output_chunks.append(fill)
+            output_pre_chunks.append(fill)
+            output_segments.append(seg)
 
     if passthrough_indices:
         reports.append(
             "Passthrough (not sampled) segment(s) "
-            f"{[i + 1 for i in passthrough_indices]} — run selection is honored; "
-            "unselected gaps filled from cache/source for「全部导出」."
+            f"{[i + 1 for i in passthrough_indices]} — used for continuity only"
+            + ("" if partial_run else "; unselected gaps filled from source for「全部导出」.")
+            + "."
         )
     if skipped_no_cache:
         reports.append(
             "Skipped segment(s) with no cache "
-            f"{skipped_no_cache} — omitted from「全部导出」merge "
+            f"{skipped_no_cache} — omitted from the export "
             "(勾选重跑或先全跑可补上)."
         )
 
@@ -1413,6 +1438,60 @@ def execute_director_plan_core(
             "Audio cache missing for segment(s) "
             f"{missing_audio} — those slots are silent in the merge. "
             "Re-run them once (or run all) to refresh audio cache."
+        )
+
+    if partial_run:
+        # 「选择运行」: export only what actually ran — one clip per contiguous run,
+        # stitched exactly like「连续导出」. Unselected slots were hydrated above for
+        # continuity but never rejoin the output (no more full-timeline merge that
+        # spliced cache/source back in).
+        from .segment_cache import build_run_selection_clips
+
+        run_clips, run_audios, run_counts, run_mp4s = build_run_selection_clips(
+            node_id, plan, run_list, segment_outputs, segment_audios,
+            all_segments=all_segments, mp4_run_dir=mp4_run_dir,
+            workflow_name=workflow_name,
+        )
+        if not run_clips:
+            raise ValueError("Director plan produced no segments.")
+        # Route through the segments layout so the node emits one IMAGE per run,
+        # matching「连续导出」, instead of a single stitched merge.
+        plan.export_mode = "segments"
+        segment_outputs = run_clips
+        segment_audios = run_audios
+        export_frame_counts = run_counts
+        combined = run_clips[0] if len(run_clips) == 1 else run_clips[0]
+        # Pre-refine companion: re-stitch the corresponding pre-refine runs.
+        pre_source = segment_pre_refine if segment_pre_refine else list(segment_outputs)
+        pre_runs, _, _, _ = build_run_selection_clips(
+            node_id, plan, run_list, pre_source, None,
+            all_segments=all_segments, workflow_name=workflow_name,
+        )
+        pre_combined = pre_runs[0] if pre_runs else combined
+        if run_mp4s:
+            reports.append(
+                "选择运行导出: " + ", ".join(f"#{p.split('seg_')[-1]}" for p in run_mp4s)
+            )
+        else:
+            reports.append(
+                "选择运行导出: "
+                + ", ".join(f"#{run[0] + 1}-{run[-1] + 1}" for run in continuous_export_runs(run_list))
+            )
+        # Advance the cache generation now that fresh renders exist (see below).
+        if not held_for_confirmation:
+            try:
+                sync_segment_slots(node_id, plan, workflow_name=workflow_name, gc=True)
+            except Exception as exc:  # pragma: no cover - GC is best-effort
+                log.warning("Segment cache cleanup after run skipped (%s).", exc)
+        return (
+            combined,
+            segment_outputs,
+            segment_audios,
+            "\n".join(reports),
+            export_frame_counts,
+            pre_combined,
+            segment_pre_refine,
+            held_for_confirmation,
         )
     # segment_outputs path (分段导出 / image batch): keep run-order audios.
     if plan.export_mode == "all" and output_chunks:

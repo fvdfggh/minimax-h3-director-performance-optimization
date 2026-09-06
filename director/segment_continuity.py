@@ -1683,6 +1683,12 @@ def concat_chunks_lazy(
         probe_segment_cache_shape as _probe_seg,
     )
 
+    def _load_seg_fp(node_id, seg, plan, *, allow_stale=False, workflow_name=None):
+        return _load_seg(
+            node_id, seg, plan,
+            allow_stale=allow_stale, return_fp=True, workflow_name=workflow_name,
+        )
+
     if not export_segments:
         raise ValueError("concat_chunks_lazy: no export_segments")
     overrides = dict(overrides or {})
@@ -1700,13 +1706,34 @@ def concat_chunks_lazy(
     def _read(seg, label: int) -> torch.Tensor:
         # pop so the override reference is released once merged.
         chunk = overrides.pop(int(seg.index), None)
+        fp = None
         if chunk is None:
-            chunk = _load_seg(node_id, seg, plan, workflow_name=workflow_name)
+            chunk, fp = _load_seg_fp(node_id, seg, plan, workflow_name=workflow_name)
         if chunk is None:
-            chunk = _load_seg(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
+            chunk, fp = _load_seg_fp(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
         if chunk is None:
             raise _miss(seg, label)
-        return chunk.float()
+        chunk = chunk.float()
+        # Segment clip caches now persist the *full* VAE decode (continuity prefix
+        # included), so a standalone download is the exact requested length. The
+        # merge, however, must reproduce the old trimmed clip: apply the same
+        # continuity prefix trim the generator used, turning the full clip back into
+        # the overlap-free segment the seam pipeline expects. Without this, every
+        # non-first segment would carry its prefix into the join and the merged
+        # video would grow / stutter at each seam — exactly the regression we move
+        # to the segment download instead.
+        if fp is not None:
+            trim = int(fp.get("trim_frames") or 0)
+            exp = int(fp.get("export_frames") or 0)
+            n = int(chunk.shape[0])
+            # The persisted clip is already the trimmed body (continuity prefix
+            # dropped, see executor_core). Only trim when the clip on disk still
+            # carries the prefix — i.e. it is longer than ``export_frames`` (older
+            # caches, or a raw sample). Re-trimming an already-trimmed body would
+            # drop another 22 frames and shorten the merged video.
+            if trim > 0 and exp > 0 and n > exp:
+                chunk = chunk[trim:].contiguous()
+        return chunk
 
     # ---- Pass 1: geometry only (no pixels) ---------------------------------
     # Probing reads the file header rather than the tensor, so measuring the
@@ -1715,6 +1742,8 @@ def concat_chunks_lazy(
     for seg in export_segments:
         in_mem = overrides.get(int(seg.index))
         if in_mem is not None:
+            # The in-memory chunk is the *trimmed* export clip (the generator
+            # already dropped the continuity prefix), matching what the merge wants.
             shapes.append(tuple(int(d) for d in in_mem.shape))
             continue
         shape = _probe_seg(node_id, seg, plan, workflow_name=workflow_name)
@@ -1722,12 +1751,22 @@ def concat_chunks_lazy(
             shape = _probe_seg(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
         if shape is None:
             # Legacy / unreadable header: fall back to a full read, and keep the
-            # pixels in ``overrides`` so pass 2 does not read them twice.
-            chunk = _load_seg(node_id, seg, plan, workflow_name=workflow_name)
+            # pixels in ``overrides`` so pass 2 does not read them twice. Apply the
+            # same continuity prefix trim pass 2 would, so the measured length is
+            # the merged length (not the full clip length).
+            chunk, fp = _load_seg_fp(node_id, seg, plan, workflow_name=workflow_name)
             if chunk is None:
-                chunk = _load_seg(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
+                chunk, fp = _load_seg_fp(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
             if chunk is None:
                 raise _miss(seg, len(shapes))
+            if fp is not None:
+                trim = int(fp.get("trim_frames") or 0)
+                exp = int(fp.get("export_frames") or 0)
+                n = int(chunk.shape[0])
+                # Same rule as _read: the persisted clip is already trimmed, so only
+                # drop the prefix when it is still present (n > export_frames).
+                if trim > 0 and exp > 0 and n > exp:
+                    chunk = chunk[trim:]
             overrides[int(seg.index)] = chunk
             shapes.append(tuple(int(d) for d in chunk.shape))
             del chunk

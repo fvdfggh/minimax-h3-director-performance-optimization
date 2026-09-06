@@ -54,15 +54,16 @@ from .h3_motion_context import (
     video_from_latent,
 )
 from .segment_cache import (
+    build_run_selection_clips, continuous_export_runs,
     load_first_pass_cache, load_next_segment_av_latent,
     load_segment_audio, load_segment_av_latent,
     load_segment_handoff_meta, probe_segment_cache_shape,
-    save_first_pass_cache, save_segment_cache, save_segment_clip,
+    save_first_pass_cache, save_segment_cache,
     sync_segment_slots,
 )
 from .segment_mp4_export import (
     copy_segment_mp4_suffix, maybe_export_segment_mp4, maybe_export_segment_mp4s,
-    mp4_export_kind, new_segment_mp4_run_dir,
+    mp4_export_kind, new_segment_mp4_run_dir, export_run_mp4, run_mp4_path,
 )
 from .segment_continuity import concat_chunks_lazy, is_continuity_active, resolve_prev_segment_output
 from .vram_cleanup import cleanup_segment_vram
@@ -81,14 +82,6 @@ def _unpack_node_output(out):
     if isinstance(out, (tuple, list)):
         return out
     raise RuntimeError(f"Unexpected node output: {type(out)!r}")
-
-
-def _save_export_clip(node_id, seg, plan, chunk, audio_dict, workflow_name=None) -> None:
-    """Best-effort clip-cache write right after a decode, for「分段导出」."""
-    try:
-        save_segment_clip(node_id, seg, plan, chunk, audio=audio_dict, workflow_name=workflow_name)
-    except Exception as exc:  # pragma: no cover - defensive
-        log.debug("Segment %d clip cache skipped: %s", int(seg.index) + 1, exc)
 
 
 def _decode_av_latent(samples, vae, audio_vae, *, decode_audio=True):
@@ -1512,9 +1505,10 @@ def execute_director_batch(
         chunk = decoded.cpu().float()
         pre_chunk = chunk  # No refine in batch mode (simplified)
 
-        # Save to segment cache (for merge). The AV latent is always persisted so
-        # the following segment can pin its context — including for the final
-        # segment, since a later run may append segments after it.
+        # The head/tail window and the segment's clip.mp4 are written together by
+        # save_segment_cache, so a piecewise export is byte-equivalent to this
+        # trimmed chunk — no re-decode, no re-trim, and no chance of the two
+        # files describing different renders.
         save_segment_cache(
             node_id, seg, plan, chunk,
             av_latent=_latent_for_cache(node_id, seg.index, completed_av_latents, cache_dir),
@@ -1522,11 +1516,6 @@ def execute_director_batch(
             audio=audio_dict if isinstance(audio_dict, dict) else None,
             workflow_name=workflow_name,
         )
-        # Segment video-clip cache for「分段导出」. Best-effort: ``chunk`` is the
-        # exact trimmed export clip the user sees, so the encoded file is
-        # byte-equivalent to a piecewise export of this segment — no re-decode,
-        # no re-trim needed later.
-        _save_export_clip(node_id, seg, plan, chunk, audio_dict, workflow_name=workflow_name)
 
         # Export mp4
         if mp4_run_dir is not None:
@@ -1630,6 +1619,8 @@ def execute_director_batch(
                             segment_pre_refine[run_pos] = prev_pre
                     export_frame_counts[run_pos] = int(new_chunk.shape[0])
                 # concat_chunks_lazy reads from disk — the cache must match.
+                # save_segment_cache rewrites the head/tail window *and* the
+                # segment's clip.mp4, so both follow the shortened export.
                 ph = dict(completed_av_handoff.get(prev_export_seg.index) or {})
                 ph["export_frames"] = int(new_chunk.shape[0])
                 ph["phase_align_trim"] = pending_trim
@@ -1694,6 +1685,9 @@ def execute_director_batch(
     # ``enabled`` right after queueing, so a run that already skipped sampling
     # (run_indices = set()) used to fall through to the「全部导出」branch here and
     # crash on the unbound ``combined``.
+    # ``merge_done`` marks a branch that already produced ``combined``; the generic
+    # merge below then stands down instead of stitching the timeline a second time.
+    merge_done = False
     if seg_export_active:
         # 「分段导出」: only the checked segments participate — no full-timeline
         # merge. This keeps an export-only run fast (it never renders or encodes
@@ -1829,6 +1823,42 @@ def execute_director_batch(
             # Keep audio 1:1 with the frames actually emitted (a segment whose
             # frames could not be loaded must not shift the alignment).
             segment_audios = [audio_by_index.get(i) or {} for i in ordered]
+    elif run_list:
+        # 「选择运行」in batch mode: export only what actually ran — one clip per
+        # contiguous run, stitched exactly like「分段导出」continuous mode. No more
+        # splicing unselected slots back from cache / source into a single merged
+        # clip that the selection was supposed to avoid.
+        from .segment_cache import build_run_selection_clips
+
+        mp4_run_dir = new_segment_mp4_run_dir(plan, for_selection=True)
+        seg_outputs, run_audios, seg_counts, run_mp4s = build_run_selection_clips(
+            node_id, plan, [seg.index for seg in run_list], segment_outputs, segment_audios,
+            all_segments=all_segments, mp4_run_dir=mp4_run_dir,
+            workflow_name=workflow_name,
+        )
+        if not seg_outputs:
+            raise ValueError("Batch mode: export list is empty.")
+        if run_mp4s:
+            reports.append(
+                "选择运行导出: " + ", ".join(f"#{p.split('seg_')[-1]}" for p in run_mp4s)
+            )
+        else:
+            reports.append(
+                "选择运行导出: "
+                + ", ".join(f"#{run[0] + 1}-{run[-1] + 1}" for run in continuous_export_runs([seg.index for seg in run_list]))
+            )
+        segment_outputs = seg_outputs
+        export_frame_counts = seg_counts
+        segment_audios = run_audios
+        merge_overrides = None
+        # The runs are already stitched by build_run_selection_clips above. Bind
+        # ``combined`` to the first clip and clear ``export_segments_list`` so the
+        # generic merge below is skipped — otherwise the whole timeline was stitched
+        # a SECOND time (the duplicated "additive opening luma" seams) and the run
+        # paid for two full merges.
+        combined = seg_outputs[0]
+        export_segments_list = None
+        merge_done = True
     elif plan.export_mode == "all" or (
         not run_list
         and seg_export is not None
@@ -1874,7 +1904,11 @@ def execute_director_batch(
     # Streaming merge: one allocation for the result, one copy-in per segment.
     # Every branch must bind ``combined`` — the old ``pass`` on the「全部导出」
     # path left it unbound and killed the node with UnboundLocalError.
-    if seg_export_active and plan.export_mode == "segments":
+    if merge_done:
+        # Already stitched (e.g. the「选择运行」runs above). Merging a second time
+        # duplicated every seam pass and doubled the merge cost.
+        pass
+    elif seg_export_active and plan.export_mode == "segments":
         # 分段导出: the split layout emits every clip straight from
         # ``segment_outputs`` and never reads ``combined`` — a second merge would
         # just double peak RAM. Bind it to a real clip (no placeholder) so the
@@ -1942,6 +1976,18 @@ def execute_director_batch(
         sync_segment_slots(node_id, plan, workflow_name=workflow_name, gc=True)
     except Exception as exc:  # pragma: no cover - GC is best-effort
         log.warning("Segment cache cleanup after batch run skipped (%s).", exc)
+
+    # Drop per-run scratch intermediates (seg_*_scratch_*.pt, e.g. the position-
+    # numbered seg_0000_scratch_ref.pt) now that the run finished cleanly. These
+    # are regenerate-in-place working state — NOT the content-hash durable files
+    # (seg_<hash>_*.pt) that「分段导出」/ motion-context read back — so keeping
+    # them around only duplicates data on disk and clutters the cache dir. Failures
+    # above skip this block (via the early raises) and leave scratch intact for
+    # debugging, which is the intended behaviour.
+    try:
+        _clear_batch_cache(cache_dir, reports)
+    except Exception as exc:  # pragma: no cover - cleanup is best-effort
+        log.warning("Batch scratch cleanup skipped (%s).", exc)
 
     return (
         combined,

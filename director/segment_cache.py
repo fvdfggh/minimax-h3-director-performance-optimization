@@ -402,27 +402,127 @@ def _frames_from_disk(loaded: Any) -> torch.Tensor | None:
 # *whole* segment tensor (which is what made the cache balloon to GBs).
 HEADTAIL_N = cache_layout.FRAMES_HT_N
 
+#: ``frames_ht`` payload marker. Older caches stored a bare
+#: ``[head_N, tail_N, H, W, C]`` tensor with no record of how long the render it
+#: was cut from is, so a reader could not tell a current clip from a stale one
+#: and spliced the two into a single "segment" made of two different renders.
+HEADTAIL_VERSION = 2
 
-def _frames_to_headtail(tensor: torch.Tensor) -> torch.Tensor:
-    """Keep only the first/last ``HEADTAIL_N`` frames as uint8 [0,255].
 
-    Layout: ``[head_N, ..., tail_N, H, W, C]``. When a segment is shorter than
-    ``2 * HEADTAIL_N`` we keep every frame (deduped) rather than erroring.
+def _frames_to_float(x: torch.Tensor) -> torch.Tensor:
+    """uint8 [0,255] / legacy float cache → float32 [0,1]."""
+    return x.float().div(255.0) if x.dtype == torch.uint8 else x.float()
+
+
+def _frames_to_headtail(tensor: torch.Tensor) -> dict[str, Any]:
+    """Head/tail window of a render, as a self-describing payload.
+
+    A segment's video on disk is ``clip.mp4``; this file only keeps the lossless
+    first/last ``HEADTAIL_N`` frames the seam pipeline needs, as uint8 [0,255].
+    ``total`` records the render's frame count so a reader can verify the window
+    and the clip came from the same take before stitching them together.
+
+    ``tail`` is empty when the whole segment already fits inside the window
+    (``total <= 2 * HEADTAIL_N``) — the payload then holds every frame.
     """
     x = tensor.detach().cpu()
     if x.dtype != torch.uint8:
         x = x.float().clamp(0, 1).mul(255).round().clamp(0, 255).to(torch.uint8)
     x = x.contiguous()
-    n = int(x.shape[0])
-    if n <= 2 * HEADTAIL_N:
-        return x
-    head = x[:HEADTAIL_N]
-    tail = x[n - HEADTAIL_N:]
-    return torch.cat([head, tail], dim=0).contiguous()
+    total = int(x.shape[0])
+    if total <= 2 * HEADTAIL_N:
+        return {"version": HEADTAIL_VERSION, "total": total, "head": x, "tail": x[:0]}
+    return {
+        "version": HEADTAIL_VERSION,
+        "total": total,
+        "head": x[:HEADTAIL_N].contiguous(),
+        "tail": x[total - HEADTAIL_N:].contiguous(),
+    }
 
 
-def _headtail_to_disk(tensor: torch.Tensor) -> torch.Tensor:
+def _headtail_to_disk(tensor: torch.Tensor) -> dict[str, Any]:
     return _frames_to_headtail(tensor)
+
+
+def _load_headtail(ht_path: Path) -> tuple[torch.Tensor | None, torch.Tensor | None, int]:
+    """``(head, tail, total)`` from ``frames_ht.pt``; legacy layout included.
+
+    ``tail`` ``None`` means the payload predates :data:`HEADTAIL_VERSION` (a bare
+    ``[head_N, tail_N, ...]`` tensor) and the caller must split it by shape.
+    ``total <= 0`` means the render's frame count is unknown.
+    """
+    try:
+        payload = torch.load(ht_path, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        log.debug("Head/tail load failed for %s: %s", ht_path.name, exc)
+        return None, None, 0
+    if isinstance(payload, dict):
+        head = payload.get("head")
+        tail = payload.get("tail")
+        if not torch.is_tensor(head) or head.ndim != 4:
+            return None, None, 0
+        if not torch.is_tensor(tail) or tail.ndim != 4:
+            tail = None
+        return head, tail, int(payload.get("total") or 0)
+    if torch.is_tensor(payload) and payload.ndim == 4:
+        return payload, None, 0
+    return None, None, 0
+
+
+def _splice_headtail(
+    full: torch.Tensor,
+    head: torch.Tensor,
+    tail: torch.Tensor | None,
+    total: int,
+) -> torch.Tensor:
+    """Overlay the exact head/tail window onto the decoded ``clip.mp4`` body.
+
+    The clip is the segment's authoritative video; ``frames_ht.pt`` only carries
+    the lossless first/last frames the seam pipeline works on. Both are written
+    by one :func:`save_segment_cache` call, so stitching them is only meaningful
+    while their frame counts agree. When they do not, the pair belongs to two
+    different renders and the clip is returned untouched rather than being turned
+    into a hybrid of both.
+    """
+    n_full = int(full.shape[0])
+    if n_full <= 0 or head is None or int(head.shape[0]) <= 0:
+        return full
+    if tuple(int(d) for d in head.shape[1:]) != tuple(int(d) for d in full.shape[1:]):
+        # The mp4 is padded to even H/W (``_pad_even_hw``), so an odd-sized
+        # segment decodes one row/column wider than its cached window.
+        log.debug(
+            "Segment head/tail window %s does not match clip %s; using the clip as-is.",
+            tuple(head.shape[1:]), tuple(full.shape[1:]),
+        )
+        return full
+
+    src = int(total or 0)
+    if src <= 0:
+        # Legacy payload: place the window by shape alone, exactly as the old
+        # reader did, so pre-``ht_total`` caches keep behaving as they did.
+        src = n_full
+        n_ht = int(head.shape[0])
+        hn = min(HEADTAIL_N, n_ht // 2, n_full)
+        tail = head[n_ht - hn:] if hn > 0 else head[:0]
+        head = head[:hn]
+    if src != n_full:
+        log.warning(
+            "Segment head/tail window is %df but clip.mp4 holds %df — the two come "
+            "from different renders, so the clip is used unmodified.",
+            src, n_full,
+        )
+        return full
+    if tail is None or int(tail.shape[0]) <= 0:
+        # Short segment: the window holds every frame, already lossless.
+        if int(head.shape[0]) < n_full:
+            return full
+        return _frames_to_float(head[:n_full]).to(full.dtype)
+    hn = min(int(head.shape[0]), int(tail.shape[0]), n_full)
+    if hn <= 0:
+        return full
+    full[:hn] = _frames_to_float(head[:hn]).to(full.dtype)
+    full[n_full - hn:] = _frames_to_float(tail[int(tail.shape[0]) - hn:]).to(full.dtype)
+    return full
 
 
 def _decode_clip_frames(clip_path: Path) -> torch.Tensor | None:
@@ -469,6 +569,11 @@ def save_segment_cache(
 ) -> None:
     """Persist a segment tensor (+ optional AV latent / export audio). Never raises.
 
+    A segment's video lives in ``clip.mp4``; this call writes it **together with**
+    the head/tail window (``frames_ht.pt``), because :func:`load_segment_cache`
+    stitches the two back into one clip. Updating only one of them is what mixed
+    two different renders into a single cached segment.
+
     ``replace_audio``:
       - True (default): write ``audio`` when present, otherwise delete stale audio.pt
         (fresh sample with mute/empty decode).
@@ -496,9 +601,9 @@ def save_segment_cache(
     audio_path = paths["audio"]
     try:
         # Keep only head/tail frames on disk — the full segment tensor is the
-        # dominant space cost (hundreds of MB/segment). Merge/export reconstruct
-        # the whole segment from ``clip.mp4`` (already written), and the seam
-        # pipeline reads at most HEADTAIL_N frames via load_segment_tail().
+        # dominant space cost (hundreds of MB/segment). Merge/export rebuild the
+        # whole segment from ``clip.mp4`` (written below, in this same call) and
+        # restore the seam frames from this window.
         ht_payload = _frames_to_headtail(tensor)
         _write_via_temp(ht_path, lambda p: torch.save(ht_payload, p))
         fp = dict(fp, ht_n=HEADTAIL_N)
@@ -537,6 +642,14 @@ def save_segment_cache(
                 ", keep-audio" if not replace_audio else ""
             ),
         )
+        # The segment's video, written from the *same* tensor as the head/tail
+        # window above. load_segment_cache splices the two, so they must always
+        # be refreshed together — a partial update (phase-align re-save, a failed
+        # encode) used to leave a clip body from one render stitched to the
+        # head/tail of another. Runs last because a failed encode falls back to
+        # persisting the full frames.pt, which must not be unlinked afterwards.
+        # Best-effort: never raises.
+        save_segment_clip(node_id, seg, plan, tensor, audio=audio, workflow_name=workflow_name)
     except Exception as exc:
         # Xiangong / similar: RO mount or same-name write → skip cache, keep run alive.
         log.warning(
@@ -871,9 +984,14 @@ def save_segment_clip(
 ) -> str | None:
     """Encode ``frames`` into the clip cache. Never raises.
 
-    Called right after a successful decode so every rendered segment is
-    exportable without re-decoding. Best-effort like the rest of the cache: a
-    missing ffmpeg or a read-only mount must not break generation.
+    ``clip.mp4`` *is* the segment's video: everything that serves a segment on its
+    own (「分段导出」, the node IMAGE output) reads it, and :func:`load_segment_cache`
+    only overlays the seam's head/tail window on top of it. That window is stored
+    by :func:`save_segment_cache`, which calls this function from the same tensor —
+    the two files must never describe different renders.
+
+    Best-effort like the rest of the cache: a missing ffmpeg or a read-only mount
+    must not break generation.
     """
     if not node_id:
         return None
@@ -1106,11 +1224,9 @@ def _decode_latent_to_frames(
             if hasattr(audio_out, "args"):
                 audio_out = audio_out.args
             audio = audio_out[0] if len(audio_out) > 0 else None
-        # Trim the decoded frames to this segment's *export* length, exactly like
-        # Phase 3 does (``_trim_decoded_to_export``). The latent holds the full
-        # motion-context-extended frames (e.g. 158 for a 120-frame/5s segment);
-        # without this trim a「连续导出」merge of two segments would grow to
-        # 158+158 frames instead of 120+120 — the "two 5s became 13s" symptom.
+        # Trim to the export body: drop the continuity prefix (the replayed tail of
+        # the previous segment) and crop to the export length. A standalone segment
+        # must start at its own first frame, not with ~1s of the previous clip.
         images, audio = _trim_decoded_for_export(
             node_id, seg, plan, images, audio, workflow_name=workflow_name,
         )
@@ -1165,6 +1281,11 @@ def _trim_decoded_for_export(node_id, seg, plan, images, audio, workflow_name=No
     Prefers the persisted handoff (``trim_frames``/``export_frames``) which is
     exactly what Phase 3 wrote for this segment; falls back to the node-parameter
     derived boundary (``_expected_export_frames``) when no handoff exists yet.
+
+    The motion-context overlap prefix is always dropped: it is the replayed tail of
+    the previous segment, so keeping it would make a standalone segment start with
+    ~1s of the previous clip (the "4s instead of 5s" symptom). The merged result is
+    unaffected — the merge stitches these same trimmed bodies.
     """
     from .h3_motion_context import trim_context_prefix
 
@@ -1361,18 +1482,9 @@ def predecode_latent_segments(
             audio=audio if isinstance(audio, dict) else None,
             workflow_name=workflow_name,
         )
-        # Also encode the clip cache. save_segment_cache only persists the
-        # head/tail window (space), so without this the next export would find no
-        # clip.mp4 and pay the full VAE decode again — exactly the recompute this
-        # predecode exists to avoid. Best-effort like the rest of the cache.
-        try:
-            save_segment_clip(
-                node_id, seg, plan, frames,
-                audio=audio if isinstance(audio, dict) else None,
-                workflow_name=workflow_name,
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            log.debug("Segment %d predecode clip cache skipped: %s", idx + 1, exc)
+        # The clip cache is written by save_segment_cache itself (head/tail window
+        # and mp4 must always be refreshed together), so the next export finds a
+        # clip.mp4 instead of paying the full VAE decode again.
         decoded.append(idx)
         log.info(
             "分段导出 predecode: seg #%d latent → head/tail + clip cache (%d frames)",
@@ -1475,12 +1587,24 @@ def _run_frame_counts(
         if shape is None:
             shape = probe_segment_cache_shape(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
         counts.append(max(0, int(shape[0])) if shape else 0)
+    return _rescale_counts(counts, total_frames)
+
+
+def _rescale_counts(counts: list[int], total_frames: int) -> list[int]:
+    """Fit per-segment frame counts onto ``total_frames``.
+
+    The merged clip length is authoritative — it is what actually landed on disk
+    — so a probe that disagrees with it is rescaled. A wrong split would desync
+    the merged audio.
+    """
+    counts = [max(0, int(c)) for c in (counts or [])]
     probed = sum(counts)
+    total_frames = max(0, int(total_frames))
     if probed == total_frames:
         return counts
     if probed <= 0:
         n = max(1, len(counts))
-        base, rem = divmod(max(0, int(total_frames)), n)
+        base, rem = divmod(total_frames, n)
         return [base + (1 if i < rem else 0) for i in range(n)]
     # Proportional rescale onto the real merged length.
     scaled: list[int] = []
@@ -1488,10 +1612,152 @@ def _run_frame_counts(
     for i, c in enumerate(counts):
         want = int(round(total_frames * (c / probed)))
         if i == len(counts) - 1:
-            want = max(0, int(total_frames) - used)
+            want = max(0, total_frames - used)
         scaled.append(max(0, want))
         used += scaled[-1]
     return scaled
+
+
+def build_run_selection_clips(
+    node_id,
+    plan: DirectorPlan,
+    run_indices,
+    chunks: list,
+    audios: list | None = None,
+    *,
+    all_segments: list | None = None,
+    mp4_run_dir=None,
+    workflow_name: str | None = None,
+) -> tuple[list, list, list[int], list[str]]:
+    """Collapse a「选择运行」into one clip per contiguous run — the「连续导出」layout.
+
+    Returns ``(clips, audios, frame_counts, mp4_paths)``, all aligned 1:1 and
+    ordered by timeline position.
+
+    A partial run used to be merged back onto the full timeline: unselected
+    slots were re-read from the segment cache (or filled from the source video)
+    so the node could still emit a single「全部导出」clip. That defeated the point
+    of the selection — the output was dominated by footage the user did not ask
+    to regenerate, and the freshly decoded clips were never visible on their own.
+
+    Now each run of timeline-adjacent selected indices is stitched with
+    :func:`concat_chunks_lazy` (same streaming merge, same seam handling as
+    「连续导出」) and handed back as its own clip. Runs are never joined across a
+    gap, so a selection of ``#3,#4,#5,#9`` yields two clips.
+
+    ``chunks``/``audios`` are the in-memory per-segment results, ordered like
+    ``sorted(run_indices)``; they are passed to the merge as overrides so nothing
+    is re-read from disk. Missing entries are skipped rather than raising — a
+    segment that failed to decode must not lose the whole run.
+    """
+    from .segment_continuity import concat_chunks_lazy
+    from .segment_mp4_export import export_run_mp4
+
+    run_list = sorted({int(i) for i in (run_indices or [])})
+    chunk_by_index = {
+        idx: chunks[pos] for pos, idx in enumerate(run_list) if pos < len(chunks or [])
+    }
+    audio_by_index: dict[int, Any] = {}
+    if audios:
+        audio_by_index = {
+            idx: audios[pos] for pos, idx in enumerate(run_list) if pos < len(audios)
+        }
+    seg_by_index = {
+        int(getattr(s, "index", -1)): s for s in (all_segments or [])
+    }
+
+    clips: list = []
+    run_audios: list = []
+    counts: list[int] = []
+    mp4_paths: list[str] = []
+
+    for run in continuous_export_runs(run_list):
+        present = [i for i in run if i in chunk_by_index]
+        if not present:
+            continue
+        first, last = run[0], run[-1]
+        overrides = {i: chunk_by_index[i] for i in present}
+        if len(present) == 1:
+            # Lone segment — no neighbour to stitch to, emit as-is (complete 5s).
+            clip = overrides[present[0]]
+            audio = audio_by_index.get(present[0]) or {}
+        else:
+            # Multi-segment run: chunks are already the trimmed bodies (continuity
+            # prefix dropped at decode time), so they stitch as-is. Concat only
+            # trims a disk-read clip that still carries the prefix.
+            run_segs = [seg_by_index[i] for i in present if i in seg_by_index]
+            if len(run_segs) == len(present):
+                try:
+                    clip = concat_chunks_lazy(
+                        node_id, plan, run_segs, overrides=overrides,
+                        workflow_name=workflow_name,
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    log.warning(
+                        "选择运行: stitching #%d–#%d failed (%s); "
+                        "falling back to a plain concatenation.",
+                        first + 1, last + 1, exc,
+                    )
+                    clip = torch.cat([overrides[i] for i in present], dim=0)
+            else:
+                clip = torch.cat([overrides[i] for i in present], dim=0)
+            part_counts = [int(overrides[i].shape[0]) for i in present]
+            audio = merge_run_audio(
+                plan,
+                [audio_by_index.get(i) or {} for i in present],
+                _rescale_counts(part_counts, int(clip.shape[0])),
+            )
+        clips.append(clip)
+        run_audios.append(audio if isinstance(audio, dict) else {})
+        counts.append(int(clip.shape[0]))
+        if mp4_run_dir is not None:
+            path = export_run_mp4(
+                mp4_run_dir, plan,
+                seg_by_index.get(first) or seg_by_index.get(present[0]),
+                seg_by_index.get(last) or seg_by_index.get(present[-1]),
+                clip,
+                run_audios[-1] or None,
+            )
+            if path:
+                mp4_paths.append(path)
+
+    return clips, run_audios, counts, mp4_paths
+
+
+def _segment_can_stitch(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    *,
+    workflow_name: str | None = None,
+) -> bool:
+    """Whether「连续导出」can merge this segment, i.e. whether a source exists.
+
+    ``concat_chunks_lazy`` reads every segment through :func:`load_segment_cache`,
+    which rebuilds the whole clip from ``clip.mp4`` and restores the seam frames
+    from ``frames_ht.pt`` — the legacy full ``frames.pt`` is deliberately no
+    longer written, since only the head/tail frames have to survive on disk.
+
+    The gate therefore has to accept a clip, not just a legacy tensor: testing
+    only the tensor path excluded every modern render and silently degraded a
+    continuous export into one standalone clip per segment, never reaching the
+    clip+seam merge.
+
+    Both lookups fall back to the superseded file group, matching the
+    availability probe: after a plan edit the newest render sits one generation
+    back. A clip that exists but fails to decode is accepted here — the merge
+    then raises and the caller falls back to a standalone export.
+    """
+    if (
+        resolve_segment_cache_path(
+            node_id, seg, plan, allow_stale=True, workflow_name=workflow_name
+        )
+        is not None
+    ):
+        return True
+    return has_segment_clip(
+        node_id, int(seg.index), workflow_name=workflow_name, allow_prev=True
+    )
 
 
 def run_segment_export(
@@ -1579,13 +1845,21 @@ def run_segment_export(
             skipped.append({"index": idx, "reason": "no exportable cache"})
 
     def _export_standalone(idx: int) -> None:
-        """Export one segment on its own: frames → latent decode → clip copy."""
+        """Export one segment on its own: verbatim clip copy → latent decode.
+
+        A piecewise export is one standalone video per segment, so the finished
+        render in the clip cache IS the output: copy it byte-for-byte instead of
+        re-decoding the latent or re-stitching anything (no seam pass, no re-trim,
+        no chance of the export differing from what the run produced).
+        Only when no clip exists yet do we fall back to decoding the latent.
+        """
+        clip = clip_cache_path(node_id, idx, workflow_name=workflow_name, allow_prev=True)
+        if clip is not None and clip.is_file() and clip.stat().st_size > 0:
+            _export_clip_copy(idx)
+            return
         source = _load_segment_export_source(node_id, segments[idx], plan, vae=vae, workflow_name=workflow_name)
         if source is None:
-            # No frame source (no .pt, no latent). Fall back to copying the
-            # encoded clip cache (seg_XXXX.clip.mp4) verbatim — no re-decode,
-            # no re-encode, just a file copy.
-            _export_clip_copy(idx)
+            skipped.append({"index": idx, "reason": "no exportable cache"})
             return
         _export_one(segments[idx], source[0], source[1], tag=f"seg_{idx + 1:02d}")
 
@@ -1604,17 +1878,18 @@ def run_segment_export(
         }
 
     # --- 连续导出: stitch runs of adjacent checked segments ------------------
-    # Only a segment with a frame cache can be stitched; the merge streams the
-    # clips in from disk (peak ≈ result + one segment, same as「全部导出」) instead
-    # of holding a whole run in RAM. Latent-only segments were predecoded above,
-    # so they are on disk by now and take part like any other cached segment.
+    # A segment can be stitched when it has any frame source on disk — normally
+    # the encoded clip, whose seam frames are restored from ``frames_ht.pt``;
+    # see :func:`_segment_can_stitch`. The merge streams the clips in from disk
+    # (peak ≈ result + one segment, same as「全部导出」) instead of holding a whole
+    # run in RAM. Latent-only segments were predecoded above, so they are on disk
+    # by now and take part like any other cached segment.
     from .segment_continuity import concat_chunks_lazy
 
     stitchable = [
         idx
         for idx in valid
-        if resolve_segment_cache_path(node_id, segments[idx], plan, allow_stale=True, workflow_name=workflow_name)
-        is not None
+        if _segment_can_stitch(node_id, segments[idx], plan, workflow_name=workflow_name)
     ]
     log.info("[DEBUG-EXPORT] valid=%s stitchable=%s runs=%s", valid, stitchable, continuous_export_runs(stitchable))
     for run in continuous_export_runs(stitchable):
@@ -1850,8 +2125,9 @@ def load_segment_cache(
     plan: DirectorPlan,
     *,
     allow_stale: bool = False,
+    return_fp: bool = False,
     workflow_name: str | None = None,
-) -> torch.Tensor | None:
+) -> torch.Tensor | tuple[torch.Tensor | None, dict[str, Any] | None]:
     """Load cached segment frames (the FULL segment tensor).
 
     ``allow_stale=True``: used for「选择运行」+「全部导出」fill of unselected
@@ -1862,16 +2138,29 @@ def load_segment_cache(
 
     Space optimisation: the full ``frames.pt`` is no longer persisted. We rebuild
     the whole segment from ``clip.mp4`` (which is always written) and, when a
-    ``frames_ht.pt`` exists, overwrite the head/tail lanes with the exact cached
-    pixels so seam continuity stays bit-exact. Legacy ``frames.pt`` caches are
-    still honoured for backward compatibility.
+    ``frames_ht.pt`` exists, overlay the head/tail lanes with the exact cached
+    pixels so seam continuity stays bit-exact. Both files are written by one
+    :func:`save_segment_cache` call; when their frame counts disagree they belong
+    to different renders and the clip is returned untouched instead of being
+    stitched into a hybrid. Legacy ``frames.pt`` caches are still honoured for
+    backward compatibility.
+
+    ``return_fp=True``: returns ``(tensor, handoff)`` instead of just the tensor.
+    ``handoff`` carries ``trim_frames`` — the continuity prefix the generator
+    dropped. Callers that merge (``concat_chunks_lazy``) re-apply it so the
+    on-disk *full* clip (now persisted for standalone downloads) is turned back
+    into the overlap-free segment the seam pipeline expects.
     """
     root = _cache_root(node_id, workflow_name)
     if root is None:
+        if return_fp:
+            return None, None
         return None
     idx = int(seg.index)
     paths = _slot_paths(node_id, workflow_name, idx)
     if paths is None:
+        if return_fp:
+            return None, None
         return None
 
     def _load_from(group: dict[str, Path]) -> torch.Tensor | None:
@@ -1883,30 +2172,27 @@ def load_segment_cache(
                 )
             except Exception as exc:
                 log.warning("Failed to load legacy segment %d frames: %s", idx + 1, exc)
-        # 2) Rebuild full segment from the rendered clip; restore exact head/tail.
+        # 2) Rebuild the segment from the rendered clip, restoring the exact
+        #    head/tail. The two files are written together by
+        #    ``save_segment_cache``; ``_splice_headtail`` refuses to stitch them
+        #    when their frame counts disagree, because that means they belong to
+        #    different renders.
         clip_path = group["clip"]
         full = _load_full_segment_via_clip(clip_path) if clip_path.is_file() else None
         if full is not None:
             ht_path = group["frames_ht"]
             if ht_path.is_file():
-                try:
-                    ht = torch.load(ht_path, map_location="cpu", weights_only=True)
-                    if torch.is_tensor(ht) and ht.ndim == 4:
-                        n = int(ht.shape[0])
-                        hn = min(HEADTAIL_N, n // 2, int(full.shape[0]))
-                        head = ht[:hn].float().div(255.0) if ht.dtype == torch.uint8 else ht[:hn].float()
-                        tail = ht[n - hn:].float().div(255.0) if ht.dtype == torch.uint8 else ht[n - hn:].float()
-                        if int(head.shape[0]) <= int(full.shape[0]):
-                            full[:hn] = head.to(full.dtype)
-                        if int(tail.shape[0]) <= int(full.shape[0]):
-                            full[int(full.shape[0]) - hn:] = tail.to(full.dtype)
-                except Exception as exc:
-                    log.debug("Segment %d head/tail restore skipped: %s", idx + 1, exc)
+                head, tail, total = _load_headtail(ht_path)
+                if head is not None:
+                    full = _splice_headtail(full, head, tail, total)
             return full
         return None
 
     found = _load_from(paths)
     if found is not None:
+        handoff = load_segment_handoff_meta(node_id, seg, plan, workflow_name=workflow_name) if return_fp else None
+        if return_fp:
+            return found, handoff
         return found
     if allow_stale:
         # The current file group is empty but the superseded one (kept for one
@@ -1920,9 +2206,20 @@ def load_segment_cache(
                     "Segment %d: no current cache; filled from its previous render.",
                     idx + 1,
                 )
+                handoff = (
+                    load_segment_handoff_meta(
+                        node_id, seg, plan, allow_stale=True, workflow_name=workflow_name
+                    )
+                    if return_fp
+                    else None
+                )
+                if return_fp:
+                    return found, handoff
                 return found
     # 3) Nothing usable (clip missing + no legacy frames).
     log.debug("Segment %d cache miss: no clip.mp4 and no legacy frames.pt", idx + 1)
+    if return_fp:
+        return None, None
     return None
 
 
@@ -1955,19 +2252,22 @@ def load_segment_tail(
             return None
         k = min(int(n), int(full.shape[0]))
         return full[int(full.shape[0]) - k:].clone()
-    try:
-        ht = torch.load(ht_path, map_location="cpu", weights_only=True)
-    except Exception as exc:
-        log.debug("Segment %d head/tail load failed: %s", idx + 1, exc)
+    head, tail, total = _load_headtail(ht_path)
+    if head is None:
         return None
-    if not torch.is_tensor(ht) or ht.ndim != 4:
+    if tail is not None and int(tail.shape[0]) > 0:
+        window = tail
+    elif total > 0:
+        # Short segment: the payload holds every frame of the render.
+        window = head[max(0, int(total) - HEADTAIL_N):]
+    else:
+        # Legacy payload: ``[head_N, tail_N, ...]``, so split it by shape.
+        n_head = int(head.shape[0])
+        window = head[max(0, n_head - min(HEADTAIL_N, max(1, n_head // 2))):]
+    k = min(int(n), int(window.shape[0]))
+    if k <= 0:
         return None
-    total = int(ht.shape[0])
-    hn = min(HEADTAIL_N, total // 2)
-    tail = ht[total - hn:] if ht.dtype == torch.uint8 else ht[total - hn:]
-    tail = tail.float().div(255.0) if ht.dtype == torch.uint8 else tail.float()
-    k = min(int(n), int(tail.shape[0]))
-    return tail[int(tail.shape[0]) - k:].clone()
+    return _frames_to_float(window[int(window.shape[0]) - k:]).clone()
 
 
 def load_segment_audio(

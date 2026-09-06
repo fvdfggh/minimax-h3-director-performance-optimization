@@ -381,11 +381,16 @@ def _audio_payload_to_cpu(audio: dict[str, Any] | None) -> dict[str, Any] | None
 
 
 def _frames_to_disk(tensor: torch.Tensor) -> torch.Tensor:
-    """Store pixel frames as uint8 [0,255]. Export is 8-bit anyway; float32 is 4× larger."""
+    """Store pixel frames as uint8 [0,255]. Export is 8-bit anyway; float32 is 4× larger.
+
+    Returns a tensor that **owns** its storage. ``contiguous()`` hands a
+    contiguous slice back unchanged, and a trimmed export *is* a slice of the
+    full VAE decode — saving that view persists every frame of the decode.
+    """
     x = tensor.detach().cpu()
     if x.dtype == torch.uint8:
-        return x.contiguous()
-    return x.float().clamp(0, 1).mul(255).round().clamp(0, 255).to(torch.uint8).contiguous()
+        return x.clone()
+    return x.float().clamp(0, 1).mul(255).round().clamp(0, 255).to(torch.uint8)
 
 
 def _frames_from_disk(loaded: Any) -> torch.Tensor | None:
@@ -431,12 +436,23 @@ def _frames_to_headtail(tensor: torch.Tensor) -> dict[str, Any]:
     x = x.contiguous()
     total = int(x.shape[0])
     if total <= 2 * HEADTAIL_N:
-        return {"version": HEADTAIL_VERSION, "total": total, "head": x, "tail": x[:0]}
+        # Cloned for the same reason as below: ``x`` (and an empty ``x[:0]``)
+        # still reference the caller's storage, which for a trimmed export is
+        # the whole VAE decode — saving the view would persist all of it.
+        return {
+            "version": HEADTAIL_VERSION,
+            "total": total,
+            "head": x.clone(),
+            "tail": x[:0].clone(),
+        }
+    # ``.clone()``, never ``.contiguous()``: a contiguous slice is returned as-is
+    # (no copy), so it keeps pointing at the *whole* segment's storage and
+    # ``torch.save`` then persists every frame instead of just the window.
     return {
         "version": HEADTAIL_VERSION,
         "total": total,
-        "head": x[:HEADTAIL_N].contiguous(),
-        "tail": x[total - HEADTAIL_N:].contiguous(),
+        "head": x[:HEADTAIL_N].clone(),
+        "tail": x[total - HEADTAIL_N:].clone(),
     }
 
 

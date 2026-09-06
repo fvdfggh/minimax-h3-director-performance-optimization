@@ -22,6 +22,7 @@ import torch
 from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from . import cache_layout
+from . import segment_slots
 from .conditioning_cache import (
     load_conditioning_cache,
     save_conditioning_cache,
@@ -620,15 +621,24 @@ def _load_batch_ref(node_id, seg_index, cache_dir):
 
 
 def _save_batch_latent(node_id, seg_index, samples, cache_dir):
-    """Save sampled AV latent to disk (per-run scratch intermediate).
+    """Persist the sampled AV latent to the durable, content-addressed segment cache.
 
-    NB: this is a *scratch* file (``seg_XXXX_scratch_latent.pt``), distinct from
-    the durable ``seg_XXXX_latent.pt`` that ``segment_cache.save_segment_cache``
-    writes in Phase 3. Keeping them separate means an interrupted run only leaves
-    scratch behind (cleaned by ``iter_scratch_files``) and never spoofs a finished
-    segment cache that a later continuity pin would trust.
+    Writes ``seg_<hash>_latent.pt`` (the same slot that ``segment_cache.save_segment_cache``
+    fills in Phase 3), NOT a per-run scratch file. This keeps a single on-disk copy of the
+    latent and lets the next segment — same run or a later run — pin its motion context
+    straight from the segment cache via ``load_segment_av_latent`` instead of from a scratch
+    file that ``iter_scratch_files`` would delete.
+
+    A latent-only file (no ``.meta.json`` yet) is deliberately *not* a "finished" segment:
+    strict readers (``allow_stale=False``) still require the meta and ignore it, so it never
+    spoofs a complete cache that continuity /「全部导出」would trust. ``save_segment_cache``
+    in Phase 3 then completes the group with frames + meta.
     """
-    path = cache_layout.scratch_path(cache_dir, seg_index, "latent")
+    stem = segment_slots.resolve_stem(cache_dir, seg_index)
+    if not stem:
+        log.warning("Director batch: no cache slot for segment %d, latent not persisted", seg_index + 1)
+        return None
+    path = cache_layout.segment_paths(cache_dir, stem)["latent"]
     # Move to CPU for disk storage
     cpu_samples = {}
     for k, v in samples.items():
@@ -641,8 +651,17 @@ def _save_batch_latent(node_id, seg_index, samples, cache_dir):
 
 
 def _load_batch_latent(node_id, seg_index, cache_dir):
-    """Load sampled AV latent from disk (per-run scratch intermediate)."""
-    path = cache_layout.scratch_path(cache_dir, seg_index, "latent")
+    """Load a sampled AV latent from the durable segment cache.
+
+    Position-addressed (mirrors :func:`segment_cache.load_segment_av_latent`) and without the
+    fingerprint gate, so a latent-only file written by ``_save_batch_latent`` in Phase 2 —
+    before the meta exists — still loads. Used as the fallback when the stricter
+    ``load_segment_av_latent`` did not return one.
+    """
+    stem = segment_slots.resolve_stem(cache_dir, seg_index)
+    if not stem:
+        return None
+    path = cache_layout.segment_paths(cache_dir, stem)["latent"]
     if not path.exists():
         return None
     return torch.load(path, map_location="cpu", weights_only=False)
@@ -1231,9 +1250,9 @@ def execute_director_batch(
         if use_motion_context and seg.index > 0:
             prev_idx = seg.index - 1
             # Motion context always reads the *timeline* predecessor (seg.index - 1).
-            # Lookup order: this run's memory -> seg_cache av latent -> this node's
-            # batch scratch latent from an earlier run. The last hop keeps a partial
-            #「选择运行」working even when the predecessor was never re-sampled.
+            # Lookup order: this run's memory -> seg_cache av latent -> durable segment
+            # cache left by an earlier run. The last hop keeps a partial「选择运行」
+            # working even when the predecessor was never re-sampled this run.
             prev_av = completed_av_latents.get(prev_idx)
             if prev_av is None:
                 prev_seg = next((s for s in all_segments if s.index == prev_idx), None)
@@ -1243,7 +1262,7 @@ def execute_director_batch(
                 prev_av = _load_batch_latent(node_id, prev_idx, cache_dir)
                 if prev_av is not None:
                     log.info(
-                        "Director batch: seg #%d uses seg #%d latent from batch scratch cache; "
+                        "Director batch: seg #%d uses seg #%d latent from the durable segment cache; "
                         "if its prompt changed, re-run that segment to refresh.",
                         seg.index + 1, prev_idx + 1,
                     )

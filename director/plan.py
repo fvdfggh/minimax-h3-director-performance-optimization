@@ -234,8 +234,7 @@ class DirectorPlan:
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
-    refine: dict | None = None
-    # Sampling knobs stamped at execute time (first-pass cache fingerprint).
+    # Sampling knobs stamped at execute time (cache fingerprint).
     sample_seed: int = 0
     sample_cfg: float = 1.0
     sample_steps: int = 25
@@ -969,15 +968,6 @@ def plan_summary(plan: DirectorPlan) -> str:
             f"Output: {plan.width}×{plan.height} ({plan.output_mode})",
             f"Global task: {get_task_prompt_spec(plan.global_task_type).label}",
         ]
-        refine_line = None
-        try:
-            from .refine_pack import refine_report_line
-
-            refine_line = refine_report_line(plan)
-        except Exception:
-            refine_line = None
-        if refine_line:
-            lines.append(refine_line)
         if plan.continuity_enabled:
             pinned = [
                 seg.index + 1
@@ -1064,15 +1054,6 @@ def plan_summary(plan: DirectorPlan) -> str:
         )
     else:
         lines.append("Segment continuity: OFF (per-segment generation)")
-    refine_line = None
-    try:
-        from .refine_pack import refine_report_line
-
-        refine_line = refine_report_line(plan)
-    except Exception:
-        refine_line = None
-    if refine_line:
-        lines.append(refine_line)
     if plan.run_indices is not None:
         selected = sorted(plan.run_indices)
         skipped = [i + 1 for i in range(plan.segment_count) if i not in plan.run_indices]

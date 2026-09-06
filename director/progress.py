@@ -10,8 +10,6 @@ DIRECTOR_PHASES = (
     "prepare",
     "context_encode",
     "sample",
-    "upscale",
-    "refine",
     "decode",
 )
 
@@ -19,8 +17,6 @@ PHASE_LABELS = {
     "prepare": "准备片段",
     "context_encode": "H3 条件编码",
     "sample": "采样",
-    "upscale": "放大",
-    "refine": "精修采样",
     "decode": "AV 解码",
     "plan": "解析时间轴 / 加载视频",
     "finish": "全部完成",

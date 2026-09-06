@@ -20,13 +20,12 @@ head+tail frames            ``seg_<hash>_frames_ht.pt``             durable
 audio latent                ``seg_<hash>_audio.pt``                 durable
 rendered clip               ``seg_<hash>_clip.mp4``                 durable
 segment meta / handoff      ``seg_<hash>_meta.json`` / ``_handoff`` durable
-first-pass (Refine)         ``seg_<hash>_pre_*.{pt,json}``          durable
 slot map (position→files)   ``segment_slots.json``                  durable
 batch scratch               ``seg_XXXX_scratch_*.pt``               per-run
 ==========================  ======================================  ==========
 
 ``<hash>`` is the segment's **content** hash (prompt + references + duration +
-sampling + refine), not its position — see :mod:`segment_slots`, which owns the
+sampling), not its position — see :mod:`segment_slots`, which owns the
 timeline-position → file-group mapping. Repeated content appends ``_1``, ``_2``.
 
 The split matters for clearing: scratch files are regenerate-in-place working
@@ -195,18 +194,10 @@ def segment_paths(root: Path, stem: str) -> dict[str, Path]:
     }
 
 
-def first_pass_paths(root: Path, stem: str) -> dict[str, Path]:
-    """confirm-first-pass artefacts (``<stem>_pre_*``) for one file stem."""
-    return {
-        "meta": root / f"{stem}_pre_meta.json",
-        "latent": root / f"{stem}_pre_latent.pt",
-        "frames": root / f"{stem}_pre_frames.pt",
-        "handoff": root / f"{stem}_pre_handoff.json",
-    }
-
-
 #: Suffixes of every durable per-segment artefact, **longest first** so
 #: :func:`stem_of_filename` cannot mistake ``_pre_meta.json`` for ``_meta.json``.
+#: The ``_pre_*`` entries belong to a removed feature but stay listed so files
+#: left behind by older runs are still recognised and garbage-collected.
 SEGMENT_SUFFIXES = (
     "_pre_handoff.json",
     "_pre_frames.pt",

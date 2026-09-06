@@ -16,7 +16,7 @@ This module keeps that mapping explicit instead::
                    ...]}
 
 ``slots[k]`` describes timeline position ``k``. File names are derived from the
-segment's **content hash** (prompt + references + duration + sampling + refine,
+segment's **content hash** (prompt + references + duration + sampling,
 see :func:`content_hash_of_fingerprint`), never from its position, so:
 
 * deleting a group only removes *its own* files — later groups keep theirs;

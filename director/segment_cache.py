@@ -97,7 +97,7 @@ def _cache_root(node_id: str, workflow_name: str | None = None) -> Path | None:
 
 
 def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
-    """Identity that affects first-pass sampling (no Refine settings)."""
+    """Identity that affects sampling output (cache invalidation key)."""
     ref_files = sorted(
         f"img{ref.index}:{(getattr(ref, 'image_file', '') or '')}"
         for ref in seg.refs
@@ -157,37 +157,16 @@ def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[
     return identity
 
 
-def first_pass_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
-    """Exact-match key for first-pass AV latent. Refine knobs are excluded."""
-    fp = _segment_identity_fingerprint(seg, plan)
-    fp.update({
-        "kind": "first_pass",
-        "seed": int(getattr(plan, "sample_seed", 0) or 0),
-        "cfg": round(float(getattr(plan, "sample_cfg", 1.0) or 1.0), 6),
-        "steps": int(getattr(plan, "sample_steps", 25) or 25),
-        "sampler": str(getattr(plan, "sample_sampler", "") or ""),
-        "scheduler": str(getattr(plan, "sample_scheduler", "") or ""),
-        "shift_video": round(float(getattr(plan, "sample_shift_video", 12.0) or 12.0), 6),
-        "shift_audio": round(float(getattr(plan, "sample_shift_audio", 3.0) or 3.0), 6),
-    })
-    return fp
-
-
 def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
     """Stable identity for a segment — cache invalidates when edit params change."""
-    fp = _segment_identity_fingerprint(seg, plan)
-    from .refine_pack import refine_fingerprint
-
-    fp.update(refine_fingerprint(plan))
-    return fp
+    return _segment_identity_fingerprint(seg, plan)
 
 
 def slot_content_hash(seg: SegmentPlan, plan: DirectorPlan) -> str:
     """Content hash behind a segment's cache file names.
 
     Built from the identity fingerprint only, so it is independent of the
-    segment's position (that is the slot map's job) and of the Refine knobs
-    (so confirm-first-pass ``.pre`` files survive a Refine change).
+    segment's position (that is the slot map's job).
     """
     return segment_slots.content_hash_of_fingerprint(
         _segment_identity_fingerprint(seg, plan), defaults=_fingerprint_defaults()
@@ -305,23 +284,6 @@ def _slot_paths(
     if root is None:
         return None
     return segment_slots.slot_paths(root, position, stale=stale)
-
-
-def _first_pass_paths(
-    node_id: str | None,
-    workflow_name: str | None,
-    position: int,
-) -> dict[str, Path] | None:
-    """confirm-first-pass artefact paths for timeline ``position``."""
-    if not node_id:
-        return None
-    root = _cache_root(node_id, workflow_name)
-    if root is None:
-        return None
-    stem = segment_slots.resolve_stem(root, position)
-    if not stem:
-        return None
-    return cache_layout.first_pass_paths(root, stem)
 
 
 def _safe_unlink(path: Path) -> bool:
@@ -689,22 +651,32 @@ def _fingerprint_defaults() -> dict[str, Any]:
     return {"continuity_to_next": False}
 
 
+#: Keys that used to be part of the fingerprint but belong to a removed feature.
+#: Dropping them from a stored fingerprint keeps those caches valid instead of
+#: forcing a full re-render purely because the feature disappeared.
+_RETIRED_FINGERPRINT_KEYS = ("refine",)
+
+
+def _normalize_stored_fingerprint(stored: dict) -> dict:
+    patched = dict(stored)
+    for key, default in _fingerprint_defaults().items():
+        patched.setdefault(key, default)
+    for key in _RETIRED_FINGERPRINT_KEYS:
+        patched.pop(key, None)
+    return patched
+
+
 def _fingerprint_compatible(stored: Any, expected: dict[str, Any]) -> bool:
     """Compare fingerprints, treating keys added later as their default."""
     if not isinstance(stored, dict):
         return stored == expected
-    patched = dict(stored)
-    for key, default in _fingerprint_defaults().items():
-        patched.setdefault(key, default)
-    return patched == expected
+    return _normalize_stored_fingerprint(stored) == expected
 
 
 def _fingerprint_diff_keys(stored: Any, expected: dict[str, Any]) -> list[str]:
     if not isinstance(stored, dict):
         return ["<invalid-meta>"]
-    patched = dict(stored)
-    for key, default in _fingerprint_defaults().items():
-        patched.setdefault(key, default)
+    patched = _normalize_stored_fingerprint(stored)
     keys = sorted(set(patched) | set(expected))
     return [k for k in keys if patched.get(k) != expected.get(k)]
 
@@ -2324,129 +2296,6 @@ def load_segment_audio(
         return None
 
 
-def save_first_pass_cache(
-    node_id: str | None,
-    seg: SegmentPlan,
-    plan: DirectorPlan,
-    *,
-    av_latent: dict | None = None,
-    frames: torch.Tensor | None = None,
-    handoff: dict[str, Any] | None = None,
-    workflow_name: str | None = None,
-) -> None:
-    """Persist first-pass AV latent for confirm-then-refine. Never raises."""
-    if not node_id:
-        return
-    if av_latent is None or not isinstance(av_latent, dict) or "samples" not in av_latent:
-        return
-    root = _cache_root(node_id, workflow_name)
-    if root is None:
-        return
-    fp = first_pass_cache_fingerprint(seg, plan)
-    idx = seg.index
-    stem = segment_slots.resolve_stem(root, idx)
-    if not stem:
-        return
-    paths = cache_layout.first_pass_paths(root, stem)
-    meta_path = paths["meta"]
-    latent_path = paths["latent"]
-    frames_path = paths["frames"]
-    handoff_path = paths["handoff"]
-    try:
-        cpu_latent = _av_latent_to_cpu(av_latent)
-        _write_via_temp(latent_path, lambda p: torch.save(cpu_latent, p))
-        text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
-        _write_via_temp(meta_path, lambda p: p.write_text(text, encoding="utf-8"))
-        if handoff:
-            _write_via_temp(
-                handoff_path,
-                lambda p: p.write_text(
-                    json.dumps(handoff, ensure_ascii=False, sort_keys=True),
-                    encoding="utf-8",
-                ),
-            )
-        if isinstance(frames, torch.Tensor) and frames.numel() > 0:
-            payload = _frames_to_disk(frames)
-            _write_via_temp(frames_path, lambda p: torch.save(payload, p))
-        log.debug(
-            "Cached first-pass segment %d for node %s (seed=%s)",
-            idx + 1,
-            node_id,
-            fp.get("seed"),
-        )
-    except Exception as exc:
-        log.warning(
-            "Segment %d first-pass cache write skipped (%s).",
-            idx + 1,
-            exc,
-        )
-        for stray in root.glob(f".{stem}.*"):
-            _safe_unlink(stray)
-
-
-def load_first_pass_cache(
-    node_id: str | None,
-    seg: SegmentPlan,
-    plan: DirectorPlan,
-    *,
-    workflow_name: str | None = None,
-) -> dict[str, Any] | None:
-    """Load first-pass cache only on exact fingerprint match. Never stale."""
-    if not node_id:
-        return None
-    root = _cache_root(node_id, workflow_name)
-    if root is None:
-        return None
-    idx = seg.index
-    paths = _first_pass_paths(node_id, workflow_name, idx)
-    if paths is None:
-        return None
-    meta_path = paths["meta"]
-    latent_path = paths["latent"]
-    frames_path = paths["frames"]
-    handoff_path = paths["handoff"]
-    if not meta_path.is_file() or not latent_path.is_file():
-        return None
-    try:
-        stored = json.loads(meta_path.read_text(encoding="utf-8"))
-        expected = first_pass_cache_fingerprint(seg, plan)
-        if not _fingerprint_compatible(stored, expected):
-            if isinstance(stored, dict) and _reject_source_stale(
-                stored, expected, seg_index=idx, quiet=True,
-            ):
-                return None
-            diff = _fingerprint_diff_keys(stored, expected) if isinstance(stored, dict) else ["<invalid-meta>"]
-            log.info(
-                "Segment %d first-pass cache miss (diff=%s); will sample first pass.",
-                idx + 1,
-                diff[:8],
-            )
-            return None
-        payload = torch.load(latent_path, map_location="cpu", weights_only=False)
-        if not isinstance(payload, dict) or "samples" not in payload:
-            return None
-        frames = None
-        if frames_path.is_file():
-            try:
-                loaded = torch.load(frames_path, map_location="cpu", weights_only=True)
-                if isinstance(loaded, torch.Tensor) and loaded.numel() > 0:
-                    frames = _frames_from_disk(loaded)
-            except Exception as exc:
-                log.debug("Segment %d first-pass frames skipped: %s", idx + 1, exc)
-        handoff: dict[str, Any] = {}
-        if handoff_path.is_file():
-            try:
-                data = json.loads(handoff_path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    handoff = data
-            except Exception:
-                handoff = {}
-        return {"av_latent": payload, "frames": frames, "handoff": handoff}
-    except Exception as exc:
-        log.warning("Failed to load segment %d first-pass cache: %s", idx + 1, exc)
-        return None
-
-
 def prune_orphan_segment_files(node_id: str | None, workflow_name: str | None = None) -> int:
     """Delete per-segment files that no slot in the map claims.
 
@@ -2473,127 +2322,4 @@ def prune_orphan_segment_files(node_id: str | None, workflow_name: str | None = 
         return 0
 
 
-def first_pass_cache_disk_signature(
-    node_id: str | None, workflow_name: str | None = None
-) -> str:
-    """Fingerprint confirm-first-pass ``*.pre.*`` files without creating the cache dir.
 
-    Director ``IS_CHANGED`` cannot see the linked Refine pack (ComfyUI only
-    forwards widgets). These ``.pre`` files are written only by the confirmation
-    hold, so a second Queue observes a new signature and continues into refine.
-    """
-    if not node_id:
-        return ""
-    root = cache_layout.node_cache_dir(str(node_id), workflow_name, create=False)
-    if not root.is_dir():
-        return ""
-    parts: list[str] = []
-    try:
-        for path in sorted(root.glob("seg_*_pre_*")):
-            try:
-                st = path.stat()
-            except OSError:
-                continue
-            parts.append(f"{path.name}:{int(st.st_mtime_ns)}:{int(st.st_size)}")
-    except OSError:
-        return ""
-    return "|".join(parts)
-
-
-def inspect_first_pass_cache(
-    node_id: str | None,
-    plan: DirectorPlan,
-    workflow_name: str | None = None,
-) -> dict[str, Any]:
-    """Inspect first-pass cache files without loading their tensor payloads."""
-    current_seed = int(getattr(plan, "sample_seed", 0) or 0)
-    result: dict[str, Any] = {
-        "exists": False,
-        "matches": False,
-        "current_seed": current_seed,
-        "cached_seeds": [],
-        "segment_total": 0,
-        "cached_count": 0,
-        "matched_count": 0,
-        "diff_keys": [],
-        "segments": [],
-    }
-    if not node_id:
-        return result
-
-    root = cache_layout.node_cache_dir(str(node_id), workflow_name, create=False)
-    all_segments = list(getattr(plan, "segments", None) or [])
-    run_indices = getattr(plan, "run_indices", None)
-    if run_indices is None:
-        selected = all_segments
-    else:
-        selected = [
-            all_segments[i]
-            for i in sorted(run_indices)
-            if 0 <= i < len(all_segments)
-        ]
-    result["segment_total"] = len(selected)
-
-    cached_seeds: set[int] = set()
-    all_diffs: set[str] = set()
-    rows: list[dict[str, Any]] = []
-    for seg in selected:
-        idx = int(seg.index)
-        # ``_pre_*`` names, resolved through the slot map like every other
-        # per-segment artefact (these two used an older ``.pre.`` spelling that
-        # the writer no longer produced, so the probe never found anything).
-        pre_paths = _first_pass_paths(node_id, workflow_name, idx)
-        meta_path = pre_paths["meta"] if pre_paths else None
-        latent_path = pre_paths["latent"] if pre_paths else None
-        meta_exists = bool(meta_path and meta_path.is_file())
-        latent_exists = bool(latent_path and latent_path.is_file())
-        cache_exists = meta_exists and latent_exists
-        stored: Any = None
-        read_error = ""
-        if meta_exists:
-            try:
-                stored = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception as exc:
-                read_error = str(exc)
-
-        expected = first_pass_cache_fingerprint(seg, plan)
-        matches = bool(cache_exists and _fingerprint_compatible(stored, expected))
-        diff = (
-            _fingerprint_diff_keys(stored, expected)
-            if isinstance(stored, dict)
-            else (["<invalid-meta>"] if meta_exists else ["<missing-cache>"])
-        )
-        cached_seed = stored.get("seed") if isinstance(stored, dict) else None
-        try:
-            if cached_seed is not None:
-                cached_seed = int(cached_seed)
-                cached_seeds.add(cached_seed)
-        except (TypeError, ValueError):
-            cached_seed = None
-        all_diffs.update(diff)
-        rows.append(
-            {
-                "segment": idx + 1,
-                "exists": cache_exists,
-                "matches": matches,
-                "cached_seed": cached_seed,
-                "diff_keys": diff,
-                "error": read_error,
-            }
-        )
-
-    cached_count = sum(1 for row in rows if row["exists"])
-    matched_count = sum(1 for row in rows if row["matches"])
-    total = len(rows)
-    result.update(
-        {
-            "exists": cached_count > 0,
-            "matches": total > 0 and matched_count == total,
-            "cached_seeds": sorted(cached_seeds),
-            "cached_count": cached_count,
-            "matched_count": matched_count,
-            "diff_keys": sorted(all_diffs),
-            "segments": rows,
-        }
-    )
-    return result

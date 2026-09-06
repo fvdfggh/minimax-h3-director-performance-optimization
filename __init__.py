@@ -9,7 +9,6 @@ from .nodes.conditioning import (
     MiniMaxH3DirectorPlannerConditioning,
 )
 from .nodes.director import MiniMaxH3Director
-from .nodes.director_refine import MiniMaxH3DirectorRefine
 from .nodes.director_groups import (
     MiniMaxH3DirectorGroupImageToVideo,
     MiniMaxH3DirectorGroupReferenceToVideo,
@@ -19,7 +18,6 @@ from .nodes.fast_video_vae_decode import MiniMaxH3FastVideoVAE
 
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3Director": MiniMaxH3Director,
-    "MiniMaxH3DirectorRefine": MiniMaxH3DirectorRefine,
     # Legacy type id kept so older workflows still load.
     "ComfyMiniMaxH3Director": MiniMaxH3Director,
     "MiniMaxH3DirectorConditioning": MiniMaxH3DirectorConditioning,
@@ -34,7 +32,6 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3Director": "MiniMaxH3Director",
-    "MiniMaxH3DirectorRefine": "MiniMax H3 Director Refine",
     "ComfyMiniMaxH3Director": "MiniMaxH3Director",
     "MiniMaxH3DirectorConditioning": "MiniMax H3 Director Conditioning",
     "MiniMaxH3DirectorPlannerConditioning": "MiniMax H3 Director Planner Conditioning",

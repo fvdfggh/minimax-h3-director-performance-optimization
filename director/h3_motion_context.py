@@ -466,12 +466,12 @@ def apply_motion_context(
                 available = min(available, max(0, int(context_end_frame)))
             video_src = "latent"
         elif context_frames is not None and int(context_frames.shape[0]) >= 1:
-            # Refine upscale stores a larger AV latent; next segment's first pass
-            # is still the Director canvas. Pin from the decoded export instead
-            # of crashing — that export is what concat actually uses.
+            # A canvas mismatch (larger stored AV latent vs this segment's canvas)
+            # is not a crash: pin from the decoded export instead, which is what
+            # concat actually uses.
             log.warning(
                 "Director continuity: context latent is %dx%d but this segment "
-                "is %dx%d — pin from decoded frames (typical after Refine upscale).",
+                "is %dx%d — pin from decoded frames.",
                 src_w,
                 src_h,
                 width,

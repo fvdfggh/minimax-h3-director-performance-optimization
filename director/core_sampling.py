@@ -1,8 +1,7 @@
 """Single-stage sampling for MiniMax H3 (SigmaShift + KSampler).
 
 Pass ``sigmas`` to override the KSampler schedule (ManualSigmas-style).
-``apply_shift=False`` skips ``MiniMaxH3SigmaShift``; Refine still applies it
-so video/audio timesteps match the first pass.
+``apply_shift=False`` skips ``MiniMaxH3SigmaShift``.
 """
 
 from __future__ import annotations

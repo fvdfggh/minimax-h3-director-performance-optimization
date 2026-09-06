@@ -143,7 +143,6 @@ class MiniMaxH3Director:
                         "tooltip": (
                             "本次运行用哪个 MODEL 口：主模型 model，或备用口 model_b / model_c。"
                             "选中的口没接线时自动回退到主模型 model。"
-                            "Refine 未接 refine_model 时，二采也用这里选中的模型。"
                         ),
                     },
                 ),
@@ -182,19 +181,6 @@ class MiniMaxH3Director:
                             "External Reference to Video group(s). "
                             "When connected, overrides UI cards for execution (external priority). "
                             "Connect Group (Reference to Video).group, or Groups Combine."
-                        ),
-                    },
-                ),
-                "refine": (
-                    "MMX_DIR_REFINE",
-                    {
-                        "tooltip": (
-                            "Optional Refine node. When connected, each segment runs a second "
-                            "sample pass (same-size refine, or upscale then sample). "
-                            "Wire a MODEL into Refine.refine_model to use a different UNET for that pass; "
-                            "unwired uses this Director model. "
-                            "images is the refined result; images_pre_refine is the first pass. "
-                            "Unconnected = single-pass (current behavior)."
                         ),
                     },
                 ),
@@ -252,17 +238,9 @@ class MiniMaxH3Director:
                     return f"{name}: expected {want}, linked node returns {got}."
         return True
 
-    @classmethod
-    def IS_CHANGED(cls, unique_id=None, workflow_name=None, **kwargs):
-        # Do not return NaN: that would re-run every Director queue even when
-        # confirm_first_pass is off. Linked Refine is None here, so fingerprint
-        # the .pre cache files that only the confirmation hold writes.
-        del kwargs
-        from ..director.segment_cache import first_pass_cache_disk_signature
-
-        return first_pass_cache_disk_signature(unique_id, workflow_name=workflow_name)
-
     RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE")
+    # ``images_pre_refine`` is kept as an output slot so saved workflows keep their
+    # links; it now mirrors ``images`` (single-pass output).
     RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report", "images_pre_refine")
     OUTPUT_IS_LIST = (True, True, False, False, True, False, True)
     FUNCTION = "execute"
@@ -272,8 +250,8 @@ class MiniMaxH3Director:
         "single-stage KSampler + MiniMaxH3SigmaShift, LTXVSeparateAVLatent decode. "
         "Supports t2v / i2v / fl2v / r2v / v2v / rv2v. "
         "Optional i2v_groups / r2v_groups accept multi-group packs from Director Group nodes "
-        "(external priority over UI cards). Optional refine accepts MiniMax H3 Director Refine "
-        "(second sample / upscale). images_pre_refine is the first-pass video before refine. "
+        "(external priority over UI cards). "
+        "images_pre_refine mirrors images (kept for workflow compatibility). "
         "run_model picks which wired MODEL slot samples: model (main, required) or the "
         "optional model_b / model_c; an unwired pick falls back to model. "
         "Defaults: 0.4MP 16:9 (864×480), 5s / 124 frames @ 24 fps."
@@ -296,7 +274,6 @@ class MiniMaxH3Director:
         unique_id=None,
         i2v_groups=None,
         r2v_groups=None,
-        refine=None,
         model_b=None,
         model_c=None,
         run_model=RUN_MODEL_MAIN,
@@ -331,7 +308,6 @@ class MiniMaxH3Director:
             unique_id=unique_id,
             i2v_groups=i2v_groups,
             r2v_groups=r2v_groups,
-            refine=refine,
         )
 
         model, model_note = resolve_run_model(
@@ -342,7 +318,7 @@ class MiniMaxH3Director:
         if batch_mode:
             # Batch mode: three-phase execution
             from ..director.batch_executor import execute_director_batch
-            combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation = (
+            combined, segment_outputs, segment_audios, report, export_frame_counts = (
                 execute_director_batch(
                     plan,
                     node_id=unique_id,
@@ -363,7 +339,7 @@ class MiniMaxH3Director:
             )
         else:
             # Normal mode
-            combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation = (
+            combined, segment_outputs, segment_audios, report, export_frame_counts = (
                 execute_director_plan_core(
                     plan,
                     node_id=unique_id,
@@ -396,9 +372,6 @@ class MiniMaxH3Director:
             export_source_images=export_source_images,
             segment_audios=segment_audios,
             segment_frame_counts=export_frame_counts,
-            pre_refine_combined=pre_combined,
-            pre_refine_segments=pre_segments,
-            block_final_images=held_for_confirmation,
         )
 
         # 「分段导出」不再另外写磁盘：节点 OUTPUT 已由 finalize_director_outputs

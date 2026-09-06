@@ -6,7 +6,6 @@ import json
 import logging
 
 import torch
-from comfy_execution.graph_utils import ExecutionBlocker
 
 from ..director.audio_export import (
     AUDIO_MODE_GENERATE,
@@ -119,7 +118,7 @@ def director_perf_inputs() -> dict:
                     "Phase 2: UNet 常驻内存，逐段采样存 latent\n"
                     "Phase 3: VAE 常驻内存，逐段解码导出\n\n"
                     "优势：避免模型反复装卸，减少磁盘读写。\n"
-                    "代价：总显存占用略高（模型常驻），无 refine passes。"
+                    "代价：总显存占用略高（模型常驻）。"
                 ),
             },
         ),
@@ -206,7 +205,6 @@ def prepare_director_plan(
     unique_id: str | None,
     i2v_groups=None,
     r2v_groups=None,
-    refine=None,
 ):
     from ..director.external_groups import (
         build_plan_from_external_groups,
@@ -248,7 +246,6 @@ def prepare_director_plan(
             height=height,
             ref_max_size=ref_max_size,
         )
-        plan = _attach_refine(plan, refine)
         _attach_segment_export(plan, timeline_data)
         log.info(
             "MiniMax H3 Director: external %s groups × %d (task=%s) | %s",
@@ -275,7 +272,6 @@ def prepare_director_plan(
         height=height,
         ref_max_size=ref_max_size,
     )
-    plan = _attach_refine(plan, refine)
     _attach_segment_export(plan, timeline_data)
     log.info(plan_summary(plan).replace("\n", " | "))
     return plan
@@ -310,17 +306,6 @@ def _attach_segment_export(plan, timeline_data: str) -> None:
     except Exception as exc:  # pragma: no cover - defensive
         log.warning("MiniMax H3 Director: 分段导出 config ignored (%s)", exc)
         plan.segment_export = None
-
-
-def _attach_refine(plan, refine):
-    from ..director.refine_pack import normalize_refine_pack
-
-    plan.refine = normalize_refine_pack(
-        refine,
-        base_width=int(getattr(plan, "width", 0) or 0),
-        base_height=int(getattr(plan, "height", 0) or 0),
-    )
-    return plan
 
 
 def _fit_source_clip_to_plan(plan, raw_clip: torch.Tensor) -> torch.Tensor:
@@ -438,9 +423,6 @@ def finalize_director_outputs(
     export_source_images: bool = False,
     segment_audios: list | None = None,
     segment_frame_counts: list[int] | None = None,
-    pre_refine_combined=None,
-    pre_refine_segments: list | None = None,
-    block_final_images: bool = False,
 ):
     is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)
     export_segments = plan.export_mode == "segments"
@@ -459,7 +441,7 @@ def finalize_director_outputs(
     # 「分段导出」of latent-only segments yields zero clips on the split layout.
     # An empty images list would make the downstream node's slice_dict index out
     # of range AND would propagate an empty AUDIO list below. Make it non-empty
-    # up front so every consumer (audio / source / pre_refine) sees a valid list.
+    # up front so every consumer (audio / source) sees a valid list.
     if not images_out:
         _fb_h = int(getattr(plan, "height", 0) or 0)
         _fb_w = int(getattr(plan, "width", 0) or 0)
@@ -484,32 +466,6 @@ def finalize_director_outputs(
             report = report + f"\n\nExport mode: all — merged {frame_count} frame(s) on images output."
         if plan.run_indices is not None and video_batch:
             report = report + f"\n\nPartial run: re-generated {len(segment_outputs)} video group(s)."
-
-    pre_segs = pre_refine_segments if pre_refine_segments else segment_outputs
-    pre_comb = pre_refine_combined if pre_refine_combined is not None else combined
-    share_pre = pre_comb is combined and (
-        pre_segs is segment_outputs
-        or (
-            len(pre_segs) == len(segment_outputs)
-            and all(a is b for a, b in zip(pre_segs, segment_outputs))
-        )
-    )
-    if share_pre:
-        pre_refine_out = images_out
-    else:
-        try:
-            pre_refine_out, _ = _layout_image_batches(
-                plan,
-                pre_comb,
-                pre_segs,
-                export_segments=export_segments,
-                is_batch=is_batch,
-                video_batch=video_batch,
-            )
-        except Exception as exc:
-            log.warning("images_pre_refine layout failed: %s", exc)
-            pre_refine_out = images_out
-            report = report + f"\n\nimages_pre_refine: fallback to images ({exc})."
 
     split_for_audio = split_layout
     audio_frame_end = frame_count if not split_for_audio else None
@@ -542,8 +498,6 @@ def finalize_director_outputs(
     # same video. Drop them before returning — nothing below reads them again.
     # (Split layout must NOT do this: there ``images_out`` *is* this list.)
     if not split_layout:
-        if pre_refine_segments is not None and pre_refine_segments is not segment_outputs:
-            del pre_refine_segments[:]
         del segment_outputs[:]
 
     split_source_outputs = export_segments or (is_batch and not video_batch)
@@ -576,26 +530,11 @@ def finalize_director_outputs(
     fb = (fb_h, fb_w, 3) if fb_h > 0 and fb_w > 0 else None
     images_out = _ensure_nonempty_image_batches(images_out, label="images", fallback=fb)
     source_images_out = _ensure_nonempty_image_batches(source_images_out, label="source_images", fallback=fb)
-    pre_refine_out = _ensure_nonempty_image_batches(pre_refine_out, label="images_pre_refine", fallback=fb)
-
-    refine_pack = getattr(plan, "refine", None)
-    if isinstance(refine_pack, dict) and refine_pack.get("enabled"):
-        report = report + (
-            "\n\nimages_pre_refine: first-pass video (before second sample / upscale). "
-            "Cached or passthrough slots reuse the stored final frames."
-        )
-    else:
-        report = report + (
-            "\n\nimages_pre_refine: same as images (Refine node not connected)."
-        )
+    # No second-pass stage any more: ``images_pre_refine`` mirrors ``images`` so
+    # workflows that still read that slot keep working (same tensors, no copy).
+    pre_refine_out = images_out
 
     report = report + "\n\n有问题联系作者：AI搅拌手  QQ交流群：551482703"
 
     fps_out = float(plan.frame_rate or 24.0)
-    if block_final_images:
-        report = report + (
-            "\n\n本轮仅确认一采：images（最终/二采输出）已阻断，"
-            "请从 images_pre_refine 查看或保存一采；再次 Queue 完成二采后 images 才会输出。"
-        )
-        images_out = ExecutionBlocker(None)
     return images_out, audio_out, fps_out, frame_count, source_images_out, report, pre_refine_out

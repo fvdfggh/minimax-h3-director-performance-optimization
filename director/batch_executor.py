@@ -30,8 +30,6 @@ from .conditioning_cache import (
     text_cache_key,
 )
 from .core_sampling import sample_single_stage
-from .refine_pack import refine_will_sample, refine_needs_canvas, refine_passes_for, confirm_first_pass_enabled
-from .refine_sampling import apply_segment_refine
 from .frame_align import (
     minimax_align_frame_count, minimax_phase_aligned_export_frames, pad_or_trim_frames,
 )
@@ -56,15 +54,14 @@ from .h3_motion_context import (
 )
 from .segment_cache import (
     build_run_selection_clips, continuous_export_runs,
-    load_first_pass_cache, load_next_segment_av_latent,
+    load_next_segment_av_latent,
     load_segment_audio, load_segment_av_latent,
     load_segment_handoff_meta, probe_segment_cache_shape,
-    save_first_pass_cache, save_segment_cache,
+    save_segment_cache,
     sync_segment_slots,
 )
 from .segment_mp4_export import (
-    copy_segment_mp4_suffix, maybe_export_segment_mp4, maybe_export_segment_mp4s,
-    mp4_export_kind, new_segment_mp4_run_dir, export_run_mp4, run_mp4_path,
+    maybe_export_segment_mp4, new_segment_mp4_run_dir, export_run_mp4, run_mp4_path,
 )
 from .segment_continuity import concat_chunks_lazy, is_continuity_active, resolve_prev_segment_output
 from .vram_cleanup import cleanup_segment_vram
@@ -1526,7 +1523,6 @@ def execute_director_batch(
 
     segment_outputs: list[torch.Tensor] = []
     segment_audios: list[dict[str, Any]] = []
-    segment_pre_refine: list[torch.Tensor] = []
     export_frame_counts: list[int] = []
     # Per-segment bookkeeping keyed by timeline index, so the merge can walk the
     # whole timeline (including slots this run did not sample) without index math.
@@ -1600,7 +1596,6 @@ def execute_director_batch(
         )
 
         chunk = decoded.cpu().float()
-        pre_chunk = chunk  # No refine in batch mode (simplified)
 
         # The head/tail window and the segment's clip.mp4 are written together by
         # save_segment_cache, so a piecewise export is byte-equivalent to this
@@ -1616,13 +1611,12 @@ def execute_director_batch(
 
         # Export mp4
         if mp4_run_dir is not None:
-            mp4_paths = maybe_export_segment_mp4s(
+            mp4_path = maybe_export_segment_mp4(
                 mp4_run_dir, plan, seg, chunk,
                 audio_dict if isinstance(audio_dict, dict) else None,
-                pre_frames=None,
             )
-            for mp4_path in mp4_paths:
-                reports.append(f"  Segment {ui_idx + 1}/{timeline_seg_total}: {mp4_export_kind(mp4_path)} → {mp4_path}")
+            if mp4_path:
+                reports.append(f"  Segment {ui_idx + 1}/{timeline_seg_total}: mp4 → {mp4_path}")
 
         # Preview
         if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and chunk.shape[0] >= 1:
@@ -1639,7 +1633,6 @@ def execute_director_batch(
 
         run_pos_map[seg.index] = len(segment_outputs)
         segment_outputs.append(chunk)
-        segment_pre_refine.append(pre_chunk)
         audio_out = audio_dict if isinstance(audio_dict, dict) else {}
         segment_audios.append(audio_out)
         decoded_segments.append(seg)
@@ -1707,13 +1700,6 @@ def execute_director_batch(
                 if run_pos is not None and run_pos < len(segment_outputs):
                     segment_outputs[run_pos] = new_chunk
                     segment_audios[run_pos] = new_audio_dict
-                    if run_pos < len(segment_pre_refine):
-                        prev_pre = segment_pre_refine[run_pos]
-                        if int(prev_pre.shape[0]) > pending_trim:
-                            prev_pre, _ = trim_export_tail(
-                                prev_pre, None, pending_trim, fps=fps
-                            )
-                            segment_pre_refine[run_pos] = prev_pre
                     export_frame_counts[run_pos] = int(new_chunk.shape[0])
                 # concat_chunks_lazy reads from disk — the cache must match.
                 # save_segment_cache rewrites the head/tail window *and* the
@@ -1735,9 +1721,9 @@ def execute_director_batch(
                     workflow_name=workflow_name,
                 )
                 if mp4_run_dir is not None:
-                    maybe_export_segment_mp4s(
+                    maybe_export_segment_mp4(
                         mp4_run_dir, plan, prev_export_seg, new_chunk,
-                        new_audio_dict, pre_frames=None,
+                        new_audio_dict,
                     )
                 reports.append(
                     f"  Seg #{prev_export_seg.index + 1}: phase-align trim — dropped "
@@ -1988,10 +1974,9 @@ def execute_director_batch(
     # is re-read from disk by the merge, so the in-memory chunks are now a second
     # full copy of the same video. Release them *before* allocating the merge
     # result: keeping both is what pushed peak RAM to 2x the final video (the
-    # long-timeline OOM). Batch mode has no refine pass, so
-    # ``segment_pre_refine`` holds the very same tensors.
+    # long-timeline OOM).
     if plan.export_mode == "all":
-        del segment_outputs[:], segment_pre_refine[:]
+        del segment_outputs[:]
         gc.collect()
 
     log.info("分段导出: export_mode=%r seg_export_active=%s export_segments_list_len=%d segment_outputs_len=%d",
@@ -2033,10 +2018,6 @@ def execute_director_batch(
             workflow_name=workflow_name,
         )
         merge_overrides = None
-    # Batch mode has no refine pass (pre_chunk is chunk), so the「一采」merge is
-    # the same data — reuse it instead of re-reading every segment from disk a
-    # second time (that doubled merge time and peak RAM).
-    pre_combined = combined
 
     # 「分段导出」: the user checked segments + a mode. The VAE is loaded here
     # (and the clip cache was just written during decode), so latent-only
@@ -2092,7 +2073,4 @@ def execute_director_batch(
         segment_audios,
         "\n".join(reports),
         export_frame_counts,
-        pre_combined,
-        segment_pre_refine,
-        False,  # held_for_confirmation
     )

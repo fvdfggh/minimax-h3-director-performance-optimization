@@ -288,6 +288,72 @@ def _job(media, container, key, raw=None):
     }
 
 
+def _extract_referenced_picture_indices(prompt: str) -> set[int]:
+    """Extract all <Picture N> indices referenced in the prompt.
+    
+    Searches for patterns like:
+    - <Picture 1>, <Picture 2>, etc.
+    - 图片1, 图片2, etc. (Chinese variant)
+    
+    Returns a set of 0-based indices (so <Picture 1> → {0}).
+    """
+    import re
+    
+    if not prompt:
+        return set()
+    
+    indices = set()
+    
+    # English pattern: <Picture 1>, <Picture 2>, etc.
+    for match in re.finditer(r'<Picture\s+(\d+)>', prompt):
+        idx = int(match.group(1)) - 1  # Convert to 0-based
+        if idx >= 0:
+            indices.add(idx)
+    
+    # Chinese pattern: 图片1, 图片2, etc.
+    for match in re.finditer(r'图片\s*(\d+)', prompt):
+        idx = int(match.group(1)) - 1  # Convert to 0-based
+        if idx >= 0:
+            indices.add(idx)
+    
+    return indices
+
+
+def _filter_ref_images_by_prompt(
+    ref_images: dict[str, Any] | None,
+    prompt: str,
+) -> dict[str, Any] | None:
+    """Filter reference images to only those referenced in the prompt.
+    
+    ref_images format: {"ref_image_0": tensor, "ref_image_1": tensor, ...}
+    
+    This reduces VRAM usage and encoding time by skipping unreferenced materials.
+    """
+    if not ref_images:
+        return None
+    
+    referenced_indices = _extract_referenced_picture_indices(prompt)
+    if not referenced_indices:
+        # No references found in prompt — keep all for backward compatibility
+        return ref_images
+    
+    filtered = {}
+    for key, value in ref_images.items():
+        if value is None:
+            continue
+        # Extract index from "ref_image_0" → 0
+        try:
+            idx_str = key.split("_")[-1]
+            idx = int(idx_str)
+            if idx in referenced_indices:
+                filtered[key] = value
+        except (ValueError, IndexError):
+            # Malformed key — skip
+            continue
+    
+    return filtered if filtered else None
+
+
 def prepare_segment_materials(
     *, prompt, width, height, length, task_key,
     first_frame=None, last_frame=None, ref_images=None, ref_videos=None,
@@ -306,6 +372,18 @@ def prepare_segment_materials(
     ref_videos = ref_videos or {}
     ref_video_audios = ref_video_audios or {}
     ref_audios = ref_audios or {}
+    
+    # Filter ref_images to only those referenced in the prompt (R2V optimization)
+    if task_key in {"r2v", "v2v", "rv2v"} and ref_images:
+        orig_count = len(ref_images)
+        filtered = _filter_ref_images_by_prompt(ref_images, prompt)
+        if filtered:
+            ref_images = filtered
+            log.debug(
+                "R2V ref_images filtered by prompt: %d → %d items",
+                orig_count,
+                len(filtered),
+            )
 
     use_reference = (
         task_key in {"r2v", "v2v", "rv2v"}

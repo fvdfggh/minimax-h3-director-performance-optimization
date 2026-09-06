@@ -177,6 +177,72 @@ def _ref_tensor_from_seg_refs(refs, index: int) -> torch.Tensor | None:
     return None
 
 
+def _extract_referenced_picture_indices(prompt: str) -> set[int]:
+    """Extract all <Picture N> indices referenced in the prompt.
+    
+    Searches for patterns like:
+    - <Picture 1>, <Picture 2>, etc.
+    - 图片1, 图片2, etc. (Chinese variant)
+    
+    Returns a set of 0-based indices (so <Picture 1> → {0}).
+    """
+    import re
+    
+    if not prompt:
+        return set()
+    
+    indices = set()
+    
+    # English pattern: <Picture 1>, <Picture 2>, etc.
+    for match in re.finditer(r'<Picture\s+(\d+)>', prompt):
+        idx = int(match.group(1)) - 1  # Convert to 0-based
+        if idx >= 0:
+            indices.add(idx)
+    
+    # Chinese pattern: 图片1, 图片2, etc.
+    for match in re.finditer(r'图片\s*(\d+)', prompt):
+        idx = int(match.group(1)) - 1  # Convert to 0-based
+        if idx >= 0:
+            indices.add(idx)
+    
+    return indices
+
+
+def _filter_ref_images_by_prompt(
+    ref_images: dict[str, Any] | None,
+    prompt: str,
+) -> dict[str, Any] | None:
+    """Filter reference images to only those referenced in the prompt.
+    
+    ref_images format: {"ref_image_0": tensor, "ref_image_1": tensor, ...}
+    
+    This reduces VRAM usage and encoding time by skipping unreferenced materials.
+    """
+    if not ref_images:
+        return None
+    
+    referenced_indices = _extract_referenced_picture_indices(prompt)
+    if not referenced_indices:
+        # No references found in prompt — keep all for backward compatibility
+        return ref_images
+    
+    filtered = {}
+    for key, value in ref_images.items():
+        if value is None:
+            continue
+        # Extract index from "ref_image_0" → 0
+        try:
+            idx_str = key.split("_")[-1]
+            idx = int(idx_str)
+            if idx in referenced_indices:
+                filtered[key] = value
+        except (ValueError, IndexError):
+            # Malformed key — skip
+            continue
+    
+    return filtered if filtered else None
+
+
 def _build_minimax_inputs(
     plan: DirectorPlan,
     seg,
@@ -226,6 +292,17 @@ def _build_minimax_inputs(
             ref_images[f"ref_image_{idx}"] = tensor[:1] if tensor.ndim == 4 else tensor
         if not ref_images:
             ref_images = None
+        else:
+            # Filter to only those referenced in the prompt (R2V optimization)
+            filtered = _filter_ref_images_by_prompt(ref_images, seg.prompt or "")
+            if filtered:
+                ref_images = filtered
+                log.debug(
+                    "Seg #%d R2V ref_images filtered by prompt: %d → %d items",
+                    seg.index + 1,
+                    len(ref_kwargs),
+                    len(filtered),
+                )
         # Prefer multi-slot ref_videos (r2v batch cards); fall back to legacy single meta.
         ref_videos = ref_videos_to_dict(getattr(seg, "ref_videos", None) or [])
         if not ref_videos:
@@ -256,6 +333,17 @@ def _build_minimax_inputs(
                 ref_images[f"ref_image_{idx}"] = tensor[:1] if tensor.ndim == 4 else tensor
             if not ref_images:
                 ref_images = None
+            else:
+                # Filter to only those referenced in the prompt (RV2V optimization)
+                filtered = _filter_ref_images_by_prompt(ref_images, seg.prompt or "")
+                if filtered:
+                    ref_images = filtered
+                    log.debug(
+                        "Seg #%d RV2V ref_images filtered by prompt: %d → %d items",
+                        seg.index + 1,
+                        len(ref_kwargs),
+                        len(filtered),
+                    )
             ref_audios = ref_audios_to_dict(getattr(seg, "ref_audios", None) or [])
 
     return first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios

@@ -257,6 +257,19 @@ def _minimax_h3_official():
     return MiniMaxH3ReferenceToVideo, _empty_av_latent, _resize, adapt_canvas
 
 
+def _rebuild_empty_latent(width, height, length):
+    """Rebuild the all-zero AV canvas instead of persisting it.
+
+    ``_empty_av_latent`` is a pure function of ``(width, height, length)`` and
+    always returns ``torch.zeros``, so neither the durable conditioning cache
+    nor the per-run scratch file stores it — both rebuild it here. That saves
+    roughly 6 MB per segment per run of otherwise pointless I/O.
+    """
+    _cls, empty_av_latent, _resize, _adapt = _minimax_h3_official()
+    latent, _frame_count = empty_av_latent(int(width), int(height), int(length))
+    return latent
+
+
 def _ref_audio_encode(audio_vae, audio):
     """``MiniMaxH3ReferenceToVideo._encode_ref_audio`` as a plain function."""
     cls, _unused_empty, _unused_resize, _unused_canvas = _minimax_h3_official()
@@ -661,13 +674,18 @@ def _latent_for_cache(node_id, seg_index, completed_av_latents, cache_dir):
     return lat
 
 
-def _save_batch_conditioning(node_id, seg_index, positive, negative, latent, cache_dir):
-    """Save pre-encoded conditioning to disk (per-run scratch)."""
+def _save_batch_conditioning(node_id, seg_index, positive, negative, cache_dir):
+    """Save pre-encoded conditioning to disk (per-run scratch).
+
+    The initial AV latent is deliberately left out: it is always all zeros and
+    a pure function of ``(ctx_w, ctx_h, sample_len)``, which the sampling loop
+    already has, so it is rebuilt on read rather than costing ~6 MB of scratch
+    I/O per segment per run.
+    """
     path = cache_layout.scratch_path(cache_dir, seg_index, "cond")
     torch.save({
         "positive": positive,
         "negative": negative,
-        "latent": latent,
     }, path, _use_new_zipfile_serialization=True)
     return path
 
@@ -923,6 +941,7 @@ def execute_director_batch(
     scheduler: str,
     shift_video: float,
     shift_audio: float,
+    sigmas=None,
     use_conditioning_cache: bool = False,
     clear_conditioning_cache_on_run: bool = False,
     clear_vram_between_segments: bool = True,
@@ -1187,7 +1206,7 @@ def execute_director_batch(
             _save_batch_conditioning(
                 node_id, seg.index,
                 cached_conditioning["positive"], cached_conditioning["negative"],
-                cached_conditioning["latent"], cache_dir,
+                cache_dir,
             )
             reports.append(f"  Seg #{seg.index + 1}: conditioning CACHE HIT")
             cache_hits += 1
@@ -1249,7 +1268,7 @@ def execute_director_batch(
             seg = meta["seg"]
             result = assemble_conditioning([prepared])[0]
             positive, negative, latent = result["positive"], result["negative"], result["latent"]
-            _save_batch_conditioning(node_id, seg.index, positive, negative, latent, cache_dir)
+            _save_batch_conditioning(node_id, seg.index, positive, negative, cache_dir)
             if use_conditioning_cache and not prepared.get("text_reused"):
                 # Only one segment per key writes the shared encoding; the
                 # dedupe path above skips the redundant rewrite.
@@ -1312,16 +1331,8 @@ def execute_director_batch(
             timeline_segment_index=ui_idx, timeline_segment_total=timeline_seg_total,
         )
 
-        # Load pre-encoded conditioning from disk
-        cond_data = _load_batch_conditioning(node_id, seg.index, cache_dir)
-        if cond_data is None:
-            raise RuntimeError(f"Batch mode: conditioning cache miss for segment {seg.index}")
-        positive = cond_data["positive"]
-        negative = cond_data["negative"]
-        latent = cond_data["latent"]
-        del cond_data
-
-        # Load ref data from disk
+        # Load ref data from disk first — it carries the canvas (ctx_w/ctx_h/
+        # sample_len) that the zero AV latent is rebuilt from.
         ref_data = _load_batch_ref(node_id, seg.index, cache_dir)
         if ref_data is None:
             raise RuntimeError(f"Batch mode: ref cache miss for segment {seg.index}")
@@ -1333,6 +1344,20 @@ def execute_director_batch(
         ctx_h = ref_data["ctx_h"]
         use_motion_context = ref_data["use_motion_context"]
         context_n = ref_data["context_n"]
+
+        # Load pre-encoded conditioning from disk
+        cond_data = _load_batch_conditioning(node_id, seg.index, cache_dir)
+        if cond_data is None:
+            raise RuntimeError(f"Batch mode: conditioning cache miss for segment {seg.index}")
+        positive = cond_data["positive"]
+        negative = cond_data["negative"]
+        latent = cond_data.get("latent")
+        if latent is None:
+            # New-style scratch: the all-zero canvas was never written.
+            # (ctx_w, ctx_h, sample_len) are exactly what prepare_segment_materials
+            # used to build the original, so this is identical.
+            latent = _rebuild_empty_latent(ctx_w, ctx_h, sample_len)
+        del cond_data
 
         # Load previous segment's tail for motion context
         trim_frames = 0
@@ -1485,6 +1510,7 @@ def execute_director_batch(
             on_phase=_report_sample_phase,
             on_step_preview=_report_step_preview if live_tae_preview else None,
             preview_every=1,
+            sigmas=sigmas,
         )
 
         # Save AV latent to disk

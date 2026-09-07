@@ -23,11 +23,10 @@ CACHE_SUBDIR = cache_layout.CACHE_ROOT
 
 # Cache file prefix. The name carries NO segment index on purpose: two segments
 # with identical text inputs must resolve to the same file so the second one is
-# served from disk instead of being encoded again. The ``text``/``image``/``video``
-# split is what distinguishes the three encoding kinds once they share a folder.
+# served from disk instead of being encoded again. Text is the only encoding
+# kind cached here — reference image / video encoding lives in
+# ``_vit/`` (see :mod:`vision_cache`).
 _TEXT_PREFIX = cache_layout.TEXT_PREFIX
-_IMAGE_PREFIX = cache_layout.IMAGE_PREFIX
-_VIDEO_PREFIX = cache_layout.VIDEO_PREFIX
 #: Backwards-compatible alias for callers that glob every encoding cache.
 _ENC_PREFIXES = cache_layout.ENC_PREFIXES
 
@@ -126,6 +125,30 @@ def _prompt_hash(prompt: str, width: int, height: int, length: int, task_key: st
     return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
+def _empty_av_latent(width: int, height: int, length: int) -> Any:
+    """Rebuild the all-zero AV canvas instead of persisting it.
+
+    ``comfy_extras.nodes_minimax_h3._empty_av_latent`` is a pure function of
+    ``(width, height, length)`` and always returns ``torch.zeros`` — all three
+    inputs are already stored in the cache ``metadata``, so writing the zeros to
+    disk buys nothing and only costs a few MB per file plus save/load time.
+
+    Returns ``None`` when the official helper is unavailable, so the caller can
+    treat it as a miss and re-encode rather than sampling with no latent.
+    """
+    try:
+        from comfy_extras.nodes_minimax_h3 import _empty_av_latent as _official
+    except Exception as exc:  # pragma: no cover - ComfyUI always ships this
+        log.warning("Cannot rebuild empty latent (%s).", exc)
+        return None
+    try:
+        latent, _frame_count = _official(int(width), int(height), int(length))
+        return latent
+    except Exception as exc:
+        log.warning("Empty latent rebuild failed for %sx%sx%s (%s).", width, height, length, exc)
+        return None
+
+
 def save_conditioning_cache(
     node_id: str | None,
     segment_index: int,
@@ -142,7 +165,13 @@ def save_conditioning_cache(
     workflow_name: str | None = None,
 ) -> Path | None:
     """Save conditioning tensors to disk cache.
-    
+
+    ``latent`` is accepted for call-site compatibility but is **not** written:
+    the initial AV canvas is always all zeros and is a pure function of
+    ``(width, height, length)``, all of which land in ``metadata``, so
+    :func:`load_conditioning_cache` rebuilds it. Dropping it saves roughly
+    6 MB per file and the corresponding save/load time.
+
     Returns the cache file path, or None if saving failed.
     """
     try:
@@ -169,10 +198,13 @@ def save_conditioning_cache(
                 return prepared
             return cond
         
+        del latent  # zero canvas — rebuilt from metadata on load, never stored
         cache_data = {
             "positive": prepare_for_save(positive),
             "negative": prepare_for_save(negative),
-            "latent": prepare_for_save(latent) if latent is not None else None,
+            # Kept as a key (value None) so readers of both old and new files can
+            # use ``cache_data["latent"]`` without a KeyError.
+            "latent": None,
             "metadata": {
                 "segment_index": segment_index,
                 "prompt_hash": prompt_key,
@@ -214,6 +246,10 @@ def load_conditioning_cache(
 
     Returns dict with 'positive', 'negative', 'latent' keys, or None if cache miss.
     Tensors are moved to CUDA (GPU) for use by the model.
+
+    ``latent`` is the initial AV canvas. Files written before it was dropped from
+    the payload still carry it and are used as-is; newer files store ``None`` and
+    it is rebuilt from the metadata here, so no existing cache needs clearing.
     """
     try:
         cache_dir = _get_cache_dir(node_id, workflow_name)
@@ -250,8 +286,18 @@ def load_conditioning_cache(
         
         positive = move_to_device(cache_data["positive"])
         negative = move_to_device(cache_data["negative"])
-        latent = move_to_device(cache_data["latent"])
-        
+        latent = cache_data.get("latent")
+        if latent is None:
+            # New-style file: the zero canvas was never written — rebuild it.
+            latent = _empty_av_latent(width, height, length)
+            if latent is None:
+                log.warning(
+                    "Conditioning cache unusable for seg #%d (no latent, rebuild failed); "
+                    "falling back to a fresh encode.", segment_index + 1,
+                )
+                return None
+        latent = move_to_device(latent)
+
         log.info("Conditioning cache HIT: seg #%d from %s (moved to CUDA)", segment_index + 1, cache_file.name)
         return {
             "positive": positive,

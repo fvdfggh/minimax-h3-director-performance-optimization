@@ -25,6 +25,41 @@ def _unpack_node_output(out):
     raise RuntimeError(f"Unexpected node output type: {type(out)!r}")
 
 
+def normalize_sigmas(raw):
+    """Normalize a wired SIGMAS input into a 1-D float32 tensor.
+
+    Accepts a BasicScheduler / ManualSigmas tensor, a list/tuple, or a comma
+    separated string. Returns ``None`` when the input is unusable so the caller
+    can silently fall back to the default steps + scheduler schedule.
+
+    Same contract as the old Refine pass: N sigmas describe N-1 steps, and the
+    schedule must end at 0 (a missing trailing 0 is appended).
+    """
+    if raw is None:
+        return None
+    import torch
+
+    try:
+        if torch.is_tensor(raw):
+            values = [float(x) for x in raw.detach().float().cpu().reshape(-1).tolist()]
+        elif isinstance(raw, (list, tuple)):
+            values = [float(x) for x in raw]
+        else:
+            text = str(raw).replace(";", ",").replace("\n", ",")
+            values = [float(part.strip()) for part in text.split(",") if part.strip()]
+    except (TypeError, ValueError):
+        log.warning("Director: 无法解析的 SIGMAS 输入，已回退到默认采样。")
+        return None
+    if len(values) < 2:
+        log.warning(
+            "Director: SIGMAS 至少需要 2 个值（N 个 sigma = N-1 步），已回退到默认采样。"
+        )
+        return None
+    if abs(values[-1]) > 1e-8:
+        values.append(0.0)
+    return torch.tensor(values, dtype=torch.float32)
+
+
 def sample_single_stage(
     *,
     model,

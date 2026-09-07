@@ -220,6 +220,33 @@ class MiniMaxH3Director:
                     {"default": 3.0, "min": 0.01, "max": 100.0, "step": 0.01, "tooltip": "MiniMaxH3SigmaShift shift_audio."},
                 ),
                 **director_perf_inputs(),
+                # ── 自定义采样（默认关闭，不开/不接时行为与之前完全一致）──────
+                # 刻意放在 optional 末尾：新增 BOOLEAN 会占用 widgets_values 下标，
+                # 插在已有控件（含隐藏的 workflow_name）之前会让旧工作流整体错位。
+                "sigmas": (
+                    "SIGMAS",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "自定义噪声调度：接 ComfyUI 自带 BasicScheduler 或 ManualSigmas。"
+                            "仅当「使用 sigmas」开启时生效。"
+                            "生效后步数 = len(sigmas) - 1，denoise 固定 1.0，"
+                            "steps / scheduler 不再参与调度（采样器仍用高级采样里的 sampler）。"
+                        ),
+                    },
+                ),
+                "use_sigmas": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "是否使用 sigmas：开启后用 sigmas 口接进来的 SIGMAS 作为噪声调度。"
+                            "生效时步数 = len(sigmas) - 1，denoise 固定 1.0，"
+                            "steps / scheduler 不再参与调度（采样器仍用高级采样里的 sampler）。"
+                            "未接线或解析失败会自动回退到默认采样。"
+                        ),
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -285,11 +312,34 @@ class MiniMaxH3Director:
         shift_video=12.0,
         shift_audio=3.0,
         workflow_name=None,
+        sigmas=None,
+        use_sigmas=False,
         **kwargs,
     ):
         del kwargs  # dropped widgets (batch_mode / use_conditioning_cache / ...) land here
 
         width, height, total_frames = _sanitize_timeline(width, height, total_frames)
+
+        # 自定义 SIGMAS 调度：只有开关打开且接线正常时才生效，
+        # 否则完全走原来的 steps + sampler + scheduler 路径。
+        sigma_override = None
+        if use_sigmas:
+            if sigmas is None:
+                log.warning(
+                    "MiniMax H3 Director: 已开启「使用 sigmas」但 sigmas 口未接线，"
+                    "本次回退到默认采样。"
+                )
+            else:
+                from ..director.core_sampling import normalize_sigmas
+
+                sigma_override = normalize_sigmas(sigmas)
+                if sigma_override is not None:
+                    log.info(
+                        "MiniMax H3 Director: 使用自定义 SIGMAS 调度 —— %d 个 sigma = %d 步"
+                        "（steps / scheduler 不再参与调度）。",
+                        int(sigma_override.numel()),
+                        int(sigma_override.numel()) - 1,
+                    )
 
         plan = prepare_director_plan(
             timeline_data=timeline_data,
@@ -325,6 +375,7 @@ class MiniMaxH3Director:
                 scheduler=scheduler,
                 shift_video=shift_video,
                 shift_audio=shift_audio,
+                sigmas=sigma_override,
                 use_conditioning_cache=USE_CONDITIONING_CACHE,
                 clear_vram_between_segments=CLEAR_VRAM_BETWEEN_SEGMENTS,
                 workflow_name=workflow_name,

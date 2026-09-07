@@ -12,8 +12,6 @@ prefix, so the six kinds stay recognisable in Explorer without nesting:
 Kind                        File name                               Lifetime
 ==========================  ======================================  ==========
 text encoding               ``cond_text_<hash>.pt``                 reusable
-image encoding              ``cond_image_<hash>.pt``                reusable
-video encoding              ``cond_video_<hash>.pt``                reusable
 sampled latent              ``seg_<hash>_latent.pt``                durable
 decoded frames              ``seg_<hash>_frames.pt``                legacy/optional
 head+tail frames            ``seg_<hash>_frames_ht.pt``             durable
@@ -58,11 +56,15 @@ LEGACY_ROOTS = (
 )
 
 # --- encoding cache prefixes (shared across segments, keyed by content hash) --
+#
+# Only text is cached here. ``cond_image_`` / ``cond_video_`` used to be listed
+# next to it, but no writer was ever built for them — they were a naming
+# reservation from the layout unification (426a2c1). Reference image / video
+# encoding is cached by :mod:`vision_cache` instead, as ViT output under the
+# global ``_vit/`` directory. Don't re-add them here: look at ``_vit`` first.
 TEXT_PREFIX = "cond_text"
-IMAGE_PREFIX = "cond_image"
-VIDEO_PREFIX = "cond_video"
 #: Glob matching every encoding cache regardless of kind.
-ENC_PREFIXES = (TEXT_PREFIX, IMAGE_PREFIX, VIDEO_PREFIX)
+ENC_PREFIXES = (TEXT_PREFIX,)
 
 # --- vision-tower (ViT) output cache, persisted ACROSS runs -------------------
 #
@@ -231,16 +233,6 @@ def scratch_path(root: Path, seg_index: int, kind: str) -> Path:
     """Per-run working file for ``seg_index`` (``cond``/``ref``/``latent``)."""
     stem = f"{SCRATCH_PREFIX}{int(seg_index):04d}{SCRATCH_MARK}{kind}"
     return root / f"{stem}.pt"
-
-
-def encoding_path(root: Path, kind: str, key: str) -> Path:
-    """Content-addressed encoding cache path (``text``/``image``/``video``)."""
-    prefix = {
-        "text": TEXT_PREFIX,
-        "image": IMAGE_PREFIX,
-        "video": VIDEO_PREFIX,
-    }.get(str(kind), TEXT_PREFIX)
-    return root / f"{prefix}_{key}.pt"
 
 
 def iter_encoding_files(root: Path) -> list[Path]:

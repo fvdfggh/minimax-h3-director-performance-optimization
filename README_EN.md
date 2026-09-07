@@ -33,7 +33,7 @@ Reference-audio slots can select an existing video or a local audio/video file. 
 **Inputs:** `model` → `video_vae` → `audio_vae` → `clip`  
 **Optional:** `i2v_groups` (Image to Video packs) / `r2v_groups` (Reference to Video packs)
 
-**Outputs:** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report` → `images_pre_refine`
+**Outputs:** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report`
 
 > CLIP Loader **type must be `minimax`** (Qwen3-VL).  
 > Use **fl2va** UNET for `t2v` / `i2v` / `fl2v`; **ref2va** for `r2v` / `v2v` / `rv2v`.

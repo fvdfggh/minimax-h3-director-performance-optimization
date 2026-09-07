@@ -1727,7 +1727,7 @@ def concat_chunks_lazy(
             exp = int(fp.get("export_frames") or 0)
             n = int(chunk.shape[0])
             # The persisted clip is already the trimmed body (continuity prefix
-            # dropped, see executor_core). Only trim when the clip on disk still
+            # dropped at decode time). Only trim when the clip on disk still
             # carries the prefix — i.e. it is longer than ``export_frames`` (older
             # caches, or a raw sample). Re-trimming an already-trimmed body would
             # drop another 22 frames and shorten the merged video.

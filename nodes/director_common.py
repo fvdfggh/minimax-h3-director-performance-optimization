@@ -23,6 +23,21 @@ from ..lib.task_prompts import task_type_combo_options
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director")
 
+# ---------------------------------------------------------------------------
+# Fixed behaviour — these were node widgets and are no longer editable from the
+# UI. Values match the previous widget defaults. Change them here to change the
+# behaviour; restart ComfyUI afterwards.
+# ---------------------------------------------------------------------------
+#: Reuse CLIP/VAE conditioning cached on disk across runs (same prompt/canvas).
+#: The on-disk key is a fingerprint of prompt/canvas/model, so a changed prompt
+#: simply produces a new entry — a stale hit can only happen if you revert to a
+#: previously-used prompt, in which case use the node's 清空缓存 button.
+USE_CONDITIONING_CACHE = True
+#: Unload models + empty the CUDA cache after each segment.
+CLEAR_VRAM_BETWEEN_SEGMENTS = True
+#: Decode the timeline source clip onto the separate ``source_images`` output.
+EXPORT_SOURCE_IMAGES = False
+
 
 def timeline_required_inputs() -> dict:
     """Timeline + prompt widgets shared by Director nodes."""
@@ -76,52 +91,13 @@ def timeline_required_inputs() -> dict:
 
 
 def director_perf_inputs() -> dict:
-    """Performance widgets shared by Director nodes."""
+    """Performance widgets shared by Director nodes.
+
+    The behaviour switches that used to live here (``use_conditioning_cache``,
+    ``batch_mode``, ``clear_vram_between_segments``, ``export_source_images``)
+    are fixed constants now — see the top of this module.
+    """
     return {
-        "bd_grp_perf": ("BDGROUP", {"default": "性能"}),
-        "clear_vram_between_segments": (
-            "BOOLEAN",
-            {
-                "default": True,
-                "tooltip": "段间清理显存：每段结束后卸载模型并清空 CUDA 缓存。",
-            },
-        ),
-        "export_source_images": (
-            "BOOLEAN",
-            {
-                "default": False,
-                "tooltip": (
-                    "将时间轴原片解码到独立的 source_images 输出口；"
-                    "需将 source_images 另接预览/合成节点才能查看，不会改变主 images。"
-                    "默认关以节省内存。"
-                ),
-            },
-        ),
-        "use_conditioning_cache": (
-            "BOOLEAN",
-            {
-                "default": False,
-                "tooltip": (
-                    "Conditioning 缓存：首次运行时将 CLIP 编码结果缓存到磁盘，"
-                    "后续运行相同 prompt 时直接读取缓存，跳过 CLIP 编码。"
-                    "适用于多段视频、prompt 不变的场景。"
-                ),
-            },
-        ),
-        "batch_mode": (
-            "BOOLEAN",
-            {
-                "default": False,
-                "tooltip": (
-                    "分阶段批量处理模式：\n"
-                    "Phase 1: 预编码所有文本/音频/参考图到磁盘\n"
-                    "Phase 2: UNet 常驻内存，逐段采样存 latent\n"
-                    "Phase 3: VAE 常驻内存，逐段解码导出\n\n"
-                    "优势：避免模型反复装卸，减少磁盘读写。\n"
-                    "代价：总显存占用略高（模型常驻）。"
-                ),
-            },
-        ),
         "workflow_name": (
             "STRING",
             {
@@ -530,11 +506,8 @@ def finalize_director_outputs(
     fb = (fb_h, fb_w, 3) if fb_h > 0 and fb_w > 0 else None
     images_out = _ensure_nonempty_image_batches(images_out, label="images", fallback=fb)
     source_images_out = _ensure_nonempty_image_batches(source_images_out, label="source_images", fallback=fb)
-    # No second-pass stage any more: ``images_pre_refine`` mirrors ``images`` so
-    # workflows that still read that slot keep working (same tensors, no copy).
-    pre_refine_out = images_out
 
     report = report + "\n\n有问题联系作者：AI搅拌手  QQ交流群：551482703"
 
     fps_out = float(plan.frame_rate or 24.0)
-    return images_out, audio_out, fps_out, frame_count, source_images_out, report, pre_refine_out
+    return images_out, audio_out, fps_out, frame_count, source_images_out, report

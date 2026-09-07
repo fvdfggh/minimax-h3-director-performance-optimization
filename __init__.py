@@ -15,6 +15,7 @@ from .nodes.director_groups import (
     MiniMaxH3DirectorGroupsCombine,
 )
 from .nodes.fast_video_vae_decode import MiniMaxH3FastVideoVAE
+from .nodes.latent_upscaler_3d import MiniMaxH3LatentUpscaleModelNode
 
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3Director": MiniMaxH3Director,
@@ -28,6 +29,7 @@ NODE_CLASS_MAPPINGS = {
     # NODE_CLASS_MAPPINGS is present (if/elif in load_custom_node).
     "MiniMaxH3DirectorGroupsCombine": MiniMaxH3DirectorGroupsCombine,
     "MiniMaxH3FastVideoVAE": MiniMaxH3FastVideoVAE,
+    "MiniMaxH3LatentUpscaleModel": MiniMaxH3LatentUpscaleModelNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -39,6 +41,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3DirectorGroupReferenceToVideo": "MiniMax H3 Director Group (Reference to Video)",
     "MiniMaxH3DirectorGroupsCombine": "MiniMax H3 Director Groups Combine",
     "MiniMaxH3FastVideoVAE": "MiniMax H3 Fast Video VAE",
+    "MiniMaxH3LatentUpscaleModel": "Minimax H3 Latent Upscaler (3D) [Model]",
 }
 
 WEB_DIRECTORY = "./web/js"
@@ -46,6 +49,23 @@ WEB_DIRECTORY = "./web/js"
 import logging
 
 _log = logging.getLogger("ComfyUI-MiniMaxH3-Director")
+
+# The latent upscale model node is a V3 node (io.ComfyNode) — required for its
+# DynamicCombo (mode) to show/hide sub-parameters. ComfyUI auto-discovers V3
+# nodes through comfy_entrypoint, which it skips for packages that expose
+# NODE_CLASS_MAPPINGS, so it is registered manually here (same as nodes.py does).
+if MiniMaxH3LatentUpscaleModelNode is None:
+    NODE_CLASS_MAPPINGS.pop("MiniMaxH3LatentUpscaleModel", None)
+    NODE_DISPLAY_NAME_MAPPINGS.pop("MiniMaxH3LatentUpscaleModel", None)
+    _log.warning("MiniMax H3 latent upscale model node unavailable (comfy_api.latest missing).")
+else:
+    try:
+        _upscale_schema = MiniMaxH3LatentUpscaleModelNode.GET_SCHEMA()
+        NODE_DISPLAY_NAME_MAPPINGS["MiniMaxH3LatentUpscaleModel"] = _upscale_schema.display_name
+    except Exception as _upscale_exc:
+        _log.warning("MiniMax H3 latent upscale model node failed to load: %s", _upscale_exc)
+        NODE_CLASS_MAPPINGS.pop("MiniMaxH3LatentUpscaleModel", None)
+        NODE_DISPLAY_NAME_MAPPINGS.pop("MiniMaxH3LatentUpscaleModel", None)
 
 try:
     from .director.http_routes import register_routes as _register_director_routes

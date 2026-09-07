@@ -24,6 +24,7 @@ from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from . import cache_layout
 from . import segment_slots
 from .conditioning_cache import (
+    clear_conditioning_cache,
     load_conditioning_cache,
     save_conditioning_cache,
     slugify_workflow_name,
@@ -783,8 +784,8 @@ def _prev_context_available(
     here, so the motion-context decision cannot be revisited in Phase 2. Without
     this probe,「选择运行」with a gap (e.g. run seg 1, then seg 4) reaches
     ``apply_motion_context`` with nothing to pin and raises
-    "need previous segment latent or decoded frames" — executor_core degrades to
-    a no-pin segment there instead; batch mode must do the same.
+    "need previous segment latent or decoded frames". Degrade to a no-pin
+    segment there instead of failing the run.
 
     The predecessor's AV latent is reachable in one of two ways:
       * it is sampled earlier in this very run (``run_list`` keeps timeline
@@ -829,8 +830,8 @@ def _assemble_export_list(
 
     Batch mode only samples「选择运行」, but the merge must still cover the whole
     timeline — unselected slots are restored from the segment cache (exact
-    fingerprint first, then stale) or a source passthrough, mirroring
-    executor_core.  Returns ``(segments, audios, frame_counts, memory_chunks)``
+    fingerprint first, then stale) or a source passthrough.
+    Returns ``(segments, audios, frame_counts, memory_chunks)``
     aligned 1:1.
 
     ``memory_chunks`` holds the passthrough fills: those exist **only** in RAM,
@@ -923,12 +924,15 @@ def execute_director_batch(
     shift_video: float,
     shift_audio: float,
     use_conditioning_cache: bool = False,
+    clear_conditioning_cache_on_run: bool = False,
+    clear_vram_between_segments: bool = True,
     workflow_name: str | None = None,
     progress_cb=None,
 ) -> tuple:
     """Three-phase batch execution.
 
-    Returns the same tuple as execute_director_plan_core.
+    This is the only execution path. Returns
+    ``(combined, segment_outputs, segment_audios, report, export_frame_counts)``.
     """
     all_segments = plan.segments
     # Reconcile cache files with the current timeline first: a group deleted in
@@ -1013,6 +1017,16 @@ def execute_director_batch(
     # ===================================================================
     # PHASE 1: Pre-encode all conditioning → disk
     # ===================================================================
+    # Opt-in wipe before anything is encoded: when a prompt/canvas changed but
+    # the on-disk hash still matches an old variant, the run would otherwise be
+    # silently served from that stale cache.
+    if clear_conditioning_cache_on_run:
+        try:
+            removed = clear_conditioning_cache(node_id, workflow_name=workflow_name)
+            reports.append(f"Conditioning cache cleared on run: {removed} file(s) removed")
+        except Exception as exc:
+            log.warning("Conditioning cache clear skipped (%s).", exc)
+
     reports.append("=" * 50)
     reports.append("PHASE 1: Preparing materials, then encoding by model group...")
 
@@ -1498,7 +1512,7 @@ def execute_director_batch(
 
         # Free conditioning from GPU (UNet stays!)
         del positive, negative, latent, samples
-        if torch.cuda.is_available():
+        if clear_vram_between_segments and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         reports.append(
@@ -1643,8 +1657,7 @@ def execute_director_batch(
         # Phase-align orphaned tail: drop gap_after_pin frames from the *previous*
         # export so this segment's pin window abuts it exactly. Skipping this
         # replays the gap at every seam (visible stutter) and leaves the merge
-        # longer by (seams x gap) — executor_core does it inline; batch mode
-        # never did.
+        # longer by (seams x gap).
         # With the 17-frame-grid export length above, gap_after_pin is normally 0
         # and this whole block is dead code. It stays as a safety net for the
         # edges where the pin window can still fall short (pixel-pin fallback,
@@ -1695,7 +1708,8 @@ def execute_director_batch(
                 decoded_frames[prev_export_seg.index] = int(new_chunk.shape[0])
                 new_audio_dict = new_audio if isinstance(new_audio, dict) else {}
                 completed_audios[prev_export_seg.index] = new_audio_dict
-                # Patch the already-finished lists (executor_core parity).
+                # Patch the already-finished lists (trimmed chunk must replace
+                # the untrimmed one already appended above).
                 run_pos = run_pos_map.get(prev_export_seg.index)
                 if run_pos is not None and run_pos < len(segment_outputs):
                     segment_outputs[run_pos] = new_chunk

@@ -426,21 +426,15 @@ const HIDDEN_WIDGETS = [
 
 const DIRECTOR_WIDGET_LABEL_KEYS = {
     seed: "widget.seed",
-    clear_vram_between_segments: "widget.clearVram",
-    export_source_images: "widget.exportSourceImages",
     control_after_generate: "widget.controlAfterGenerate",
     "control after generate": "widget.controlAfterGenerate",
 };
 
-const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
-    clear_vram_between_segments: "widget.tooltip.clearVram",
-    export_source_images: "widget.tooltip.exportSourceImages",
-};
+const DIRECTOR_WIDGET_TOOLTIP_KEYS = {};
 
 const DIRECTOR_GROUP_LABEL_KEYS = {
     bd_grp_sample: "widget.grpSample",
     bd_grp_advanced: "widget.grpAdvanced",
-    bd_grp_perf: "widget.grpPerf",
 };
 
 function applyDirectorWidgetLabels(node) {
@@ -1287,29 +1281,7 @@ function moveDirectorDomWidgetToEnd(node) {
     node.widgets.push(widget);
 }
 
-const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "export_source_images"];
-
-function moveDirectorPerfWidgetsBeforeTimeline(node) {
-    const dom = node?._minimaxDomWidget;
-    if (!node?.widgets?.length) return;
-
-    const perfWidgets = PERF_WIDGET_ORDER
-        .map((name) => node.widgets.find((w) => w.name === name))
-        .filter(Boolean);
-    if (!perfWidgets.length) return;
-
-    for (const w of perfWidgets) {
-        const idx = node.widgets.indexOf(w);
-        if (idx !== -1) node.widgets.splice(idx, 1);
-    }
-
-    const insertAt = dom ? node.widgets.indexOf(dom) : -1;
-    const at = insertAt === -1 ? node.widgets.length : insertAt;
-    node.widgets.splice(at, 0, ...perfWidgets);
-}
-
 function finalizeDirectorWidgetOrder(node) {
-    moveDirectorPerfWidgetsBeforeTimeline(node);
     moveDirectorDomWidgetToEnd(node);
 }
 

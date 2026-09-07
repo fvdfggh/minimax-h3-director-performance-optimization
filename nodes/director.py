@@ -6,8 +6,11 @@ import logging
 
 import comfy.samplers
 
-from ..director.executor_core import execute_director_plan_core
+from ..director.batch_executor import execute_director_batch
 from .director_common import (
+    CLEAR_VRAM_BETWEEN_SEGMENTS,
+    EXPORT_SOURCE_IMAGES,
+    USE_CONDITIONING_CACHE,
     finalize_director_outputs,
     prepare_director_plan,
     timeline_required_inputs,
@@ -238,11 +241,9 @@ class MiniMaxH3Director:
                     return f"{name}: expected {want}, linked node returns {got}."
         return True
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE")
-    # ``images_pre_refine`` is kept as an output slot so saved workflows keep their
-    # links; it now mirrors ``images`` (single-pass output).
-    RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report", "images_pre_refine")
-    OUTPUT_IS_LIST = (True, True, False, False, True, False, True)
+    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING")
+    RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report")
+    OUTPUT_IS_LIST = (True, True, False, False, True, False)
     FUNCTION = "execute"
     CATEGORY = _CATEGORY
     DESCRIPTION = (
@@ -251,7 +252,6 @@ class MiniMaxH3Director:
         "Supports t2v / i2v / fl2v / r2v / v2v / rv2v. "
         "Optional i2v_groups / r2v_groups accept multi-group packs from Director Group nodes "
         "(external priority over UI cards). "
-        "images_pre_refine mirrors images (kept for workflow compatibility). "
         "run_model picks which wired MODEL slot samples: model (main, required) or the "
         "optional model_b / model_c; an unwired pick falls back to model. "
         "Defaults: 0.4MP 16:9 (864×480), 5s / 124 frames @ 24 fps."
@@ -284,15 +284,10 @@ class MiniMaxH3Director:
         seed=0,
         shift_video=12.0,
         shift_audio=3.0,
-        clear_vram_between_segments=True,
-        export_source_images=False,
-        use_conditioning_cache=False,
-        clear_conditioning_cache_on_run=False,
-        batch_mode=False,
         workflow_name=None,
         **kwargs,
     ):
-        del kwargs
+        del kwargs  # dropped widgets (batch_mode / use_conditioning_cache / ...) land here
 
         width, height, total_frames = _sanitize_timeline(width, height, total_frames)
 
@@ -315,51 +310,26 @@ class MiniMaxH3Director:
         )
         log.info("MiniMax H3 Director: 运行模型 %s", model_note)
 
-        if batch_mode:
-            # Batch mode: three-phase execution
-            from ..director.batch_executor import execute_director_batch
-            combined, segment_outputs, segment_audios, report, export_frame_counts = (
-                execute_director_batch(
-                    plan,
-                    node_id=unique_id,
-                    model=model,
-                    vae=video_vae,
-                    audio_vae=audio_vae,
-                    clip=clip,
-                    cfg=cfg,
-                    seed=seed,
-                    steps=steps,
-                    sampler=sampler,
-                    scheduler=scheduler,
-                    shift_video=shift_video,
-                    shift_audio=shift_audio,
-                    use_conditioning_cache=use_conditioning_cache,
-                    workflow_name=workflow_name,
-                )
+        combined, segment_outputs, segment_audios, report, export_frame_counts = (
+            execute_director_batch(
+                plan,
+                node_id=unique_id,
+                model=model,
+                vae=video_vae,
+                audio_vae=audio_vae,
+                clip=clip,
+                cfg=cfg,
+                seed=seed,
+                steps=steps,
+                sampler=sampler,
+                scheduler=scheduler,
+                shift_video=shift_video,
+                shift_audio=shift_audio,
+                use_conditioning_cache=USE_CONDITIONING_CACHE,
+                clear_vram_between_segments=CLEAR_VRAM_BETWEEN_SEGMENTS,
+                workflow_name=workflow_name,
             )
-        else:
-            # Normal mode
-            combined, segment_outputs, segment_audios, report, export_frame_counts = (
-                execute_director_plan_core(
-                    plan,
-                    node_id=unique_id,
-                    workflow_name=workflow_name,
-                    model=model,
-                    vae=video_vae,
-                    audio_vae=audio_vae,
-                    clip=clip,
-                    cfg=cfg,
-                    seed=seed,
-                    steps=steps,
-                    sampler=sampler,
-                    scheduler=scheduler,
-                    shift_video=shift_video,
-                    shift_audio=shift_audio,
-                    clear_vram_between_segments=clear_vram_between_segments,
-                    use_conditioning_cache=use_conditioning_cache,
-                    clear_conditioning_cache_on_run=clear_conditioning_cache_on_run,
-                )
-            )
+        )
 
         if model_note:
             report = f"{report}\n\n运行模型: {model_note}"
@@ -369,7 +339,7 @@ class MiniMaxH3Director:
             combined,
             segment_outputs,
             report,
-            export_source_images=export_source_images,
+            export_source_images=EXPORT_SOURCE_IMAGES,
             segment_audios=segment_audios,
             segment_frame_counts=export_frame_counts,
         )

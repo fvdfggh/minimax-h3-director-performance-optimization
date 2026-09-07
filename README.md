@@ -32,7 +32,7 @@
 **输入：** `model` → `video_vae` → `audio_vae` → `clip`  
 **可选：** `i2v_groups`（Image to Video 多组）/ `r2v_groups`（Reference to Video 多组）
 
-**输出：** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report` → `images_pre_refine`
+**输出：** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report`
 
 > CLIP Loader 的 **type 必须选 `minimax`**（Qwen3-VL）。  
 > `t2v` / `i2v` / `fl2v` 用 **fl2va** UNET；`r2v` / `v2v` / `rv2v` 用 **ref2va** UNET。

@@ -33,5 +33,3 @@ CLIP Loader 的 **type 必须选 `minimax`**。
 ## 输出
 
 导演台 → `CreateVideo` → `SaveVideo`（前缀 `video/MiniMaxH3_Director_*`），报告接 `PreviewAny`。
-
-> `images_pre_refine` 输出口与 `images` 完全相同（保留仅为兼容旧工作流），无需单独接线。

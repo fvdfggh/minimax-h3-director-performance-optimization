@@ -430,7 +430,7 @@ function stopAllPlayers(root) {
 export const IMAGE_BATCH_STYLES = `
 .bd-btn.bd-disabled,.bd-btn:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
 .bd-mode button.bd-disabled,.bd-mode button:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
-.bd-batch{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px}
+.bd-batch{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
 .bd-batch-i2v-notice{display:none;color:#ffb74d;background:#3a2a12;border:1px solid #a67c00;border-radius:6px;padding:8px 10px;font-size:11px;line-height:1.5}
 .bd-batch-i2v-notice.visible{display:block}
 .bd-batch-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -440,7 +440,9 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-pick:hover{border-color:#4a7a5a}
 .bd-batch-pick.selected{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35);color:#eafff0}
 .bd-batch-pick.running{border-color:#4fff8f}
-.bd-batch-pick.run-skipped{opacity:.45}
+/* 方案B: pick chip 的 run-skipped 也只弱化勾选框, 不整块灰化 */
+.bd-batch-pick.run-skipped{opacity:1}
+.bd-batch-pick.run-skipped .bd-batch-run-check{opacity:.45}
 .bd-batch-pick-title{display:flex;align-items:center;gap:4px;font-size:11px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bd-batch-pick-meta{font-size:10px;color:#8aa}
 .bd-batch-pick-thumb{width:100%;height:40px;object-fit:cover;border-radius:4px;background:#0d0d0d;margin-top:2px}
@@ -448,8 +450,11 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-run-all{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;user-select:none}
 .bd-batch-run-all.hidden{display:none!important}
 .bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
-/* Default cap; batch-fill mode overrides via .bd-wrap.bd-batch-fill + JS max-height. */
-.bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px;min-height:0}
+/* Default cap; batch-fill mode overrides via .bd-wrap.bd-batch-fill + JS max-height.
+   放宽上限, 避免素材组等较长的批处理列表被压在 640px 内滚动. */
+.bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px;min-height:0;flex:0 0 auto}
+/* 仅素材组(r2v)卡片存在的列表兜底最小高度 1280; 其他模块一律 640, 不受视口影响 */
+.bd-batch-list:has(.bd-batch-r2v){max-height:none;min-height:1280px}
 .bd-batch-card{background:linear-gradient(165deg,#1a1a1a 0%,#141414 55%,#111 100%);border:1px solid #2c2c2c;border-radius:10px;padding:12px 14px;display:grid;gap:10px;align-items:stretch;box-shadow:inset 0 1px 0 rgba(255,255,255,.03);flex:0 0 auto}
 /* t2v: 提示词为主，预览收成右侧窄栏 */
 .bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(132px,168px)}
@@ -465,7 +470,15 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-card.bd-batch-r2v{display:flex;flex-direction:column;gap:12px;padding:14px 16px;background:linear-gradient(165deg,#1c1c1c 0%,#141414 52%,#111 100%);border:1px solid #2c2c2c;border-radius:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.035);align-items:stretch}
 .bd-batch-card.running{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.25)}
 .bd-batch-card.done{border-color:#3a5080}
-.bd-batch-card.run-skipped{opacity:.42}
+/* 方案B: run-skipped 只弱化「运行勾选」语义(勾选框/卡片边框), 不再整卡片
+   opacity 灰化, 避免波及卡片内的媒体预览/缓存状态/分段导出·二次采样相关显示。 */
+.bd-batch-card.run-skipped{opacity:1}
+.bd-batch-card.run-skipped .bd-batch-run-check{opacity:.45}
+.bd-batch-card.run-skipped .bd-batch-preview,
+.bd-batch-card.run-skipped .bd-r2v-thumb,
+.bd-batch-card.run-skipped .bd-batch-video,
+.bd-batch-card.run-skipped .bd-seg-export-badge,
+.bd-batch-card.run-skipped .bd-second-sample-badge{opacity:1}
 /* selected / run-on must win over .done so timeline ↔ card selection stays visible */
 .bd-batch-card.selected,.bd-batch-card.selected.done{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
 .bd-batch-card.run-on:not(.run-skipped){border-color:#3a7a55}
@@ -491,9 +504,13 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-media{display:flex;flex-direction:column;gap:4px;min-width:88px;max-width:140px}
 .bd-batch-media .bd-r2v-pick-existing{align-self:stretch;text-align:center}
 /* Left = assets (narrower) · Right = prompt + preview (wider) */
-.bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:stretch;min-height:420px;flex:1 1 auto}
-.bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0}
-.bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:380px;flex:1 1 auto}
+/* 素材组列独立加高: 不再强制与右侧提示词列等高(align-items:start),
+   左侧素材组列按自身 min-height 成形, 右侧提示词列按内容自适应 */
+.bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:start;min-height:0;flex:1 1 auto}
+/* 素材组列：按内容自适应, 内容超出时内部滚动 */
+.bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0;overflow-y:auto;flex:1 1 auto}
+.bd-batch-r2v-assets>.bd-r2v-section{flex:0 0 auto}
+.bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:320px;flex:1 1 auto}
 .bd-r2v-section{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0;box-sizing:border-box}
 .bd-r2v-section-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .bd-r2v-section-title{font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#eaeaea;min-width:0}
@@ -2735,13 +2752,17 @@ export function getImageBatchUiHeight(editor) {
     const solo = isBatchDetailSolo(editor);
     const n = solo ? 1 : Math.max(1, editor?.timeline?.segments?.length || 1);
     const key = resolveTaskKey(editor?.getTaskKey?.() || editor?.taskTypeWidget?.value);
-    // r2v cards are tall; list scrolls inside BATCH_LIST_MAX_H — do NOT sum full card
-    // heights into node size or the DOM widget grows a huge empty region below.
-    const rowH = key === "r2v" ? 420 : (isVideoBatchTask(key) ? 155 : 130);
+    // r2v cards are tall; list scrolls inside BATCH_LIST_MAX_H in multi mode — but in
+    // solo mode only one card shows, so let it use its natural (taller) height instead
+    // of being capped at BATCH_LIST_MAX_H, so the 素材组 container gets more room.
+    // 单显(solo)素材组容器高度: 调高 r2v 行高估算, 让素材组列获得更大展示空间。
+    const isR2vRefs = key === "r2v" && imageBatchVariant(key) === "refs";
+    const rowH = isR2vRefs ? 1280 : (isVideoBatchTask(key) ? 155 : 130);
     const showPicker = solo && (editor?.timeline?.segments?.length || 0) > 1 && !editor?.usesBatchTimeline?.();
     const pickerH = showPicker ? 56 : 0;
     const listContentH = n * rowH + Math.max(0, n - 1) * BATCH_LIST_GAP + pickerH;
-    const listH = Math.min(listContentH, BATCH_LIST_MAX_H);
+    // 仅 r2v 单显不截断(单卡需完整展示); 其他模块(含 r2v multi)一律受 BATCH_LIST_MAX_H 限制滚动。
+    const listH = (solo && key === "r2v") ? listContentH : Math.min(listContentH, BATCH_LIST_MAX_H);
     return BATCH_TOOLBAR_H + BATCH_PANEL_CHROME + listH;
 }
 
@@ -2936,10 +2957,33 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
             topChrome += child.offsetHeight + 6;
         }
 
-        const budget = slotH > 0
+        const _key = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
+        const _solo = (editor.timeline?.segments?.length || 0) <= 1 || isBatchDetailSolo(editor);
+        // 仅当列表里真的渲染了 素材组(r2v)卡片时才兜底加高; 基于 DOM 实际内容判断, 避免误伤其他模块。
+        const hasR2vCard = !!wrap.querySelector(".bd-batch-list .bd-batch-r2v");
+        const budget0 = slotH > 0
             ? slotH
             : Math.max(minH, Number(wrap.clientHeight || host.clientHeight) || minH);
+        // r2v 单显(素材组): 确保 main 至少容纳 列表兜底高度 + 运行状态框, 避免状态框被 overflow 裁掉。
+        const listFloor2 = hasR2vCard ? 1280 : 0;
+        const budget = Math.max(budget0, listFloor2 + statusH + topChrome + 12);
         const mainH = Math.max(0, budget - statusH - topChrome);
+
+        // r2v 单显: 若所需高度超出节点当前分配, 直接撑高节点, 否则被 .bd-wrap overflow:hidden 裁掉运行状态框。
+        // 非 r2v: 若节点比当前内容所需更高(曾被 r2v 撑大), 缩回, 使状态栏贴在当前红框(640)外部底部而非悬在远处。
+        const node = editor?.node;
+        if (node?.size) {
+            const needH = budget + inset + 4;
+            if (listFloor2 > 0) {
+                if ((node.size[1] || 0) < needH - 2) {
+                    node.setSize?.([node.size[0], needH]);
+                    node.setDirtyCanvas?.(true, true);
+                }
+            } else if ((node.size[1] || 0) > needH + 2) {
+                node.setSize?.([node.size[0], needH]);
+                node.setDirtyCanvas?.(true, true);
+            }
+        }
 
         if (main) {
             main.style.flex = "1 1 0";
@@ -2987,12 +3031,18 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
             0,
             batchH - (batchToolbar?.offsetHeight || 0) - noticeH - pickerH - 10,
         );
-        list.style.flex = "1 1 0";
-        list.style.minHeight = "0";
+        list.style.flex = "0 0 auto";
+        // r2v 单显(素材组)模式: 红框滚动容器硬性兜底最小高度, 在面板内滚动而非撑爆面板,
+        // 使底部运行状态栏始终可见并贴在红框外部下方。
+        const soloR2v = hasR2vCard;
+        const listFloor = soloR2v ? 1280 : 0;
+        list.style.minHeight = `${listFloor}px`;
         if (trusted && slotH > 0) {
-            list.style.height = `${listH}px`;
-            list.style.maxHeight = `${listH}px`;
+            list.style.height = `${Math.max(listH, listFloor)}px`;
+            list.style.maxHeight = `${Math.max(listH, listFloor)}px`;
         } else {
+            // 非 trusted: 让红框在面板(flex:1 1 auto; min-height:0)内自适应并滚动,
+            // 不设死 maxHeight, 仅保留 min-height 兜底, 保证状态栏不被裁。
             list.style.height = "";
             list.style.maxHeight = "";
         }

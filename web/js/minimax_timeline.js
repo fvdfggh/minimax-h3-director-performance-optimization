@@ -554,7 +554,8 @@ const STYLES = `
   flex:1 1 0;min-height:0;max-height:none!important;overflow-y:auto;height:auto;
   display:flex;flex-direction:column
 }
-.bd-wrap.bd-batch-fill .bd-run-status{flex:0 0 auto;margin-top:0;flex-shrink:0}
+.bd-wrap.bd-batch-fill .bd-run-status{flex:0 0 auto;margin-top:0;flex-shrink:0;
+  position:sticky;bottom:0;z-index:3;background:var(--bg-panel, #1a1a2e);border-top:1px solid #333}
 /* Fixed min so progress text wrap does not change node chrome height every tick. */
 .bd-run-status{min-height:52px;box-sizing:border-box}
 /* Solo material group fills the viewport by default, but may grow beyond it when
@@ -565,10 +566,14 @@ const STYLES = `
   display:flex;flex-direction:column;flex:0 0 auto!important;min-height:100%;height:auto!important
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-body{
-  flex:0 0 auto;min-height:280px;max-height:none;align-self:stretch
+  flex:0 0 auto;min-height:0;max-height:none;align-items:start
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{
-  flex:0 0 auto;min-height:0;height:auto;max-height:none
+  flex:0 0 auto;min-height:320px;height:auto;max-height:none
+}
+/* 素材组列在填充 solo 模式下独立加高 + 内部滚动, 不被高度限制裁剪 */
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-assets{
+  flex:1 1 auto;min-height:800px;overflow-y:auto
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{
   flex:0 0 auto;min-height:140px;max-height:none;overflow:visible
@@ -860,7 +865,7 @@ const STYLES = `
 .bd-output .bd-out-fixed{display:flex;gap:4px;align-items:center}
 .bd-output .bd-out-fixed.hidden{display:none}
 /* Do not use margin-top:auto — with an oversized min-height it creates a huge empty gap above the status bar. */
-.bd-run-status{width:100%;box-sizing:border-box;padding:8px 10px;background:#151515;border:1px solid #333;border-radius:6px;display:flex;flex-direction:column;gap:5px;margin-top:6px;margin-bottom:0;flex-shrink:0}
+.bd-run-status{width:100%;box-sizing:border-box;padding:8px 10px;background:#151515;border:1px solid #333;border-radius:6px;display:flex;flex-direction:column;gap:5px;margin-top:6px;margin-bottom:0;flex-shrink:0;flex:0 0 auto}
 .bd-run-status.idle .bd-run-title{color:#888}
 .bd-run-status.active .bd-run-title{color:#4fff8f}
 .bd-run-status.done .bd-run-title{color:#7a9cff}
@@ -1239,7 +1244,10 @@ function scheduleDirectorLayoutSettle(editor) {
     const run = () => {
         if (editor.isPlaying || editor._pauseSettling) return;
         bindDomWidgetContentComputeSize(editor);
-        // Do not ensure/heal here — preserve workflow size; only re-fill batch panel.
+        // On reload the node kept its old saved size; grow it to the (possibly larger)
+        // content min so the 素材组 list actually gets the taller slot. Only grows,
+        // never shrinks a user-enlarged node — safe for workflow size preservation.
+        ensureDirectorNodeFitsContent(editor?.node, editor);
         syncBatchPanelFillHeight(editor, { settle: true });
     };
     requestAnimationFrame(() => {
@@ -3006,7 +3014,11 @@ class MiniMaxH3DirectorEditor {
                 this.setRunSelectionAll(this.runSelectAllCb.checked);
             };
         }
-        this.globalTask.onchange = () => this.onGlobalField("taskType", this.globalTask.value);
+        this.globalTask.onchange = () => {
+            const selValue = this.globalTask.value;
+            console.log("###SEL-CHANGE### 你选了选择器值=", selValue, " => getTaskKey=", this.getTaskKey(), " hasR2vCard=", !!this.root.querySelector(".bd-batch-list .bd-batch-r2v"));
+            this.onGlobalField("taskType", selValue);
+        };
         this.globalPrompt.oninput = () => this.onGlobalField("prompt", this.globalPrompt.value);
         if (this.r2vCommonFold) {
             this.r2vCommonFold.onclick = (e) => {
@@ -4499,6 +4511,9 @@ class MiniMaxH3DirectorEditor {
             el.classList.toggle("run-skipped", runSelectOn && !runOn);
             const cb = el.querySelector(".bd-batch-run-check");
             if (cb) cb.checked = runOn;
+            // 方案B: 分段导出 / 二次采样按钮与「选择运行」状态解耦,
+            // 不被 run-skipped 整卡片灰化波及, 其可用与否仅由各自功能决定。
+            this._decoupleRunSelectFromExportUI(el);
         });
         this.batchPicker?.querySelectorAll?.(".bd-batch-pick").forEach((el) => {
             const i = parseInt(el.dataset.batchIndex, 10);
@@ -4509,6 +4524,25 @@ class MiniMaxH3DirectorEditor {
             el.classList.toggle("run-skipped", runSelectOn && !runOn);
             const cb = el.querySelector(".bd-batch-run-check");
             if (cb) cb.checked = runOn;
+            this._decoupleRunSelectFromExportUI(el);
+        });
+    }
+
+    /**
+     * 方案B: 让「分段导出 / 二次采样」相关 UI 与「选择运行」状态彻底解耦。
+     * 卡片进入 run-skipped(未选运行)时, 不应把卡片内/工具栏里的导出·二采元素
+     * 一并灰化或禁用 —— 它们的可用与否只由各自功能的缓存/启用状态决定。
+     * 这里作为 CSS 豁免之外的双保险(强制 opacity/disabled 不受 run-skipped 影响)。
+     */
+    _decoupleRunSelectFromExportUI(scope) {
+        if (!scope || !scope.querySelectorAll) return;
+        scope.querySelectorAll(
+            '[data-a="seg-export"],[data-a="second-sample"],' +
+            '.bd-seg-export-badge,.bd-second-sample-badge,.bd-batch-preview,' +
+            '.bd-r2v-thumb,.bd-batch-video'
+        ).forEach((node) => {
+            node.style.opacity = "1";
+            if ("disabled" in node) node.disabled = false;
         });
     }
 

@@ -20,7 +20,15 @@ rendered clip               ``seg_<hash>_clip.mp4``                 durable
 segment meta / handoff      ``seg_<hash>_meta.json`` / ``_handoff`` durable
 slot map (position→files)   ``segment_slots.json``                  durable
 batch scratch               ``seg_XXXX_scratch_*.pt``               per-run
+second-pass artefacts       ``seg2_<hash>_*.{pt,mp4,json}``         durable
+second-pass slot map        ``segment_slots_2nd.json``              durable
 ==========================  ======================================  ==========
+
+The ``seg2_`` family is the「二级采样」cache. It mirrors the first-pass layout
+exactly — same content-hash naming, same artefacts — but lives in its own file
+group and its own slot map, so a second sample never overwrites (or garbage
+collects) the first-pass render. Position → file-group mapping for each family
+is owned by its own slot map; see :mod:`segment_slots`.
 
 ``<hash>`` is the segment's **content** hash (prompt + references + duration +
 sampling), not its position — see :mod:`segment_slots`, which owns the
@@ -97,9 +105,17 @@ HANDOFF_SUFFIX = "_handoff.json"
 
 # --- per-segment per-run working state ---------------------------------------
 SCRATCH_PREFIX = "seg_"
+#: Prefix of second-pass (「二级采样」) artefacts. A second sample writes its own
+#: ``seg2_<hash>_*`` file group instead of overwriting the first-pass render, so
+#: both generations coexist and can be compared / re-exported independently.
+#: Naming stays **content-hash based** — position mapping is the slot map's job
+#: (``segment_slots_2nd.json``), never the file name's.
+SECOND_PREFIX = "seg2_"
 SCRATCH_MARK = "_scratch_"
 #: Glob matching any batch scratch file.
 SCRATCH_GLOB = f"{SCRATCH_PREFIX}*{SCRATCH_MARK}*.pt"
+#: Glob prefixes covering durable artefacts of **both** passes.
+SEGMENT_GLOBS = (f"{SCRATCH_PREFIX}*", f"{SECOND_PREFIX}*")
 
 # Windows-illegal path characters, Windows reserved device names.
 _WIN_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
@@ -221,7 +237,9 @@ def stem_of_filename(name: str) -> str | None:
     Scratch files and the encoding cache are excluded on purpose: they have
     their own lifecycle and must never be garbage-collected by the slot map.
     """
-    if not name.startswith(SCRATCH_PREFIX) or SCRATCH_MARK in name:
+    if SCRATCH_MARK in name:
+        return None
+    if not (name.startswith(SCRATCH_PREFIX) or name.startswith(SECOND_PREFIX)):
         return None
     for suffix in SEGMENT_SUFFIXES:
         if name.endswith(suffix):
@@ -259,14 +277,15 @@ def iter_segment_files(root: Path) -> list[Path]:
         HANDOFF_SUFFIX,
     )
     out: list[Path] = []
-    for p in root.rglob(f"{SCRATCH_PREFIX}*"):
-        if not p.is_file():
-            continue
-        name = p.name
-        if SCRATCH_MARK in name:
-            continue  # scratch, not durable
-        if any(name.endswith(s) for s in suffixes):
-            out.append(p)
+    for glob in SEGMENT_GLOBS:
+        for p in root.rglob(glob):
+            if not p.is_file():
+                continue
+            name = p.name
+            if SCRATCH_MARK in name:
+                continue  # scratch, not durable
+            if any(name.endswith(s) for s in suffixes):
+                out.append(p)
     return out
 
 

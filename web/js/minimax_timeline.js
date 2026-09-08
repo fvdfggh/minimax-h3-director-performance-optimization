@@ -622,11 +622,20 @@ const STYLES = `
 .bd-seg-export-item.disabled .bd-seg-export-cb{cursor:not-allowed}
 .bd-seg-export-item .bd-seg-export-cb{accent-color:#4fff8f;width:15px;height:15px;flex-shrink:0;cursor:pointer}
 .bd-seg-export-name{font-weight:600;color:#e0e0e0;flex-shrink:0;min-width:42px}
-.bd-seg-export-badges{display:inline-flex;gap:6px;flex-wrap:nowrap;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
-.bd-seg-export-badge{font-size:10px;padding:2px 8px;border-radius:10px;border:1px solid #333;line-height:1.4;white-space:nowrap;flex-shrink:0}
-.bd-seg-export-badge.ok{color:#7dffa0;border-color:#2f6b40}
-.bd-seg-export-badge.warn{color:#ffd27d;border-color:#7a5c22}
-.bd-seg-export-badge.muted{color:#888;border-color:#333}
+.bd-seg-export-badges{display:inline-flex;align-items:center;gap:10px;flex-wrap:nowrap;flex:1;min-width:0;overflow:hidden}
+.bd-seg-dots{display:inline-flex;align-items:center;gap:3px;flex-shrink:0}
+.bd-seg-dot{width:9px;height:9px;border-radius:50%;background:#3a3a3a;flex-shrink:0;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}
+.bd-seg-dot.ready{background:#7dffa0;box-shadow:0 0 5px rgba(125,255,160,.55)}
+.bd-seg-dot.partial{background:#ffd27d;box-shadow:0 0 4px rgba(255,210,125,.45)}
+.bd-seg-dot.empty{background:#3a3a3a}
+.bd-seg-dot-done{outline:2px solid #6ea8ff;outline-offset:1px}
+.bd-seg-export-summary{margin-left:auto;color:#9aa3ad;font-size:11px;flex-shrink:0;font-variant-numeric:tabular-nums;white-space:nowrap}
+.bd-seg-export-legend{display:flex;align-items:center;gap:6px;color:#888;font-size:10px;flex-wrap:wrap;line-height:1.6}
+.bd-seg-export-legend .bd-seg-dot{position:relative}
+.bd-seg-export-badge{font-size:10px;padding:2px 7px;border-radius:9px;line-height:1.5;white-space:nowrap;flex-shrink:0;font-weight:500;letter-spacing:.2px}
+.bd-seg-export-badge.ok{color:#9dffb3;background:rgba(125,255,160,.10);border:1px solid rgba(125,255,160,.30)}
+.bd-seg-export-badge.warn{color:#ffdca0;background:rgba(255,210,125,.10);border:1px solid rgba(255,210,125,.30)}
+.bd-seg-export-badge.muted{color:#9aa;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.10)}
 .bd-seg-export-toast{position:fixed;left:50%;bottom:56px;transform:translateX(-50%) translateY(20px);background:#1f3d2b;color:#9dffb3;border:1px solid #2f6b40;border-radius:8px;padding:10px 18px;font-size:13px;z-index:10000;opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;box-shadow:0 6px 20px rgba(0,0,0,.4)}
 .bd-seg-export-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .bd-media-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
@@ -2381,6 +2390,7 @@ class MiniMaxH3DirectorEditor {
                         <span data-i18n="toolbar.selectAll">全选</span>
                     </label>
                     <button type="button" class="bd-btn" data-a="seg-export" data-i18n="toolbar.segmentExport" data-i18n-title="tooltip.segmentExport">分段导出</button>
+                    <button type="button" class="bd-btn" data-a="second-sample" title="二次采样：对已有缓存片段做 放大+重采样+连续出片">二次采样</button>
                     <button type="button" class="bd-btn bd-btn-danger" data-a="del" data-i18n="toolbar.deleteSegment" data-i18n-title="tooltip.deleteSegment">删除片段</button>
                     <div class="bd-mode">
                         <button type="button" data-a="mode-global" class="active" data-i18n="toolbar.modeGlobal">全局模式</button>
@@ -2871,6 +2881,7 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="del-split"]', () => this.deleteSelectedSplitPoint());
         bind('[data-a="run-select-toggle"]', () => this.toggleRunSelectMode());
         bind('[data-a="seg-export"]', () => { void this.openSegmentExportPicker(); });
+        bind('[data-a="second-sample"]', () => { void this.openSecondSamplePicker(); });
         bind('[data-a="del"]', () => this.deleteSelectedSegment());
         bind('[data-a="mode-global"]', () => this.setEditMode("global"));
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));
@@ -3811,6 +3822,8 @@ class MiniMaxH3DirectorEditor {
         return {
             enabled: !!cfg.enabled,
             mode: cfg.mode === "continuous" ? "continuous" : "piecewise",
+            // Which pass's cache the picker reads: "1st" (seg_*) or "2nd" (seg2_*).
+            source: cfg.source === "2nd" ? "2nd" : "1st",
             indices: Array.isArray(cfg.indices)
                 ? cfg.indices.map((i) => parseInt(i, 10)).filter((i) => i >= 0)
                 : [],
@@ -3825,7 +3838,7 @@ class MiniMaxH3DirectorEditor {
         return String(this.node?.id ?? "");
     }
 
-    async _fetchSegmentExportStatus() {
+    async _fetchSegmentExportStatus(source) {
         const payload = {
             node_id: this.getSegmentExportNodeId(),
             timeline_data: this.buildTimelinePayload(),
@@ -3837,6 +3850,9 @@ class MiniMaxH3DirectorEditor {
             height: this.timeline.output?.height || 480,
             ref_max_size: this.refMaxWidget?.value || this.timeline.output?.longEdge || 864,
             workflow_name: getStableWorkflowId(),
+            // The backend probes one pass only, so switching the toggle changes
+            // what is offered — there is no cross-source fallback.
+            source: source === "2nd" ? "2nd" : "1st",
         };
         try {
             const resp = await api.fetchApi("/minimax/director/segment_export_status", {
@@ -3902,6 +3918,30 @@ class MiniMaxH3DirectorEditor {
         bodyEl.appendChild(modeWrap);
         bodyEl.appendChild(modeHint);
 
+        // Cache source — first pass (seg_*) or second pass (seg2_*). Switching it
+        // re-probes the backend and re-renders the list, so the picker only ever
+        // shows the selected pass's cache state.
+        const currentSource = () =>
+            sourceWrap.querySelector('input[name="seg-export-source"]:checked')?.value === "2nd"
+                ? "2nd"
+                : "1st";
+        const sourceWrap = document.createElement("div");
+        sourceWrap.className = "bd-seg-export-mode";
+        sourceWrap.innerHTML = `<span class="bd-seg-export-mode-label">${t("segmentExport.source")}</span>
+            <label><input type="radio" name="seg-export-source" value="1st"${cfg.source === "2nd" ? "" : " checked"}> ${t("segmentExport.sourceFirst")}</label>
+            <label><input type="radio" name="seg-export-source" value="2nd"${cfg.source === "2nd" ? " checked" : ""}> ${t("segmentExport.sourceSecond")}</label>`;
+        const sourceHint = document.createElement("div");
+        sourceHint.className = "bd-seg-export-hint";
+        const syncSourceHint = () => {
+            sourceHint.textContent = t(
+                currentSource() === "2nd"
+                    ? "segmentExport.sourceHintSecond"
+                    : "segmentExport.sourceHintFirst"
+            );
+        };
+        bodyEl.appendChild(sourceWrap);
+        bodyEl.appendChild(sourceHint);
+
         // Segment list
         const hint = document.createElement("div");
         hint.className = "bd-seg-export-hint";
@@ -3937,7 +3977,7 @@ class MiniMaxH3DirectorEditor {
             const mode = modeWrap.querySelector('input[name="seg-export-mode"]:checked')?.value === "continuous"
                 ? "continuous"
                 : "piecewise";
-            finish({ enabled: indices.length > 0, mode, indices });
+            finish({ enabled: indices.length > 0, mode, source: currentSource(), indices });
         };
 
         const cancelBtn = document.createElement("button");
@@ -3948,38 +3988,55 @@ class MiniMaxH3DirectorEditor {
         actionsEl.appendChild(cancelBtn);
         actionsEl.appendChild(okBtn);
 
-        // Fetch availability, then render rows (disabled where not exportable)
-        const status = await this._fetchSegmentExportStatus();
-        const rows = (status && status.segments) || [];
-        const avail = {};
-        for (const r of rows) avail[r.index] = r;
-        for (let i = 0; i < segments.length; i++) {
-            const info = avail[i] || {};
-            const exportable = !!info.exportable;
-            const row = document.createElement("div");
-            row.className = "bd-modal-item bd-seg-export-item" + (exportable ? "" : " disabled");
-            const name = `${i + 1}`;
-            const badge = this._segmentExportBadge(info);
-            row.innerHTML = `<span class="bd-seg-export-name">#${name}</span><span class="bd-seg-export-badges">${badge}</span>`;
-            const cb = document.createElement("input");
-            cb.type = "checkbox";
-            cb.className = "bd-seg-export-cb";
-            cb.disabled = !exportable;
-            cb.checked = exportable && cfg.indices.includes(i);
-            cb.onchange = refreshCount;
-            row.prepend(cb);
-            row.onclick = (e) => {
-                if (e.target === cb) return;
-                if (!cb.disabled) {
-                    cb.checked = !cb.checked;
-                    cb.onchange && cb.onchange();
-                }
-            };
-            listEl.appendChild(row);
-            checkboxes.push(cb);
-            rowEls.push(row);
-        }
-        refreshCount();
+        // Fetch availability, then render rows (disabled where not exportable).
+        // Re-runnable: the cache-source toggle re-probes and rebuilds the list.
+        const renderRows = async () => {
+            const source = currentSource();
+            syncSourceHint();
+            listEl.textContent = "";
+            checkboxes.length = 0;
+            rowEls.length = 0;
+            listEl.classList.add("bd-loading");
+            okBtn.disabled = true;
+
+            const status = await this._fetchSegmentExportStatus(source);
+            const rows = (status && status.segments) || [];
+            const avail = {};
+            for (const r of rows) avail[r.index] = r;
+            for (let i = 0; i < segments.length; i++) {
+                const info = avail[i] || {};
+                const exportable = !!info.exportable;
+                const row = document.createElement("div");
+                row.className = "bd-modal-item bd-seg-export-item" + (exportable ? "" : " disabled");
+                const name = `${i + 1}`;
+                const badge = this._segmentExportBadge(info);
+                row.innerHTML = `<span class="bd-seg-export-name">#${name}</span><span class="bd-seg-export-badges">${badge}</span>`;
+                const cb = document.createElement("input");
+                cb.type = "checkbox";
+                cb.className = "bd-seg-export-cb";
+                cb.disabled = !exportable;
+                cb.checked = exportable && cfg.indices.includes(i);
+                cb.onchange = refreshCount;
+                row.prepend(cb);
+                row.onclick = (e) => {
+                    if (e.target === cb) return;
+                    if (!cb.disabled) {
+                        cb.checked = !cb.checked;
+                        cb.onchange && cb.onchange();
+                    }
+                };
+                listEl.appendChild(row);
+                checkboxes.push(cb);
+                rowEls.push(row);
+            }
+            listEl.classList.remove("bd-loading");
+            refreshCount();
+        };
+
+        sourceWrap.querySelectorAll('input[name="seg-export-source"]').forEach((r) => {
+            r.onchange = () => renderRows();
+        });
+        await renderRows();
 
         // Escape closes
         const keyHandler = (e) => {
@@ -4000,13 +4057,296 @@ class MiniMaxH3DirectorEditor {
         this._modalEl = overlay;
     }
 
+    // ---------------------------------------------------------------------
+    // 二次采样 (second sample) — 复用分段导出弹窗结构，但写入 secondSample，
+    // 执行时走节点 execute 的二采分支（需已加载 model / upscale_model / VAE）。
+    // ---------------------------------------------------------------------
+
+    _secondSampleConfig() {
+        const cfg = this.timeline.output?.secondSample || {};
+        return {
+            enabled: !!cfg.enabled,
+            indices: Array.isArray(cfg.indices)
+                ? cfg.indices.map((i) => parseInt(i, 10)).filter((i) => i >= 0)
+                : [],
+        };
+    }
+
+    getSecondSampleNodeId() {
+        return String(this.node?.id ?? "");
+    }
+
+    async _fetchSecondSampleStatus() {
+        const payload = {
+            node_id: this.getSecondSampleNodeId(),
+            timeline_data: this.buildTimelinePayload(),
+            task_type: this.globalTask?.value || this.taskTypeWidget?.value || "",
+            global_prompt: this.timeline.global?.prompt || "",
+            total_frames: this.getTotalFrames(),
+            frame_rate: this.getFrameRate(),
+            width: this.timeline.output?.width || 864,
+            height: this.timeline.output?.height || 480,
+            ref_max_size: this.refMaxWidget?.value || this.timeline.output?.longEdge || 864,
+            workflow_name: getStableWorkflowId(),
+        };
+        try {
+            const resp = await api.fetchApi("/minimax/director/second_sample_status", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+            return await resp.json();
+        } catch (e) {
+            console.error("[MiniMax] second sample status failed", e);
+            return { segments: [], error: String(e) };
+        }
+    }
+
+    async openSecondSamplePicker() {
+        this._closeBdModal();
+        const n = this.getRunnableSegmentCount();
+        const segments = (this.timeline.segments || []).slice(0, n);
+        const cfg = this._secondSampleConfig();
+
+        const overlay = document.createElement("div");
+        overlay.className = "bd-modal-overlay bd-modal-overlay-fixed";
+        const panel = document.createElement("div");
+        panel.className = "bd-modal bd-modal-wide";
+        panel.innerHTML = `
+            <div class="bd-modal-title">二次采样（二采）</div>
+            <div class="bd-modal-body"></div>
+            <div class="bd-modal-list"></div>
+            <div class="bd-modal-actions"></div>`;
+        const bodyEl = panel.querySelector(".bd-modal-body");
+        const listEl = panel.querySelector(".bd-modal-list");
+        const actionsEl = panel.querySelector(".bd-modal-actions");
+
+        const finish = (val) => {
+            this._closeBdModal();
+            if (val) this.resolveSecondSample(val);
+            else this._clearSecondSampleFlag();
+        };
+
+        const hint = document.createElement("div");
+        hint.className = "bd-seg-export-hint";
+        hint.textContent =
+            "勾选要二次采样的连续片段：按「引用上段」关系自动合并为「段」，标号 1/2/3…。勾选即二采整段连续区间（不可选子集）。";
+        bodyEl.appendChild(hint);
+        const legend = document.createElement("div");
+        legend.className = "bd-seg-export-legend";
+        legend.innerHTML = `<span class="bd-seg-dot ready"></span>可二采 <span class="bd-seg-dot partial"></span>有缓存但不可二采 <span class="bd-seg-dot empty"></span>无缓存 <span class="bd-seg-dot ready bd-seg-dot-done"></span>已有二采结果`;
+        bodyEl.appendChild(legend);
+        listEl.classList.remove("hidden");
+
+        const checkboxes = [];
+        let countEl = null;
+        const refreshCount = () => {
+            const checked = checkboxes.filter((c) => c.checked && !c.disabled).length;
+            countEl.textContent = checked ? `已选 ${checked} 段` : "未选择片段";
+            okBtn.disabled = checked === 0;
+        };
+
+        const countRow = document.createElement("div");
+        countRow.className = "bd-seg-export-count";
+        bodyEl.appendChild(countRow);
+        countEl = countRow;
+
+        const okBtn = document.createElement("button");
+        okBtn.type = "button";
+        okBtn.className = "bd-btn bd-btn-primary";
+        okBtn.textContent = "执行二采";
+        okBtn.disabled = true;
+        okBtn.onclick = () => {
+            const indices = [];
+            checkboxes.forEach((cb) => {
+                if (cb.checked && !cb.disabled) indices.push(...cb._runIndices);
+            });
+            finish({ enabled: indices.length > 0, indices });
+        };
+
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.className = "bd-btn";
+        cancelBtn.textContent = "取消";
+        cancelBtn.onclick = () => finish(null);
+        actionsEl.appendChild(cancelBtn);
+        actionsEl.appendChild(okBtn);
+
+        // Fetch availability, then render rows (disabled where not second-sampleable)
+        const status = await this._fetchSecondSampleStatus();
+        const rows = (status && status.segments) || [];
+        const avail = {};
+        for (const r of rows) avail[r.index] = r;
+
+        // 按「引用上段」关系把相邻连续片段合并为一个「段」:一段从「不引用上段」的
+        // 片段(或首段)开始,后续「引用上段」的片段并入同一段。段号按时间线顺序 1/2/3…。
+        // 勾选一段 = 二采该整段连续区间(不可选子集);某段内有片段不可二采则整段置灰。
+        const runs = [];
+        let curRun = null;
+        for (let i = 0; i < segments.length; i++) {
+            const refPrev = !!(avail[i] || {}).continuityFromPrev;
+            if (!curRun || !refPrev) {
+                curRun = { start: i, end: i, indices: [i] };
+                runs.push(curRun);
+            } else {
+                curRun.end = i;
+                curRun.indices.push(i);
+            }
+        }
+        runs.forEach((run, ri) => {
+            const runNo = ri + 1;
+            const runInfos = run.indices.map((i) => avail[i] || {});
+            const sampleable = runInfos.length > 0 && runInfos.every((info) => info.canSecondSample);
+            const rangeLabel = run.start === run.end
+                ? `片段 ${run.start + 1}`
+                : `片段 ${run.start + 1}–${run.end + 1}`;
+            const row = document.createElement("div");
+            row.className = "bd-modal-item bd-seg-export-item" + (sampleable ? "" : " disabled");
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.className = "bd-seg-export-cb";
+            cb._runIndices = run.indices.slice();
+            cb.disabled = !sampleable;
+            cb.checked = sampleable && run.indices.every((i) => cfg.indices.includes(i));
+            cb.onchange = refreshCount;
+            row.prepend(cb);
+            const nameSpan = document.createElement("span");
+            nameSpan.className = "bd-seg-export-name";
+            nameSpan.textContent = `段${runNo} · ${rangeLabel}`;
+            row.appendChild(nameSpan);
+            const badgeSpan = document.createElement("span");
+            badgeSpan.className = "bd-seg-export-badges";
+            badgeSpan.innerHTML = this._secondSampleDots(runInfos) + this._secondSampleRunSummary(runInfos);
+            row.appendChild(badgeSpan);
+            row.onclick = (e) => {
+                if (e.target === cb) return;
+                if (!cb.disabled) {
+                    cb.checked = !cb.checked;
+                    cb.onchange && cb.onchange();
+                }
+            };
+            listEl.appendChild(row);
+            checkboxes.push(cb);
+        });
+        refreshCount();
+
+        const keyHandler = (e) => {
+            if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                finish(null);
+            }
+        };
+        window.addEventListener("keydown", keyHandler, true);
+        this._modalKeyHandler = keyHandler;
+
+        overlay.onclick = (e) => { if (e.target === overlay) finish(null); };
+        panel.onclick = (e) => e.stopPropagation();
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+        this._modalEl = overlay;
+    }
+
+    // 优雅的缓存状态展示:每段一个点(悬停看明细),整段再加一行摘要,
+    // 取代之前一长串文字胶囊。
+    _secondSampleBadgeText(info) {
+        if (!info) return "无缓存";
+        const parts = [];
+        parts.push(info.hasLatent ? "首采 latent ✓" : "无首采 latent");
+        parts.push(info.hasTextCond ? "文本编码 ✓" : "无文本编码");
+        if (info.hasSecondLatent) parts.push("已有二采结果");
+        if (!info.canSecondSample) parts.push("→ 不可二采");
+        return parts.join(" · ");
+    }
+
+    _secondSampleDots(infos) {
+        const dots = (infos || []).map((info) => {
+            let cls = "empty";
+            if (info) {
+                if (info.canSecondSample) cls = "ready";
+                else if (info.hasLatent || info.hasTextCond || info.hasSecondLatent) cls = "partial";
+            }
+            const done = info && info.hasSecondLatent ? " bd-seg-dot-done" : "";
+            const title = this._secondSampleBadgeText(info).replace(/"/g, "&quot;");
+            return `<span class="bd-seg-dot ${cls}${done}" title="${title}"></span>`;
+        }).join("");
+        return `<span class="bd-seg-dots">${dots}</span>`;
+    }
+
+    _secondSampleRunSummary(infos) {
+        const total = (infos || []).length;
+        const ready = (infos || []).filter((i) => i && i.canSecondSample).length;
+        const done = (infos || []).filter((i) => i && i.hasSecondLatent).length;
+        let txt;
+        if (ready === total) txt = done === total ? `全部已二采 · ${total}` : `全部可二采 · ${total}`;
+        else if (ready === 0) txt = `全部缺缓存 · ${total}`;
+        else txt = `${ready}/${total} 可二采`;
+        return `<span class="bd-seg-export-summary">${txt}</span>`;
+    }
+
+    resolveSecondSample(val) {
+        if (!this.timeline.output) this.timeline.output = {};
+        this.timeline.output.secondSample = {
+            enabled: !!val.enabled,
+            indices: [...(val.indices || [])].sort((a, b) => a - b),
+        };
+        this.commit(false, { syncTimeline: true });
+        this.flushTimelineSync();
+        this.scheduleRender();
+        try {
+            if (typeof app?.queuePrompt === "function") {
+                const queued = app.queuePrompt();
+                const clearAfter = () => {
+                    this._clearSecondSampleFlag();
+                    this._secondSampleToast("二次采样已加入队列");
+                };
+                if (queued && typeof queued.then === "function") {
+                    queued.then(clearAfter, clearAfter);
+                } else {
+                    setTimeout(clearAfter, 0);
+                }
+            } else {
+                this._secondSampleToast("请点击运行以执行二次采样");
+            }
+        } catch (e) {
+            console.warn("[MiniMax] second sample queue prompt failed", e);
+            this._secondSampleToast("请点击运行以执行二次采样");
+        }
+    }
+
+    _clearSecondSampleFlag() {
+        const cfg = this.timeline.output?.secondSample;
+        if (!cfg) return;
+        this.timeline.output.secondSample = { ...cfg, enabled: false };
+        try {
+            this.commit(false, { syncTimeline: true });
+        } catch (e) {
+            /* best-effort */
+        }
+        this.scheduleRender();
+    }
+
+    _secondSampleToast(msg) {
+        let el = this.root.querySelector("[data-r='second-sample-toast']");
+        if (!el) {
+            el = document.createElement("div");
+            el.setAttribute("data-r", "second-sample-toast");
+            el.className = "bd-seg-export-toast";
+            document.body.appendChild(el);
+        }
+        el.textContent = msg;
+        el.classList.add("show");
+        clearTimeout(this._secondSampleToastTimer);
+        this._secondSampleToastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+    }
+
     _segmentExportBadge(info) {
-        if (!info) return `<span class="bd-seg-export-badge muted">${t("segmentExport.noCache")}</span>`;
+        if (!info) return `<span class="bd-seg-export-badge muted" title="${t("segmentExport.noCache")}">${t("segmentExport.noCache")}</span>`;
         const bits = [];
-        if (info.hasClip) bits.push(`<span class="bd-seg-export-badge ok">${t("segmentExport.hasClip")}</span>`);
-        if (info.hasFrames) bits.push(`<span class="bd-seg-export-badge ok">${t("segmentExport.hasFrames")}</span>`);
-        if (info.hasLatent) bits.push(`<span class="bd-seg-export-badge warn">${t("segmentExport.hasLatent")}</span>`);
-        if (!bits.length) bits.push(`<span class="bd-seg-export-badge muted">${t("segmentExport.noCache")}</span>`);
+        if (info.hasClip) bits.push(`<span class="bd-seg-export-badge ok" title="${t("segmentExport.hasClip")}">${t("segmentExport.hasClip")}</span>`);
+        if (info.hasFrames) bits.push(`<span class="bd-seg-export-badge ok" title="${t("segmentExport.hasFrames")}">${t("segmentExport.hasFrames")}</span>`);
+        if (info.hasLatent) bits.push(`<span class="bd-seg-export-badge warn" title="${t("segmentExport.hasLatent")}">${t("segmentExport.hasLatent")}</span>`);
+        if (!bits.length) bits.push(`<span class="bd-seg-export-badge muted" title="${t("segmentExport.noCache")}">${t("segmentExport.noCache")}</span>`);
         return bits.join(" ");
     }
 
@@ -4017,6 +4357,7 @@ class MiniMaxH3DirectorEditor {
         this.timeline.output.segmentExport = {
             enabled: !!val.enabled,
             mode: val.mode === "continuous" ? "continuous" : "piecewise",
+            source: val.source === "2nd" ? "2nd" : "1st",
             indices: [...(val.indices || [])].sort((a, b) => a - b),
         };
         this.commit(false, { syncTimeline: true });
@@ -12110,6 +12451,77 @@ function clearAllDirectorRunStatus() {
     }
 }
 
+/** Options a combo widget offers — ComfyUI keeps them on ``widget.options``. */
+function comboWidgetOptions(w) {
+    const o = w?.options;
+    if (!o) return null;
+    if (Array.isArray(o)) return o;
+    if (Array.isArray(o.values)) return o.values;
+    if (Array.isArray(o.options)) return o.options;
+    return null;
+}
+
+/**
+ * Repair widget values that a stale workflow can no longer validate.
+ *
+ * * A widget added *after* the workflow was saved has no ``widgets_values``
+ *   entry and lands as an empty string; the backend converts INT inputs with
+ *   ``int(value)``, so an empty ``second_seed`` aborts the whole prompt before
+ *   ``execute()`` is ever reached.
+ * * A combo saved before its model existed keeps the frontend's
+ *   ``(place models in: …)`` placeholder, which stops matching the option list
+ *   as soon as the model is downloaded.
+ *
+ * Both are "this value would fail validation anyway" cases, so replacing it can
+ * only turn a hard failure into a run.
+ */
+function sanitizeWidgetValues(node) {
+    for (const w of node.widgets || []) {
+        if (!w || w.name == null) continue;
+        const options = comboWidgetOptions(w);
+        if (options && options.length) {
+            if (w.value != null && !options.includes(w.value)) {
+                // The frontend's empty-folder placeholder — never a real choice.
+                const real = options.find(
+                    (v) => typeof v !== "string" || !v.includes("place models in"),
+                );
+                if (real != null) {
+                    console.warn(
+                        `[MiniMax] ${node.type}.${w.name}: "${w.value}" 已不在选项列表中，改用 "${real}"。`,
+                    );
+                    w.value = real;
+                }
+            }
+            continue;
+        }
+        if (w.value === "" && (w.type === "number" || w.type === "int" || w.type === "float")) {
+            // 回退到控件自身的 INPUT_TYPES 默认值（如 second_denoise 的 1.0），
+            // 而不是一律写 0 —— 否则新增的浮点控件在旧工作流里会被强制成 0.0。
+            // 没有有效数字默认时才回退到 0（保持 second_seed 等整数控件的原行为）。
+            const def = w.options?.default;
+            const fallback =
+                typeof def === "number" && Number.isFinite(def)
+                    ? def
+                    : (typeof w.defaultValue === "number" && Number.isFinite(w.defaultValue)
+                        ? w.defaultValue
+                        : 0);
+            console.warn(`[MiniMax] ${node.type}.${w.name}: 数值为空，回退为 ${fallback}。`);
+            w.value = fallback;
+        }
+    }
+}
+
+function sanitizeAllWidgetValues() {
+    const graph = app.graph ?? app.canvas?.graph;
+    for (const node of graph?._nodes ?? graph?.nodes ?? []) {
+        try {
+            sanitizeWidgetValues(node);
+        } catch (e) {
+            /* best-effort */
+        }
+    }
+}
+
 /** Old workflows may still list removed output slots (e.g. segment_images). */
 function isMiniMaxH3DirectorNode(node) {
     const cls = node?.comfyClass || node?.type || "";
@@ -12174,9 +12586,22 @@ app.registerExtension({
     name: "ComfyUI.MiniMaxH3DirectorPlugin",
     async setup() {
         installDirectorClipboardGuard();
+        try {
+            sanitizeAllWidgetValues();
+        } catch (e) {
+            /* best-effort */
+        }
         const flushDirectors = () => {
             const graph = app.graph ?? app.canvas?.graph;
             for (const node of graph?._nodes ?? graph?.nodes ?? []) {
+                // Stale widget values (new widgets in an old workflow, combos
+                // saved before their model existed) fail backend validation
+                // before execute() runs, so repair them before every queue.
+                try {
+                    sanitizeWidgetValues(node);
+                } catch (e) {
+                    /* best-effort */
+                }
                 node._minimaxEditor?.flushTimelineSync?.();
                 // Keep the workflow id in the hidden `workflow_name` widget in sync
                 // on every queue. The backend cache layout is keyed on this id, so

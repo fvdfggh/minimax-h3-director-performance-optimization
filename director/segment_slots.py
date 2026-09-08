@@ -56,12 +56,24 @@ SOURCE_VIDEO_FP_KEY = "source_video"
 
 #: Slot map file, stored beside the artefacts it describes.
 MANIFEST_NAME = "segment_slots.json"
+#: Slot map for the「二级采样」(second-pass) artefacts — same structure, own
+#: file group (`seg2_*`), so a second sample never touches a first-pass render.
+MANIFEST2_NAME = "segment_slots_2nd.json"
 MANIFEST_VERSION = 2
+
+#: Cache "pass" variants. Both follow identical semantics; they differ only in
+#: which manifest they use and which file-name prefix they describe. Keeping
+#: them in one module (rather than two parallel maps maintained by hand) is what
+#: guarantees the two passes stay aligned position-by-position.
+VARIANT_FIRST = "1st"
+VARIANT_SECOND = "2nd"
+_VARIANTS = (VARIANT_FIRST, VARIANT_SECOND)
 
 #: Hex characters of the content hash kept in a file name.
 HASH_LEN = 12
 
 _HASHED_STEM_RE = re.compile(r"^seg_([0-9a-f]{%d})(?:_(\d+))?$" % HASH_LEN)
+_HASHED_STEM2_RE = re.compile(r"^seg2_([0-9a-f]{%d})(?:_(\d+))?$" % HASH_LEN)
 
 _LOCK = threading.RLock()
 #: ``path -> ((mtime_ns, size), slots)`` so path resolution stays off the disk.
@@ -77,16 +89,45 @@ def legacy_stem(position: int) -> str:
     return f"{cache_layout.SCRATCH_PREFIX}{int(position):04d}"
 
 
-def content_stem(content_hash: str, dup: int = 0) -> str:
-    """``seg_<hash>``, or ``seg_<hash>_1`` / ``_2`` for repeated content."""
-    stem = f"{cache_layout.SCRATCH_PREFIX}{str(content_hash)[:HASH_LEN]}"
+def variant_prefix(variant: str) -> str:
+    """File-name prefix owned by a pass: ``seg_`` (first) / ``seg2_`` (second)."""
+    return (
+        cache_layout.SECOND_PREFIX
+        if str(variant) == VARIANT_SECOND
+        else cache_layout.SCRATCH_PREFIX
+    )
+
+
+def content_stem(
+    content_hash: str,
+    dup: int = 0,
+    *,
+    variant: str = VARIANT_FIRST,
+) -> str:
+    """``seg_<hash>`` (or ``seg2_<hash>``), ``_1`` / ``_2`` for repeated content.
+
+    Naming stays **content-hash based** for both passes — a file name never
+    encodes the timeline position, so editing the timeline cannot make a render
+    point at another segment's files.
+    """
+    stem = f"{variant_prefix(variant)}{str(content_hash)[:HASH_LEN]}"
     return stem if int(dup) <= 0 else f"{stem}_{int(dup)}"
 
 
 def stem_content_hash(stem: str) -> str | None:
     """Content hash encoded in a hash-named stem, or ``None`` for a legacy one."""
-    match = _HASHED_STEM_RE.match(str(stem or ""))
+    text = str(stem or "")
+    match = _HASHED_STEM_RE.match(text) or _HASHED_STEM2_RE.match(text)
     return match.group(1) if match else None
+
+
+def stem_variant(stem: str) -> str:
+    """Which pass a stem belongs to (``"1st"`` / ``"2nd"``)."""
+    return (
+        VARIANT_SECOND
+        if str(stem or "").startswith(cache_layout.SECOND_PREFIX)
+        else VARIANT_FIRST
+    )
 
 
 def content_hash_of_fingerprint(
@@ -133,13 +174,15 @@ def _hash_dict(data: dict[str, Any]) -> str:
 # Manifest I/O
 # --------------------------------------------------------------------------
 
-def manifest_path(root: Path) -> Path:
-    return Path(root) / MANIFEST_NAME
+def manifest_path(root: Path, *, variant: str = VARIANT_FIRST) -> Path:
+    """Path of a pass's slot map (``segment_slots.json`` / ``..._2nd.json``)."""
+    name = MANIFEST2_NAME if str(variant) == VARIANT_SECOND else MANIFEST_NAME
+    return Path(root) / name
 
 
-def has_manifest(root: Path) -> bool:
+def has_manifest(root: Path, *, variant: str = VARIANT_FIRST) -> bool:
     """Whether a slot map exists. An *empty* map is still a map."""
-    return manifest_path(root).is_file()
+    return manifest_path(root, variant=variant).is_file()
 
 
 def _stat_key(path: Path) -> tuple[int, int] | None:
@@ -150,9 +193,9 @@ def _stat_key(path: Path) -> tuple[int, int] | None:
     return (int(getattr(st, "st_mtime_ns", 0)), int(st.st_size))
 
 
-def read_slots(root: Path) -> list[dict[str, Any]]:
+def read_slots(root: Path, *, variant: str = VARIANT_FIRST) -> list[dict[str, Any]]:
     """Current slot list (``[]`` when the map is missing or unreadable)."""
-    path = manifest_path(root)
+    path = manifest_path(root, variant=variant)
     key = _stat_key(path)
     if key is None:
         with _LOCK:
@@ -181,9 +224,14 @@ def read_slots(root: Path) -> list[dict[str, Any]]:
     return [dict(item) for item in slots]
 
 
-def write_slots(root: Path, slots: Sequence[dict[str, Any]]) -> None:
+def write_slots(
+    root: Path,
+    slots: Sequence[dict[str, Any]],
+    *,
+    variant: str = VARIANT_FIRST,
+) -> None:
     """Persist the slot list atomically. Never raises."""
-    path = manifest_path(root)
+    path = manifest_path(root, variant=variant)
     payload = {
         "version": MANIFEST_VERSION,
         "updated": int(time.time()),
@@ -208,9 +256,9 @@ def write_slots(root: Path, slots: Sequence[dict[str, Any]]) -> None:
         _MANIFEST_CACHE.pop(str(path), None)
 
 
-def clear_slots(root: Path) -> None:
+def clear_slots(root: Path, *, variant: str = VARIANT_FIRST) -> None:
     """Drop the slot map (used by「清空节点所有缓存」)."""
-    path = manifest_path(root)
+    path = manifest_path(root, variant=variant)
     with _LOCK:
         _MANIFEST_CACHE.pop(str(path), None)
     try:
@@ -224,34 +272,56 @@ def clear_slots(root: Path) -> None:
 # Resolution
 # --------------------------------------------------------------------------
 
-def resolve_stem(root: Path, position: int) -> str | None:
+def resolve_stem(
+    root: Path,
+    position: int,
+    *,
+    variant: str = VARIANT_FIRST,
+) -> str | None:
     """File stem of the group currently living at timeline ``position``.
 
     ``None`` means "this position has no cache" — the timeline shrank, or the
     position never existed. The legacy positional name is used only while no
-    slot map has been written yet, so pre-migration caches stay readable.
+    slot map has been written yet, so pre-migration caches stay readable; the
+    second pass has no legacy files, so it deliberately has no such fallback
+    (falling back there would hand it the *first* pass's ``seg_0003`` group).
     """
-    if not has_manifest(root):
-        return legacy_stem(position)
-    slots = read_slots(root)
+    if not has_manifest(root, variant=variant):
+        return None if str(variant) == VARIANT_SECOND else legacy_stem(position)
+    slots = read_slots(root, variant=variant)
     pos = int(position)
     if not 0 <= pos < len(slots):
         return None
     return str(slots[pos].get("stem") or "") or None
 
 
-def prev_stem(root: Path, position: int) -> str | None:
+def prev_stem(
+    root: Path,
+    position: int,
+    *,
+    variant: str = VARIANT_FIRST,
+) -> str | None:
     """Previous-generation stem at ``position`` (last render before a churn)."""
-    slots = read_slots(root)
+    slots = read_slots(root, variant=variant)
     pos = int(position)
     if not 0 <= pos < len(slots):
         return None
     return str(slots[pos].get("prev") or "") or None
 
 
-def slot_paths(root: Path, position: int, *, stale: bool = False) -> dict[str, Path] | None:
+def slot_paths(
+    root: Path,
+    position: int,
+    *,
+    stale: bool = False,
+    variant: str = VARIANT_FIRST,
+) -> dict[str, Path] | None:
     """Artefact paths for ``position`` (``stale=True`` → previous generation)."""
-    stem = prev_stem(root, position) if stale else resolve_stem(root, position)
+    stem = (
+        prev_stem(root, position, variant=variant)
+        if stale
+        else resolve_stem(root, position, variant=variant)
+    )
     if not stem:
         return None
     return cache_layout.segment_paths(Path(root), stem)
@@ -267,6 +337,7 @@ def insert_slot(
     content_hash: str,
     *,
     stem: str | None = None,
+    variant: str = VARIANT_FIRST,
 ) -> dict[str, Any]:
     """Add a slot at ``position``; later slots shift down, no file is touched.
 
@@ -274,46 +345,60 @@ def insert_slot(
     the files they already own, the new slot starts out with none.
     """
     with _LOCK:
-        slots = read_slots(root)
+        slots = read_slots(root, variant=variant)
         pos = max(0, min(int(position), len(slots)))
         entry = {
             "hash": str(content_hash),
-            "stem": str(stem).strip() if stem else _allocate(root, content_hash, _used_stems(slots)),
+            "stem": str(stem).strip()
+            if stem
+            else _allocate(root, content_hash, _used_stems(slots), variant),
         }
         slots.insert(pos, entry)
-        write_slots(root, slots)
+        write_slots(root, slots, variant=variant)
         return dict(entry)
 
 
-def remove_slot(root: Path, position: int, *, delete_files: bool = True) -> bool:
+def remove_slot(
+    root: Path,
+    position: int,
+    *,
+    delete_files: bool = True,
+    variant: str = VARIANT_FIRST,
+) -> bool:
     """Remove the slot at ``position`` and, by default, its files.
 
     This is "delete the cache at this position": only this slot's file group is
     unlinked, every other group keeps the files it already has.
     """
     with _LOCK:
-        slots = read_slots(root)
+        slots = read_slots(root, variant=variant)
         pos = int(position)
         if not 0 <= pos < len(slots):
             return False
         entry = slots.pop(pos)
-        write_slots(root, slots)
+        write_slots(root, slots, variant=variant)
     if delete_files:
         delete_stem(root, entry.get("stem"))
         delete_stem(root, entry.get("prev"))
     return True
 
 
-def move_slot(root: Path, src: int, dst: int) -> bool:
+def move_slot(
+    root: Path,
+    src: int,
+    dst: int,
+    *,
+    variant: str = VARIANT_FIRST,
+) -> bool:
     """Move a slot — and therefore its cache — to another position."""
     with _LOCK:
-        slots = read_slots(root)
+        slots = read_slots(root, variant=variant)
         source, dest = int(src), int(dst)
         if not 0 <= source < len(slots):
             return False
         entry = slots.pop(source)
         slots.insert(max(0, min(dest, len(slots))), entry)
-        write_slots(root, slots)
+        write_slots(root, slots, variant=variant)
         return True
 
 
@@ -323,6 +408,7 @@ def sync_slots(
     *,
     adoptable: dict[str, list[str]] | None = None,
     gc: bool = False,
+    variant: str = VARIANT_FIRST,
 ) -> list[dict[str, Any]]:
     """Reconcile the slot list against the current timeline content hashes.
 
@@ -337,6 +423,10 @@ def sync_slots(
 
     and remembers the superseded group as ``prev`` so a fingerprint churn still
     leaves the last render reachable for「选择运行」fills and for export.
+
+    ``variant="2nd"`` runs the same reconciliation against the second-pass map
+    (``segment_slots_2nd.json``) and only ever adopts / allocates / collects
+    ``seg2_*`` file groups, so syncing one pass can never disturb the other.
 
     ``gc`` defaults to **False** on purpose. A plan edit (e.g. re-wording one
     prompt) changes that position's content hash, which allocates a fresh,
@@ -353,11 +443,11 @@ def sync_slots(
     """
     wanted = [str(item) for item in (hashes or [])]
     with _LOCK:
-        previous = read_slots(root)
+        previous = read_slots(root, variant=variant)
         pool: dict[str, list[str]] = {}
         for key, stems in (adoptable or {}).items():
             pool[str(key)] = [str(item) for item in stems if item]
-        for stem in _disk_stems(root):
+        for stem in _disk_stems(root, variant=variant):
             hashed = stem_content_hash(stem)
             if hashed:
                 pool.setdefault(hashed, [])
@@ -379,7 +469,7 @@ def sync_slots(
             if not stem:
                 stem = _take(pool.get(content_hash), used)
             if not stem:
-                stem = _allocate(root, content_hash, used)
+                stem = _allocate(root, content_hash, used, variant)
             used.add(stem)
 
             entry: dict[str, Any] = {"hash": content_hash, "stem": stem}
@@ -392,14 +482,14 @@ def sync_slots(
                 entry["prev"] = kept_prev
             slots.append(entry)
 
-        write_slots(root, slots)
+        write_slots(root, slots, variant=variant)
         if gc:
             keep: set[str] = set()
             for entry in slots:
                 keep.add(entry["stem"])
                 if entry.get("prev"):
                     keep.add(str(entry["prev"]))
-            gc_orphan_files(root, keep)
+            gc_orphan_files(root, keep, variant=variant)
         return [dict(item) for item in slots]
 
 
@@ -427,12 +517,22 @@ def delete_stem(root: Path, stem: str | None) -> int:
     return removed
 
 
-def gc_orphan_files(root: Path, keep_stems: Iterable[str]) -> int:
+def gc_orphan_files(
+    root: Path,
+    keep_stems: Iterable[str],
+    *,
+    variant: str = VARIANT_FIRST,
+) -> int:
     """Delete per-segment artefacts whose stem is not in ``keep_stems``.
 
     Scratch files, the encoding cache and the slot map itself are never touched.
+
+    ``variant`` scopes the sweep to one pass's prefix: garbage-collecting the
+    second-pass map may only ever delete ``seg2_*`` groups — it must never
+    unlink a first-pass render (and vice versa).
     """
     keep = {str(item) for item in keep_stems if item}
+    prefix = variant_prefix(variant)
     removed = 0
     try:
         for path in Path(root).iterdir():
@@ -441,6 +541,8 @@ def gc_orphan_files(root: Path, keep_stems: Iterable[str]) -> int:
             stem = cache_layout.stem_of_filename(path.name)
             if stem is None or stem in keep:
                 continue
+            if not str(stem).startswith(prefix):
+                continue  # the other pass owns this group
             try:
                 path.unlink()
                 removed += 1
@@ -453,8 +555,9 @@ def gc_orphan_files(root: Path, keep_stems: Iterable[str]) -> int:
     return removed
 
 
-def _disk_stems(root: Path) -> list[str]:
-    """Every existing per-segment file stem, hash-named ones first."""
+def _disk_stems(root: Path, variant: str = VARIANT_FIRST) -> list[str]:
+    """Existing per-segment file stems of one pass, hash-named ones first."""
+    prefix = variant_prefix(variant)
     hashed: list[str] = []
     other: list[str] = []
     try:
@@ -462,7 +565,7 @@ def _disk_stems(root: Path) -> list[str]:
             if not path.is_file():
                 continue
             stem = cache_layout.stem_of_filename(path.name)
-            if not stem:
+            if not stem or not str(stem).startswith(prefix):
                 continue
             (hashed if stem_content_hash(stem) else other).append(stem)
     except OSError:
@@ -482,17 +585,22 @@ def _take(candidates: list[str] | None, used: set[str]) -> str:
     return ""
 
 
-def _allocate(root: Path, content_hash: str, used: set[str]) -> str:
-    """Fresh ``seg_<hash>[_n]`` stem that is neither claimed nor on disk."""
+def _allocate(
+    root: Path,
+    content_hash: str,
+    used: set[str],
+    variant: str = VARIANT_FIRST,
+) -> str:
+    """Fresh ``seg_<hash>[_n]`` (or ``seg2_<hash>[_n]``) stem for one pass."""
     for dup in range(0, 64):
-        stem = content_stem(content_hash, dup)
+        stem = content_stem(content_hash, dup, variant=variant)
         if stem in used:
             continue
         if not _stem_on_disk(root, stem):
             return stem
     # Pathological: 64 generations of identical content. Keep going with a
     # time-based suffix rather than overwriting a live file group.
-    return content_stem(content_hash, int(time.time()) % 100000)
+    return content_stem(content_hash, int(time.time()) % 100000, variant=variant)
 
 
 def _stem_on_disk(root: Path, stem: str) -> bool:

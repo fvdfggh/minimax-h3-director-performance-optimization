@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import re
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -310,6 +312,199 @@ def load_conditioning_cache(
         return None
 
 
+#: Per-node map remembering, for every segment, the exact text-encoding +
+#: canvas/sample parameters the FIRST pass sampled it with. The second pass
+#: (「二次采样」) loads conditioning straight from disk and must reproduce the
+#: *same* ``cond_text_<key>.pt`` — its refs are pixel tensors that only exist
+#: while encoding runs, so the key can never be recomputed afterwards. Writing
+#: it when the first pass stores the encoding closes that gap.
+#:
+#: Entries are keyed by the segment's **content hash**, never by its timeline
+#: position: the slot map already proved that a position is not an identity —
+#: inserting or reordering a group shifts every later segment onto another one's
+#: index, and a position-keyed map then hands a segment its neighbour's prompt
+#: *and* still looks valid (the referenced file exists), i.e. it fails silently.
+SEG_PARAMS_MAP = "segment_text_keys.json"
+
+#: Hard cap on how many segments the map keeps. Content-hash keys accumulate one
+#: entry per distinct render, so prompt edits grow the file forever; the oldest
+#: entries are the ones no timeline can reference any more.
+SEG_PARAMS_MAX_ENTRIES = 1024
+
+
+def _seg_params_map_path(node_id: str | None, workflow_name: str | None) -> Path:
+    return _get_cache_dir(node_id, workflow_name) / SEG_PARAMS_MAP
+
+
+def _read_seg_params_map(node_id: str | None, workflow_name: str | None) -> dict[str, dict]:
+    path = _seg_params_map_path(node_id, workflow_name)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        segments = data.get("segments") if isinstance(data, dict) else None
+        if not isinstance(segments, dict):
+            return {}
+        return {str(k): v for k, v in segments.items() if isinstance(v, dict)}
+    except Exception:
+        return {}
+
+
+def _write_seg_params_map(node_id: str | None, workflow_name: str | None, segments: dict) -> None:
+    path = _seg_params_map_path(node_id, workflow_name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"updated": int(time.time()), "segments": segments}
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.warning("Segment params map write skipped (%s).", exc)
+
+
+def _params_key(slot_key, segment_index) -> str:
+    """Map key of one segment: its content hash, or its index as a fallback.
+
+    ``slot_key`` is ``segment_slots``' content hash (prompt + references +
+    duration + sampling). The positional fallback only exists for callers that
+    have no plan at hand; it is never correct after a timeline edit, so the
+    second pass must always pass the hash.
+    """
+    text = str(slot_key or "").strip()
+    return text if text else str(int(segment_index))
+
+
+def save_segment_second_params(
+    node_id: str | None,
+    workflow_name: str | None,
+    segment_index: int,
+    *,
+    slot_key: str | None = None,
+    text_key: str = "",
+    ctx_w: int = 0,
+    ctx_h: int = 0,
+    sample_len: int = 0,
+    num_frames: int = 0,
+    frame_count: int = 0,
+    context_n: int = 0,
+    task_key: str = "",
+    ref_image_size: str = "match",
+    positive_prompt: str = "",
+) -> None:
+    """Remember the first-pass text/context identity of one segment.
+
+    ``context_n`` is the number of context frames the first pass *actually*
+    pinned (0 when it pinned nothing, e.g. because the previous segment had not
+    been sampled in that run). The cached encoding only has room for that many
+    head frames, so the second pass has to reuse this exact number instead of
+    re-deriving it from the widget.
+    """
+    if not node_id:
+        return
+    segments = _read_seg_params_map(node_id, workflow_name)
+    segments[_params_key(slot_key, segment_index)] = {
+        "text_key": str(text_key or ""),
+        "ctx_w": int(ctx_w or 0),
+        "ctx_h": int(ctx_h or 0),
+        "sample_len": int(sample_len or 0),
+        "num_frames": int(num_frames or 0),
+        "frame_count": int(frame_count or 0),
+        "context_n": int(context_n or 0),
+        "task_key": str(task_key or ""),
+        "ref_image_size": str(ref_image_size or "match"),
+        "positive_prompt": str(positive_prompt or ""),
+        "ts": int(time.time()),
+    }
+    if len(segments) > SEG_PARAMS_MAX_ENTRIES:
+        # Content-hash keys never reuse a slot, so an edited prompt leaves its
+        # predecessor behind. Keep the newest ones — an entry no timeline can
+        # reference is worthless, and without a cap the map grows unbounded.
+        for stale in sorted(
+            segments, key=lambda k: int(segments[k].get("ts") or 0)
+        )[: len(segments) - SEG_PARAMS_MAX_ENTRIES]:
+            segments.pop(stale, None)
+    _write_seg_params_map(node_id, workflow_name, segments)
+
+
+def load_segment_second_params(
+    node_id: str | None,
+    workflow_name: str | None,
+    segment_index: int,
+    *,
+    slot_key: str | None = None,
+) -> dict | None:
+    """First-pass params a segment was sampled with, or ``None`` (no map entry).
+
+    ``slot_key`` must be the segment's content hash (see :func:`_params_key`).
+    Reading by position is only a last-resort fallback and is deliberately NOT
+    applied when a hash is supplied: after a timeline reorder the entry sitting
+    at that index belongs to a different segment.
+    """
+    if not node_id:
+        return None
+    segments = _read_seg_params_map(node_id, workflow_name)
+    entry = segments.get(_params_key(slot_key, segment_index))
+    return dict(entry) if entry else None
+
+
+def load_conditioning_by_key(
+    node_id: str | None,
+    workflow_name: str | None,
+    text_key: str,
+) -> dict | None:
+    """Load a cached text encoding straight from its known hash key.
+
+    The second pass (「二次采样」) cannot recompute ``text_key`` — it needs the
+    reference pixels that only exist while encoding runs — so it reads the key
+    the first pass recorded (``load_segment_second_params``) and loads by it.
+    Tensors are moved to CUDA, mirroring :func:`load_conditioning_cache`.
+    """
+    if not node_id or not str(text_key or "").strip():
+        return None
+    try:
+        cache_dir = _get_cache_dir(node_id, workflow_name)
+        cache_file = cache_dir / f"{_TEXT_PREFIX}_{str(text_key).strip()}.pt"
+        if not cache_file.is_file():
+            log.debug("No conditioning cache hit for key=%s", text_key)
+            return None
+
+        cache_data = torch.load(cache_file, map_location="cpu", weights_only=False)
+        if not isinstance(cache_data, dict) or "positive" not in cache_data:
+            return None
+
+        def move_to_device(cond):
+            if cond is None:
+                return None
+            if isinstance(cond, torch.Tensor):
+                return cond.cuda()
+            if isinstance(cond, (list, tuple)):
+                out = []
+                for item in cond:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        tensor = item[0]
+                        if hasattr(tensor, "cuda"):
+                            tensor = tensor.cuda()
+                        out.append([tensor, item[1]])
+                    else:
+                        moved = move_to_device(item)
+                        out.append(moved)
+                return out
+            if isinstance(cond, dict):
+                return {k: move_to_device(v) for k, v in cond.items()}
+            return cond
+
+        return {
+            "positive": move_to_device(cache_data.get("positive")),
+            "negative": move_to_device(cache_data.get("negative")),
+            "latent": None,
+            "metadata": cache_data.get("metadata", {}),
+        }
+    except Exception as exc:
+        log.warning("Failed to load conditioning by key %s: %s", text_key, exc)
+        return None
+
+
 def clear_conditioning_cache(
     node_id: str | None = None,
     segment_index: int | None = None,
@@ -332,6 +527,13 @@ def clear_conditioning_cache(
         for f in cache_dir.glob(f"{_TEXT_PREFIX}_*.pt"):
             f.unlink()
             deleted += 1
+
+        map_path = _seg_params_map_path(node_id, workflow_name)
+        try:
+            if map_path.is_file():
+                map_path.unlink()
+        except OSError:
+            pass
         
         log.info("Cleared %d conditioning cache files", deleted)
         return deleted

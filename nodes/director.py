@@ -7,6 +7,10 @@ import logging
 import comfy.samplers
 
 from ..director.batch_executor import execute_director_batch
+from ..director.second_sampling import (
+    DEFAULT_SECOND_SIGMA_SAMPLER,
+    DEFAULT_SECOND_SIGMAS,
+)
 from .director_common import (
     CLEAR_VRAM_BETWEEN_SEGMENTS,
     EXPORT_SOURCE_IMAGES,
@@ -247,6 +251,67 @@ class MiniMaxH3Director:
                         ),
                     },
                 ),
+                # ── 二级采样（二采）──────────────────────────────────────────
+                # 刻意放在 optional 最末尾：新增 widget 会占用 widgets_values 下标，
+                # 插在既有控件之前会让旧工作流整体错位。
+                "bd_grp_second": ("BDGROUP", {"default": "二级采样"}),
+                "upscale_model": (
+                    "LATENT_UPSCALE_MODEL",
+                    {
+                        "tooltip": (
+                            "二级采样专用放大模型：接 MiniMax H3 Latent Upscaler (3D) [Model] 节点"
+                            "（nodes/latent_upscaler_3d.py）。运行时先把缓存 latent 放大再二次采样；"
+                            "二采硬性要求连接此模型，未连接则二采直接报错。"
+                        ),
+                    },
+                ),
+                "second_sigmas": (
+                    "SIGMAS",
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "二级采样（二采）专用噪声调度：接 BasicScheduler 或 ManualSigmas。"
+                            "与「使用 sigmas」相互独立——这是二采自己的调度。"
+                            f"未接线时自动使用默认海螺二采调度 {list(DEFAULT_SECOND_SIGMAS)}"
+                            f"（{DEFAULT_SECOND_SIGMA_SAMPLER} {len(DEFAULT_SECOND_SIGMAS) - 1} 步）。"
+                        ),
+                    },
+                ),
+                "second_seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "control_after_generate": True,
+                        "tooltip": "二级采样（二采）随机数种子。",
+                    },
+                ),
+                "second_run_model": (
+                    list(RUN_MODEL_CHOICES),
+                    {
+                        "default": RUN_MODEL_MAIN,
+                        "tooltip": (
+                            "二级采样用哪个 MODEL 口：主模型 model，或备用口 model_b / model_c；"
+                            "选中的口未接线时自动回退到主模型 model。"
+                        ),
+                    },
+                ),
+                "second_denoise": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": (
+                            "二级采样（二采）去噪强度 denoise（0.0~1.0，默认 1.0）。"
+                            "二采硬性走自定义 SIGMAS，故 denoise 通过缩放整条噪声调度生效："
+                            "首 sigma 变为 denoise×sigma[0]，步数不变、起始噪声更小，"
+                            "从而保留更多原 latent。1.0 = 完全重采样；越接近 0 越接近原图。"
+                        ),
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -314,6 +379,12 @@ class MiniMaxH3Director:
         workflow_name=None,
         sigmas=None,
         use_sigmas=False,
+        # ── 二级采样（二采）—— 参数名与 INPUT_TYPES 末尾一致 ──
+        upscale_model=None,
+        second_seed=0,
+        second_run_model=RUN_MODEL_MAIN,
+        second_sigmas=None,
+        second_denoise=1.0,
         **kwargs,
     ):
         del kwargs  # dropped widgets (batch_mode / use_conditioning_cache / ...) land here
@@ -354,6 +425,141 @@ class MiniMaxH3Director:
             i2v_groups=i2v_groups,
             r2v_groups=r2v_groups,
         )
+
+        # 二次采样 (second pass): 当时间线携带 secondSample 一次性触发时，跳过一采，
+        # 直接对已有缓存段做 放大 + 重采样 + 连续合并出片，不与「运行」混用。
+        _second_req = getattr(plan, "second_sample", None)
+        if _second_req is not None and getattr(_second_req, "enabled", False) and getattr(
+            _second_req, "indices", None
+        ):
+            import torch
+            from ..director.second_sampling import run_second_sampling
+
+            _second_model, _second_note = resolve_run_model(
+                second_run_model, model=model, model_b=model_b, model_c=model_c
+            )
+            log.info("MiniMax H3 Director: 二次采样使用模型 %s", _second_note)
+
+            # 二采硬性要求放大模型：未连接直接报错，不再静默回退到原分辨率。
+            if upscale_model is None:
+                _report = (
+                    "二次采样失败：必须连接放大模型 (upscale_model)。\n"
+                    "请在节点上接入 MiniMax H3 Latent Upscaler (3D) [Model] 节点"
+                    "（nodes/latent_upscaler_3d.py），再触发二采。"
+                )
+                return (
+                    [torch.zeros(1, 1, 1, 3)],
+                    [{"waveform": torch.zeros(1, 1, 1), "sample_rate": int(plan.frame_rate or 24)}],
+                    float(plan.frame_rate or 24),
+                    0,
+                    [torch.zeros(1, 1, 1, 3)],
+                    _report,
+                )
+
+            # 二采 sigmas：未接线 → 默认海螺二采调度（euler 3 步，与已删除的
+            # MiniMaxH3DirectorRefine 默认一致）；自行接线则沿用高级采样里的 sampler。
+            _second_sigmas_eff = (
+                second_sigmas if second_sigmas is not None else DEFAULT_SECOND_SIGMAS
+            )
+            _second_sampler_eff = (
+                DEFAULT_SECOND_SIGMA_SAMPLER if second_sigmas is None else sampler
+            )
+            _sampled = run_second_sampling(
+                node_id=unique_id,
+                workflow_name=workflow_name,
+                plan=plan,
+                all_segments=plan.segments,
+                selected_indices=list(_second_req.indices),
+                model=_second_model,
+                vae=video_vae,
+                audio_vae=audio_vae,
+                upscale_model=upscale_model,
+                second_seed=second_seed,
+                second_cfg=cfg,
+                second_steps=steps,
+                second_sampler=_second_sampler_eff,
+                second_scheduler=scheduler,
+                second_shift_video=shift_video,
+                second_shift_audio=shift_audio,
+                second_sigmas=_second_sigmas_eff,
+                second_denoise=second_denoise,
+                audio_mode="movie",
+                decode_audio=True,
+            )
+            if _sampled.get("error"):
+                _report = f"二次采样失败：{_sampled['error']}"
+                return (
+                    [torch.zeros(1, 1, 1, 3)],
+                    [{"waveform": torch.zeros(1, 1, 1), "sample_rate": int(plan.frame_rate or 24)}],
+                    float(plan.frame_rate or 24),
+                    0,
+                    [torch.zeros(1, 1, 1, 3)],
+                    _report,
+                )
+            # 出片在 run_second_sampling 内部按「相邻段」分批完成（避免所有段的
+            # 解码帧同时驻留内存），这里只取汇总结果。
+            _export = _sampled.get("export") or {}
+
+            def _fmt(items: list[dict]) -> list[str]:
+                out = []
+                for it in items or []:
+                    try:
+                        label = f"#{int(it.get('index', -1)) + 1}"
+                    except (TypeError, ValueError):
+                        label = "?"
+                    out.append(f"  {label} [{it.get('stage', '?')}] {it.get('reason', '')}")
+                return out
+
+            _done = sorted({int(i) for i in _second_req.indices})
+            _ok = _sampled.get("results") or {}
+            _files = _export.get("files", []) if isinstance(_export, dict) else []
+            _lines = [
+                f"二次采样完成：勾选 {len(_done)} 段，成功 {len(_ok)} 段 → {len(_files)} 个文件",
+                f"噪声调度：{_sampled.get('schedule', '未知')}",
+            ]
+            _failures = _fmt(_sampled.get("failures") or [])
+            if _failures:
+                _lines.append(f"失败 {len(_failures)} 段（这些段没有产出）：")
+                _lines.extend(_failures)
+            _warns = _fmt(_sampled.get("warnings") or [])
+            if _warns:
+                _lines.append("告警：")
+                _lines.extend(_warns)
+            _lines.append("输出文件：" if _files else "（无输出文件）")
+            _lines.extend(f"  {p}" for p in _files)
+            _report = "\n".join(_lines)
+            # 与一采统一解码：用真实二采帧走 finalize_director_outputs 输出 IMAGE/AUDIO，
+            # 不再回退到 1x1 占位帧（否则下游 VideoCombine 会以 libx264 无法开启崩溃）。
+            _second = _sampled.get("second_chunks") or []
+            _second_aud = _sampled.get("second_audios") or []
+            _second_order = _sampled.get("second_order") or []
+            _pairs = sorted(
+                zip(_second_order, _second, _second_aud),
+                key=lambda t: int(t[0]),
+            )
+            _second = [p[1] for p in _pairs]
+            _second_aud = [p[2] for p in _pairs]
+            if _second:
+                _combined = torch.cat(_second, dim=0)
+                _frame_counts = [int(t.shape[0]) for t in _second]
+                result = finalize_director_outputs(
+                    plan,
+                    _combined,
+                    list(_second),
+                    _report,
+                    export_source_images=EXPORT_SOURCE_IMAGES,
+                    segment_audios=list(_second_aud),
+                    segment_frame_counts=_frame_counts,
+                )
+            else:
+                result = finalize_director_outputs(
+                    plan,
+                    None,
+                    [],
+                    _report,
+                    export_source_images=EXPORT_SOURCE_IMAGES,
+                )
+            return result
 
         model, model_note = resolve_run_model(
             run_model, model=model, model_b=model_b, model_c=model_c

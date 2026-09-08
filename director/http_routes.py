@@ -570,19 +570,22 @@ async def minimax_clear_cache(request):
             except OSError as exc:
                 log.warning("MiniMax H3 Director clear scratch %s failed: %s", path, exc)
 
-    # 3) clear_all → also wipe durable segment files so the next run must re-render
+    # 3) clear_all → also wipe durable segment files (both passes) so the next
+    #    run must re-render. ``seg2_*`` is the「二级采样」cache family.
     if clear_all and cache_dir.is_dir():
-        for path in list(cache_dir.glob("seg_*")):
-            if not path.is_file():
-                continue
-            try:
-                path.unlink()
-                cleared["segments"] += 1
-            except OSError as exc:
-                log.warning("MiniMax H3 Director clear segment %s failed: %s", path, exc)
-        # The slot map names those files; drop it too so the next run rebuilds
+        for glob in cache_layout.SEGMENT_GLOBS:
+            for path in list(cache_dir.glob(glob)):
+                if not path.is_file():
+                    continue
+                try:
+                    path.unlink()
+                    cleared["segments"] += 1
+                except OSError as exc:
+                    log.warning("MiniMax H3 Director clear segment %s failed: %s", path, exc)
+        # The slot maps name those files; drop them too so the next run rebuilds
         # the position → files mapping from scratch.
         segment_slots.clear_slots(cache_dir)
+        segment_slots.clear_slots(cache_dir, variant=segment_slots.VARIANT_SECOND)
 
     log.info(
         "MiniMax H3 Director cleared caches for node %s (workflow '%s', clear_all=%s): %s",
@@ -606,10 +609,16 @@ async def minimax_segment_export_status(request):
     if isinstance(timeline_data, dict):
         timeline_data = json.dumps(timeline_data, ensure_ascii=False)
     try:
-        from .plan import build_director_plan
+        from .plan import build_director_plan, normalize_segment_export_source
         from .segment_cache import inspect_segment_export_status, sync_segment_slots
+        from .segment_slots import VARIANT_SECOND
 
         workflow_name = str(body.get("workflow_name") or "").strip() or None
+        # Which pass the picker is showing: the availability probe must answer
+        # for that pass only, so switching to「二采」greys out segments that have
+        # no ``seg2_*`` cache instead of reporting the first-pass render.
+        source = normalize_segment_export_source(body.get("source") or body.get("cacheSource"))
+        variant = VARIANT_SECOND if source == "2nd" else "1st"
 
         plan = build_director_plan(
             str(timeline_data),
@@ -623,10 +632,63 @@ async def minimax_segment_export_status(request):
         )
         # Reconcile first: the picker must not offer a render that belongs to a
         # group deleted from the middle of the timeline.
-        sync_segment_slots(node_id, plan, workflow_name=workflow_name)
-        return web.json_response(inspect_segment_export_status(node_id, plan, workflow_name=workflow_name))
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name, variant=variant)
+        return web.json_response(
+            inspect_segment_export_status(node_id, plan, workflow_name=workflow_name, variant=variant)
+        )
     except Exception as exc:
         log.warning("MiniMax H3 Director segment-export status failed: %s", exc)
+        return web.json_response({"segments": [], "error": str(exc)}, status=400)
+
+
+async def minimax_second_sample_status(request):
+    """Availability of every segment for「二次采样」(what the picker greys out).
+
+    A segment is second-sampleable only when its **first-pass latent** is cached
+    AND the node holds a **text encoding cache** — mirroring how「分段导出」
+    probes the same slot map for clip / latent, but for the second-pass source.
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    timeline_data = body.get("timeline_data") or ""
+    if isinstance(timeline_data, dict):
+        timeline_data = json.dumps(timeline_data, ensure_ascii=False)
+    try:
+        from .plan import build_director_plan
+        from .segment_cache import (
+            inspect_second_sample_status,
+            sync_second_segment_slots,
+            sync_segment_slots,
+        )
+
+        workflow_name = str(body.get("workflow_name") or "").strip() or None
+
+        plan = build_director_plan(
+            str(timeline_data),
+            global_task_type=str(body.get("task_type") or ""),
+            global_prompt=str(body.get("global_prompt") or ""),
+            total_frames=int(body.get("total_frames") or 124),
+            frame_rate=float(body.get("frame_rate") or 24.0),
+            width=int(body.get("width") or 864),
+            height=int(body.get("height") or 480),
+            ref_max_size=int(body.get("ref_max_size") or 864),
+        )
+        # Reconcile both passes first so the picker never offers a segment whose
+        # position belongs to a group deleted from the middle of the timeline.
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name)
+        sync_second_segment_slots(node_id, plan, workflow_name=workflow_name)
+        return web.json_response(
+            inspect_second_sample_status(node_id, plan, workflow_name=workflow_name)
+        )
+    except Exception as exc:
+        log.warning("MiniMax H3 Director second-sample status failed: %s", exc)
         return web.json_response({"segments": [], "error": str(exc)}, status=400)
 
 
@@ -767,9 +829,13 @@ async def minimax_segment_export(request):
 
     try:
         from .plan import build_director_plan, normalize_segment_export_mode
+        from .plan import normalize_segment_export_source
         from .segment_cache import run_segment_export, sync_segment_slots
+        from .segment_slots import VARIANT_SECOND
 
         mode = normalize_segment_export_mode(mode)
+        source = normalize_segment_export_source(body.get("source") or body.get("cacheSource"))
+        variant = VARIANT_SECOND if source == "2nd" else "1st"
         try:
             indices = [int(i) for i in raw_indices]
         except (TypeError, ValueError):
@@ -788,7 +854,7 @@ async def minimax_segment_export(request):
         workflow_name = str(body.get("workflow_name") or "").strip() or None
         # Reconcile before exporting: never copy out a file group that belongs
         # to a group already deleted from the timeline.
-        sync_segment_slots(node_id, plan, workflow_name=workflow_name)
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name, variant=variant)
         # Disk-only export: clip cache / raw frame cache. Latent-only segments
         # cannot be decoded here (no VAE in an HTTP request), so they are skipped
         # with a hint — the full latent decode happens during node execution when
@@ -800,6 +866,7 @@ async def minimax_segment_export(request):
             indices,
             mode=mode,
             workflow_name=workflow_name,
+            variant=variant,
         )
         return web.json_response(result)
     except Exception as exc:
@@ -853,6 +920,12 @@ def register_routes() -> bool:
         "POST",
         "/minimax/director/segment_export_status",
         minimax_segment_export_status,
+    )
+    _register_route(
+        routes,
+        "POST",
+        "/minimax/director/second_sample_status",
+        minimax_second_sample_status,
     )
     _register_route(
         routes,

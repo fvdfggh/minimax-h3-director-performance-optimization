@@ -26,6 +26,7 @@ from .h3_motion_context import (
     snap_context_frames,
 )
 from .plan import DirectorPlan, SegmentPlan, wan_align_frame_count
+from . import segment_slots
 from .segment_cache import load_segment_cache
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.continuity")
@@ -1652,6 +1653,7 @@ def concat_chunks_lazy(
     *,
     fill: float = 0.5,
     workflow_name: str | None = None,
+    variant: str = segment_slots.VARIANT_FIRST,
 ) -> torch.Tensor:
     """Streaming merge: allocate the result once, then copy each segment in.
 
@@ -1686,7 +1688,8 @@ def concat_chunks_lazy(
     def _load_seg_fp(node_id, seg, plan, *, allow_stale=False, workflow_name=None):
         return _load_seg(
             node_id, seg, plan,
-            allow_stale=allow_stale, return_fp=True, workflow_name=workflow_name,
+            allow_stale=allow_stale, return_fp=True,
+            workflow_name=workflow_name, variant=variant,
         )
 
     if not export_segments:
@@ -1746,9 +1749,11 @@ def concat_chunks_lazy(
             # already dropped the continuity prefix), matching what the merge wants.
             shapes.append(tuple(int(d) for d in in_mem.shape))
             continue
-        shape = _probe_seg(node_id, seg, plan, workflow_name=workflow_name)
+        shape = _probe_seg(node_id, seg, plan, workflow_name=workflow_name, variant=variant)
         if shape is None:
-            shape = _probe_seg(node_id, seg, plan, allow_stale=True, workflow_name=workflow_name)
+            shape = _probe_seg(
+                node_id, seg, plan, allow_stale=True, workflow_name=workflow_name, variant=variant
+            )
         if shape is None:
             # Legacy / unreadable header: fall back to a full read, and keep the
             # pixels in ``overrides`` so pass 2 does not read them twice. Apply the

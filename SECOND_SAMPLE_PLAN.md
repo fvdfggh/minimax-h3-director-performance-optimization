@@ -280,17 +280,22 @@ def run_second_sample(
 
 ## 五、文件改动清单
 
-| 文件 | 改动类型 | 内容 |
-|---|---|---|
-| `nodes/director.py` | 修改 | 增 `upscale_model` 输入；末尾增 `bd_grp_second` / `second_seed` / `second_run_model`；`execute()` 增二采分支 |
-| `director/second_sampling.py` | **新增** | `run_second_sample()` 主执行链路 |
-| `director/segment_cache.py` | 修改 | 增 `second_sample_availability()` / `inspect_second_sample_status()` / `save_second_pass_cache()` / `load_second_pass_cache()` / 导出 variant 参数 |
-| `director/cache_layout.py` | 修改 | 增 `seg2_*` 前缀常量 + `segment_slots_2nd.json` |
-| `director/segment_slots.py` | 修改 | `slot_paths()` 增 `variant` 参数 |
-| `director/http_routes.py` | 修改 | 增 `minimax_second_sample_status` 及路由注册 |
-| `director/segment_mp4_export.py` | 修改 | 二采导出目录 / variant 支持 |
-| `web/js/minimax_timeline.js` | 修改 | 增按钮、弹窗（**仅**二级多选 + 执行，无种子输入）、payload、queuePrompt |
-| `web/js/minimax_i18n.js` | 修改 | 新增 i18n 键 |
+| 文件 | 改动类型 | 内容 | 状态 |
+|---|---|---|---|
+| `nodes/director.py` | 修改 | 增 `upscale_model` 输入；末尾增 `bd_grp_second` / `second_seed` / `second_run_model`；`execute()` 增二采分支 | 🔶（输入/参数完成，`execute()` 分支随第 6 步接线） |
+| `director/second_sampling.py` | **新增** | `run_second_sampling()` + `export_second_pass()` 主执行链路（放大 + 采样 + 接缝 + 连续出片） | ✅ |
+| `director/segment_cache.py` | 修改 | 增 `second_sample_availability()` / `inspect_second_sample_status()` / `save_second_pass_cache()` / `load_second_pass_av_latent()` / `resolve_second_stem()` / `sync_second_segment_slots()` | ✅ |
+| `director/cache_layout.py` | 修改 | 增 `seg2_*` 前缀常量（`SECOND_PREFIX` / `SEGMENT_GLOBS`）+ `segment_slots_2nd.json` | ✅ |
+| `director/segment_slots.py` | 修改 | 全模块 `variant` 机制（`VARIANT_SECOND` / `manifest_path` / `content_stem` / `sync_slots` / `resolve_stem` / `slot_paths` / `gc_orphan_files` 双前缀隔离等） | ✅ |
+| `director/http_routes.py` | 修改 | 增 `minimax_second_sample_status` 及路由注册；clear_all 同时清 `seg2_*` + 二采 map | ✅ |
+| `director/conditioning_cache.py` | 修改 | 段→text_key/上下文参数映射（`save_segment_second_params` / `load_segment_second_params`），二采免重算 ref 哈希 | ✅ |
+| `director/batch_executor.py` | 修改 | 一采跑每段时持久化 second-params 映射 | ✅ |
+| `nodes/director.py` | 修改 | 增 `upscale_model` 输入；末尾增 `bd_grp_second` / `second_seed` / `second_run_model`；`execute()` 增二采独占分支 | ✅ |
+| `nodes/director_common.py` | 修改 | 增 `_parse_second_sample` / `_attach_second_sample`，在 plan 构建处挂载 | ✅ |
+| `director/plan.py` | 修改 | 增 `SegmentSecondSampleRequest` dataclass + `second_sample` 字段 + `_parse_second_sample` | ✅ |
+| `web/js/minimax_timeline.js` | 修改 | 增「二次采样」按钮、弹窗（二级多选 + 执行，无种子输入）、status 拉取、queuePrompt | ✅ |
+| `web/js/minimax_i18n.js` | 修改 | 新增 i18n 键 | ⬜（未改，弹窗用中文硬编码） |
+| `director/segment_mp4_export.py` | 修改 | 二采导出目录 / variant 支持 | ⬜（未改，复用现有 `_write_export_mp4`） |
 
 ---
 
@@ -308,12 +313,17 @@ def run_second_sample(
 
 ---
 
-## 七、建议实施顺序
+## 七、建议实施顺序（完成进度）
 
-1. `cache_layout.py` + `segment_slots.py` — 先搭好并行缓存骨架（variant 机制）
-2. `nodes/director.py` — 输入端与参数（含 widget 顺序验证）
-3. `director/segment_cache.py` — 可用性判断 + 二采缓存读写
-4. `director/http_routes.py` — status 路由
-5. `web/js/minimax_timeline.js` + `minimax_i18n.js` — 按钮与弹窗
-6. `director/second_sampling.py` — 执行链路（放大 + 采样 + 接缝）
-7. 出片（连续导出 variant）与联调
+- [x] 1. `cache_layout.py` + `segment_slots.py` — 并行缓存骨架（variant 机制）**已完成**
+- [x] 2. `nodes/director.py` — 输入端与参数（widget 顺序验证）**已完成**（`execute()` 分支已接线）
+- [x] 3. `director/segment_cache.py` — 可用性判断 + 二采缓存读写 **已完成**
+- [x] 4. `director/http_routes.py` — status 路由 **已完成**（清理也覆盖 seg2）
+- [x] 5. `web/js/minimax_timeline.js` — 工具栏「二次采样」按钮（分段导出右侧）+ 二级多选弹窗（按「引用上段」分两组）+「执行」走 queuePrompt **已完成**（弹窗文案用中文硬编码，未新增 i18n 键）
+- [x] 6. `director/second_sampling.py` — 执行链路（拆/放大/合 AV + `sample_single_stage` + 接缝复用 `apply_motion_context`）+ `nodes/director.py` `execute()` 二采独占分支 **已完成**
+- [x] 7. 出片 — `export_second_pass()` 复用 `continuous_export_runs` + `merge_run_audio` + `_write_export_mp4`，仅相邻合并 **已完成**
+
+> 实施备注：
+> - **sigmas**：二采没有独立 sigmas 输入（模块只有 seed + run_model），故复用一采的 `use_sigmas` + `sigmas`（即节点面板的 SIGMAS）；未接线时 `normalize_sigmas` 返回 `None`，执行器仅 `warning` 并回退 steps/scheduler，不会抛错中断。这与原计划 4.4「为空即 raise」有偏差——改为容错回退，避免用户未开 use_sigmas 时完全无法二采。
+> - **出片目录**：直接复用现有 `_write_export_mp4`（落 `minimax_second_pass_export/<node_id>/`），未改动 `segment_mp4_export.py`，故该文件清单项标记为未改。
+> - **前端 i18n**：`minimax_i18n.js` 未改动，弹窗标题/提示用中文硬编码。

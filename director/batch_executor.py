@@ -27,6 +27,7 @@ from .conditioning_cache import (
     clear_conditioning_cache,
     load_conditioning_cache,
     save_conditioning_cache,
+    save_segment_second_params,
     slugify_workflow_name,
     text_cache_key,
 )
@@ -58,7 +59,7 @@ from .segment_cache import (
     load_next_segment_av_latent,
     load_segment_audio, load_segment_av_latent,
     load_segment_handoff_meta, probe_segment_cache_shape,
-    save_segment_cache,
+    save_segment_cache, slot_content_hash,
     sync_segment_slots,
 )
 from .segment_mp4_export import (
@@ -843,6 +844,7 @@ def _assemble_export_list(
     completed_audios: dict[int, dict],
     reports: list[str],
     workflow_name: str | None = None,
+    variant: str = segment_slots.VARIANT_FIRST,
 ) -> tuple[list, list[dict], list[int], dict[int, torch.Tensor]]:
     """Timeline-ordered export list for「全部导出」.
 
@@ -851,6 +853,10 @@ def _assemble_export_list(
     fingerprint first, then stale) or a source passthrough.
     Returns ``(segments, audios, frame_counts, memory_chunks)``
     aligned 1:1.
+
+    ``variant`` picks which pass's cache fills an unselected slot — it is the
+    picker's「缓存来源」toggle, so a「二采」merge must never pull a first-pass
+    render in here (that would silently undo the upscale).
 
     ``memory_chunks`` holds the passthrough fills: those exist **only** in RAM,
     so they must be handed to ``concat_chunks_lazy`` as overrides instead of
@@ -874,16 +880,22 @@ def _assemble_export_list(
         # Probe the header only: this branch used to load the whole clip just to
         # read ``shape[0]`` and then throw the pixels away, so every unselected
         # segment was read twice per run (once here, once by the merge).
-        cached_shape = probe_segment_cache_shape(node_id, seg, plan, workflow_name=workflow_name)
+        cached_shape = probe_segment_cache_shape(
+            node_id, seg, plan, workflow_name=workflow_name, variant=variant
+        )
         used_stale = False
         if cached_shape is None:
             cached_shape = probe_segment_cache_shape(
-                node_id, seg, plan, allow_stale=True, workflow_name=workflow_name
+                node_id, seg, plan, allow_stale=True,
+                workflow_name=workflow_name, variant=variant,
             )
             used_stale = cached_shape is not None
         if cached_shape is not None:
             n_frames = int(cached_shape[0])
-            cached_audio = load_segment_audio(node_id, seg, plan, allow_stale=used_stale, workflow_name=workflow_name)
+            cached_audio = load_segment_audio(
+                node_id, seg, plan, allow_stale=used_stale,
+                workflow_name=workflow_name, variant=variant,
+            )
             if not isinstance(cached_audio, dict):
                 cached_audio = {}
             segments.append(seg)
@@ -1170,6 +1182,27 @@ def execute_director_batch(
             ref_image_size, ref_images,
         )
         used_text_keys.add(text_key)
+        # Remember this segment's first-pass text/context identity on disk so a
+        # later「二次采样」can load the *same* conditioning file without re-hashing
+        # refs (pixel tensors that no longer exist once this run ends).
+        # Keyed by content hash, not by position: a later timeline reorder must
+        # not let one segment pick up another's encoding.
+        save_segment_second_params(
+            node_id=node_id,
+            workflow_name=workflow_name,
+            segment_index=seg.index,
+            slot_key=slot_content_hash(seg, plan),
+            text_key=text_key,
+            ctx_w=ctx_w,
+            ctx_h=ctx_h,
+            sample_len=sample_len,
+            num_frames=num_frames,
+            frame_count=getattr(seg, "frame_count", 0) or num_frames,
+            context_n=context_n,
+            task_key=seg.task_key,
+            ref_image_size=ref_image_size,
+            positive_prompt=positive_prompt,
+        )
 
         # Try conditioning cache first
         cached_conditioning = None
@@ -1823,12 +1856,21 @@ def execute_director_batch(
         # below reads frames directly — no repeated per-consumer VAE decode.
         from .segment_cache import predecode_latent_segments as _predecode
 
+        # 「缓存来源」(一采 seg_* / 二采 seg2_*) decides which pass's cache the
+        # whole export below reads. Without threading it through, a「二采」export
+        # silently pulled the first-pass render and undid the upscale.
+        _seg_variant = (
+            segment_slots.VARIANT_SECOND
+            if seg_export.normalized_source() == segment_slots.VARIANT_SECOND
+            else segment_slots.VARIANT_FIRST
+        )
         _predecode(
             node_id,
             plan,
             list(seg_export.indices),
             vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None,
             workflow_name=workflow_name,
+            variant=_seg_variant,
         )
         wanted_segs = [s for s in all_segments if int(s.index) in set(seg_export.indices)]
         export_segments_list, segment_audios, export_frame_counts, merge_overrides = (
@@ -1838,6 +1880,7 @@ def execute_director_batch(
                 completed_audios=completed_audios,
                 reports=reports,
                 workflow_name=workflow_name,
+                variant=_seg_variant,
             )
         )
         # 「分段导出」must NOT merge the checked segments into one video on the
@@ -1858,7 +1901,12 @@ def execute_director_batch(
             s = seg_by_index.get(idx)
             if s is None:
                 continue
-            src = _seg_src(node_id, s, plan, vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None, workflow_name=workflow_name)
+            src = _seg_src(
+                node_id, s, plan,
+                vae=(vae, audio_vae) if (vae is not None or audio_vae is not None) else None,
+                workflow_name=workflow_name,
+                variant=_seg_variant,
+            )
             if src is not None:
                 frame_by_index[idx] = src[0]
                 audio_by_index[idx] = src[1] if isinstance(src[1], dict) else {}
@@ -1872,8 +1920,9 @@ def execute_director_batch(
 
         _seg_mode = seg_export.normalized_mode()
         log.info(
-            "分段导出: mode=%s checked=%s frames_loaded=%s",
-            _seg_mode, sorted(set(int(i) for i in seg_export.indices)), sorted(frame_by_index),
+            "分段导出: mode=%s source=%s checked=%s frames_loaded=%s",
+            _seg_mode, _seg_variant,
+            sorted(set(int(i) for i in seg_export.indices)), sorted(frame_by_index),
         )
         if _seg_mode == "continuous":
             # 连续导出: one clip per contiguous run (stitched with the streaming
@@ -1908,6 +1957,7 @@ def execute_director_batch(
                         [seg_by_index[i] for i in run],
                         overrides={i: frame_by_index[i] for i in run},
                         workflow_name=workflow_name,
+                        variant=_seg_variant,
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     log.warning(

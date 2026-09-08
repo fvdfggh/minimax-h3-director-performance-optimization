@@ -15,7 +15,7 @@ from ..director.audio_export import (
 )
 from ..director.frame_align import pad_or_trim_frames
 from ..director.gen_timeline import is_prompt_batch_timeline, is_video_batch_task_key
-from ..director.plan import build_director_plan, count_all_timeline_segments, count_timeline_segments, plan_summary
+from ..director.plan import build_director_plan, count_all_timeline_segments, count_timeline_segments, plan_summary, _parse_second_sample
 from ..director.progress import report_director_planning
 from ..lib.image_prep import fit_canvas, fit_video_long_edge
 from ..lib.video_io import load_timeline_segment
@@ -223,6 +223,7 @@ def prepare_director_plan(
             ref_max_size=ref_max_size,
         )
         _attach_segment_export(plan, timeline_data)
+        _attach_second_sample(plan, timeline_data)
         log.info(
             "MiniMax H3 Director: external %s groups × %d (task=%s) | %s",
             family,
@@ -249,6 +250,7 @@ def prepare_director_plan(
         ref_max_size=ref_max_size,
     )
     _attach_segment_export(plan, timeline_data)
+    _attach_second_sample(plan, timeline_data)
     log.info(plan_summary(plan).replace("\n", " | "))
     return plan
 
@@ -273,15 +275,44 @@ def _attach_segment_export(plan, timeline_data: str) -> None:
         plan.segment_export = _parse_segment_export(timeline, len(plan.segments))
         _seg_export = plan.segment_export
         log.info(
-            "MiniMax H3 Director 分段导出 parsed: enabled=%s mode=%s indices=%s nseg=%d",
+            "MiniMax H3 Director 分段导出 parsed: enabled=%s mode=%s source=%s indices=%s nseg=%d",
             _seg_export.enabled if _seg_export else None,
             _seg_export.mode if _seg_export else None,
+            _seg_export.normalized_source() if _seg_export else None,
             _seg_export.indices if _seg_export else None,
             len(plan.segments),
         )
     except Exception as exc:  # pragma: no cover - defensive
         log.warning("MiniMax H3 Director: 分段导出 config ignored (%s)", exc)
         plan.segment_export = None
+
+
+def _attach_second_sample(plan, timeline_data: str) -> None:
+    """Stamp the「二次采样」request onto a finished plan (mirrors _attach_segment_export).
+
+    Reads ``timeline.output.secondSample`` (or the top-level ``secondSample`` the
+    picker writes) and stores a :class:`SegmentSecondSampleRequest` on the plan.
+    Never raises — a malformed block just means the feature stays off and the node
+    runs a normal first pass.
+    """
+    try:
+        timeline = json.loads(timeline_data) if timeline_data and timeline_data.strip() else {}
+    except json.JSONDecodeError:
+        return
+    if not isinstance(timeline, dict):
+        return
+    try:
+        plan.second_sample = _parse_second_sample(timeline, len(plan.segments))
+        _ss = plan.second_sample
+        log.info(
+            "MiniMax H3 Director 二次采样 parsed: enabled=%s indices=%s nseg=%d",
+            _ss.enabled if _ss else None,
+            _ss.indices if _ss else None,
+            len(plan.segments),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("MiniMax H3 Director: 二次采样 config ignored (%s)", exc)
+        plan.second_sample = None
 
 
 def _fit_source_clip_to_plan(plan, raw_clip: torch.Tensor) -> torch.Tensor:

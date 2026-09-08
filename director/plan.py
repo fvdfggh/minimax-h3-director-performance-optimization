@@ -45,6 +45,22 @@ SEGMENT_EXPORT_MODE_CONTINUOUS = "continuous"
 
 _CONTINUOUS_MODE_ALIASES = frozenset({"continuous", "concat", "concatenate", "merged"})
 
+#: Which pass's cache the「分段导出」picker reads: first-pass ``seg_*`` or
+#: second-pass ``seg2_*``.
+SEGMENT_EXPORT_SOURCE_FIRST = "1st"
+SEGMENT_EXPORT_SOURCE_SECOND = "2nd"
+DEFAULT_SEGMENT_EXPORT_SOURCE = SEGMENT_EXPORT_SOURCE_FIRST
+
+_SECOND_SOURCE_ALIASES = frozenset({"2nd", "second", "2", "seg2", "second_pass"})
+
+
+def normalize_segment_export_source(source) -> str:
+    """Map a UI/payload cache-source string onto ``1st`` | ``2nd``."""
+    text = str(source or "").strip().lower()
+    if text in _SECOND_SOURCE_ALIASES:
+        return SEGMENT_EXPORT_SOURCE_SECOND
+    return SEGMENT_EXPORT_SOURCE_FIRST
+
 
 def normalize_segment_export_mode(mode) -> str:
     """Map a UI/payload mode string onto ``piecewise`` | ``continuous``."""
@@ -65,14 +81,40 @@ class SegmentExportRequest:
     * ``continuous`` — checked segments that are adjacent on the timeline are
       stitched into one mp4 with the streaming merge (``concat_chunks_lazy``); a
       checked segment with no neighbour stays a standalone mp4.
+
+    ``source`` picks which pass's cache group is read (``"1st"`` → ``seg_*``,
+    ``"2nd"`` → ``seg2_*``). The picker shows only the selected source's state,
+    so there is deliberately no cross-source fallback — a segment with no
+    second-pass cache is simply not exportable while「二采」is selected.
     """
 
     enabled: bool
     mode: str = DEFAULT_SEGMENT_EXPORT_MODE
     indices: tuple[int, ...] = ()
+    source: str = DEFAULT_SEGMENT_EXPORT_SOURCE
 
     def normalized_mode(self) -> str:
         return normalize_segment_export_mode(self.mode)
+
+    def normalized_source(self) -> str:
+        return normalize_segment_export_source(self.source)
+
+
+@dataclass(frozen=True)
+class SegmentSecondSampleRequest:
+    """A「二次采样」(second-pass) request carried by the timeline JSON.
+
+    ``indices`` are the user-checked segment indices to re-sample (the segments
+    whose first-pass AV latent + text encoding are on disk). The picker writes
+    ``enabled=True`` as a one-shot trigger (mirroring :class:`SegmentExportRequest`);
+    ``indices`` is persistent so the picker reopens with the last selection.
+
+    The second pass always stitches adjacent selected segments into one clip
+    (continuous-merge), so no ``mode`` field is needed here.
+    """
+
+    enabled: bool
+    indices: tuple[int, ...] = ()
 
 
 MIN_CONTINUITY_OVERLAP = 5
@@ -231,6 +273,7 @@ class DirectorPlan:
     export_mode: str = "all"  # "all" | "segments"
     run_indices: frozenset[int] | None = None  # None = run all segments
     segment_export: SegmentExportRequest | None = None
+    second_sample: SegmentSecondSampleRequest | None = None
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
@@ -540,6 +583,9 @@ def _parse_segment_export(timeline: dict, segment_count: int) -> SegmentExportRe
     mode = normalize_segment_export_mode(
         block.get("mode") if block.get("mode") is not None else block.get("exportMode")
     )
+    source = normalize_segment_export_source(
+        block.get("source") if block.get("source") is not None else block.get("cacheSource")
+    )
 
     raw = block.get("indices")
     if raw is None:
@@ -555,14 +601,62 @@ def _parse_segment_export(timeline: dict, segment_count: int) -> SegmentExportRe
                 indices.append(idx)
 
     if not indices:
-        return SegmentExportRequest(enabled=False, mode=mode, indices=())
+        return SegmentExportRequest(enabled=False, mode=mode, indices=(), source=source)
     # ``enabled`` is the ONE-SHOT trigger set by the「分段导出」button; ``indices``
     # is persistent on purpose (the picker reopens with the last selection).
     # Both must be live. Forcing ``enabled`` True here (as this used to do) made
     # every later 运行 an export-only pass, because the checked indices never stop
     # being checked — the export button's flag is the only thing that distinguishes
     # "export this run" from "generate this run".
-    return SegmentExportRequest(enabled=enabled, mode=mode, indices=tuple(sorted(indices)))
+    return SegmentExportRequest(
+        enabled=enabled, mode=mode, indices=tuple(sorted(indices)), source=source
+    )
+
+
+def _parse_second_sample(timeline: dict, segment_count: int) -> "SegmentSecondSampleRequest | None":
+    """Read the「二次采样」block from ``timeline.output.secondSample`` (or top-level).
+
+    Returns ``None`` when the feature is off, so every existing call site keeps its
+    current behaviour. Indices are clamped to the live timeline and de-duplicated;
+    an enabled request with no valid index is reported as disabled rather than
+    raising, letting the node fall back to a normal run.
+    """
+    if not isinstance(timeline, dict) or segment_count <= 0:
+        return None
+    output_block = timeline.get("output") or {}
+    if not isinstance(output_block, dict):
+        output_block = {}
+    # The frontend spreads the block at the TOP LEVEL of the timeline payload
+    # (mirroring the「分段导出」picker), NOT under `output`. Accept both.
+    block = (
+        timeline.get("secondSample")
+        if isinstance(timeline.get("secondSample"), dict)
+        else output_block.get("secondSample")
+    )
+    if block is None:
+        block = output_block.get("second_sample")
+    if not isinstance(block, dict):
+        return None
+
+    enabled = bool(block.get("enabled") or block.get("active"))
+    raw = block.get("indices")
+    if raw is None:
+        raw = block.get("selection")
+    indices: list[int] = []
+    if isinstance(raw, list):
+        for item in raw:
+            try:
+                idx = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < segment_count and idx not in indices:
+                indices.append(idx)
+
+    if not indices:
+        return SegmentSecondSampleRequest(enabled=False, indices=())
+    # ``enabled`` is the ONE-SHOT trigger set by the「二次采样」button; ``indices``
+    # is persistent on purpose (the picker reopens with the last selection).
+    return SegmentSecondSampleRequest(enabled=enabled, indices=tuple(sorted(indices)))
 
 
 def _clip_segment_ranges(

@@ -256,6 +256,11 @@ const ZH = {
     "segmentExport.skipped": "跳过 {n} 段",
     "segmentExport.runToExport": "选中的片段将在本次运行时导出。",
     "segmentExport.queued": "已加入导出队列，开始运行…",
+    "segmentExport.source": "缓存来源",
+    "segmentExport.sourceFirst": "一采",
+    "segmentExport.sourceSecond": "二采",
+    "segmentExport.sourceHintFirst": "导出一采（首次采样）的缓存结果。",
+    "segmentExport.sourceHintSecond": "导出二采（二次采样）的缓存结果；无二采结果的片段将置灰不可选。",
 
     "videoName.fl2vEmpty": "未添加组 · {sec}s ({frames}f)",
     "videoName.fl2vSummary": "{n} 组 · {start} 首帧 · {end} 尾帧 · {sec}s ({frames}f)",
@@ -709,6 +714,11 @@ const EN = {
     "segmentExport.skipped": "Skipped {n}",
     "segmentExport.runToExport": "Checked segments will be exported on this run.",
     "segmentExport.queued": "Added to export queue, running…",
+    "segmentExport.source": "Cache source",
+    "segmentExport.sourceFirst": "First pass",
+    "segmentExport.sourceSecond": "Second pass",
+    "segmentExport.sourceHintFirst": "Export the first-pass (initial sample) cached results.",
+    "segmentExport.sourceHintSecond": "Export the second-pass (re-sample) cached results; segments without a second pass are greyed out.",
 
     "videoName.fl2vEmpty": "No groups · {sec}s ({frames}f)",
     "videoName.fl2vSummary": "{n} groups · {start} starts · {end} ends · {sec}s ({frames}f)",

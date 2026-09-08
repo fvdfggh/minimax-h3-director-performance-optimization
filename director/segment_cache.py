@@ -417,8 +417,8 @@ def _frames_to_float(x: torch.Tensor) -> torch.Tensor:
 def _frames_to_headtail(tensor: torch.Tensor) -> dict[str, Any]:
     """Head/tail window of a render, as a self-describing payload.
 
-    A segment's video on disk is ``clip.mp4``; this file only keeps the lossless
-    first/last ``HEADTAIL_N`` frames the seam pipeline needs, as uint8 [0,255].
+    A segment's video on disk is ``clip.mp4``; this window keeps the first/last
+    ``HEADTAIL_N`` frames the seam pipeline needs, as uint8 [0,255].
     ``total`` records the render's frame count so a reader can verify the window
     and the clip came from the same take before stitching them together.
 
@@ -456,7 +456,12 @@ def _headtail_to_disk(tensor: torch.Tensor) -> dict[str, Any]:
 
 
 def _load_headtail(ht_path: Path) -> tuple[torch.Tensor | None, torch.Tensor | None, int]:
-    """``(head, tail, total)`` from ``frames_ht.pt``; legacy layout included.
+    """``(head, tail, total)`` from a legacy ``frames_ht.pt``; older layouts too.
+
+    Only reached when no ``frames_ht.mp4`` was written (see
+    :func:`_load_headtail_paths`) — i.e. caches from before the window became a
+    clip, or runs where the encoder was unavailable and the writer fell back to
+    the tensor.
 
     ``tail`` ``None`` means the payload predates :data:`HEADTAIL_VERSION` (a bare
     ``[head_N, tail_N, ...]`` tensor) and the caller must split it by shape.
@@ -480,20 +485,163 @@ def _load_headtail(ht_path: Path) -> tuple[torch.Tensor | None, torch.Tensor | N
     return None, None, 0
 
 
+# --- video-backed head/tail -------------------------------------------------
+#
+# The window is stored as ``frames_ht.mp4`` + a JSON sidecar instead of
+# ``frames_ht.pt``. Same pixels the seam pipeline always consumed, but the
+# tensor form is uncompressed uint8 — 32 frames at 720p is ~88 MB, which made
+# the seam window the single largest file of a segment, larger than the whole
+# rendered clip it annotates. Readers are unchanged: both forms come back as
+# ``(head, tail, total)`` float/uint8 tensors and feed :func:`_splice_headtail`.
+
+
+def _save_headtail(paths: dict[str, Path], tensor: torch.Tensor, *, fps: float) -> bool:
+    """Persist the seam window as ``frames_ht.mp4`` + sidecar. Never raises.
+
+    ``False`` means nothing was written and the caller must fall back to the
+    lossless tensor form — a missing ffmpeg or an unsupported pix_fmt must not
+    silently leave a segment with no seam window at all.
+
+    The window is written as one clip: head lanes followed by tail lanes. They
+    are not temporally adjacent, which costs a little compression, but keeps the
+    file to a single decode on read.
+    """
+    payload = _frames_to_headtail(tensor)
+    head = payload.get("head")
+    tail = payload.get("tail")
+    if not torch.is_tensor(head) or int(head.shape[0]) <= 0:
+        return False
+    total = int(payload.get("total") or 0)
+    n_tail = int(tail.shape[0]) if torch.is_tensor(tail) else 0
+    # uint8 → float [0,1]; the encoder converts straight back, so the round trip
+    # is one quantisation, not two.
+    window = head if n_tail <= 0 else torch.cat([head, tail], dim=0)
+    mp4_path = paths["frames_ht_mp4"]
+    meta_path = paths["frames_ht_meta"]
+    try:
+        from ..lib.video_export import write_frames_to_mp4
+
+        tmp = mp4_path.with_name(f".{mp4_path.name}.{uuid.uuid4().hex}.tmp.mp4")
+        try:
+            write_frames_to_mp4(
+                tmp,
+                window.float().div(255.0),
+                fps=float(fps or 24.0) or 24.0,
+                crf=cache_layout.HEADTAIL_CRF,
+                pix_fmt=cache_layout.HEADTAIL_PIX_FMT,
+                preset=cache_layout.HEADTAIL_PRESET,
+            )
+            _atomic_publish(tmp, mp4_path)
+        finally:
+            _safe_unlink(tmp)
+        # Written *after* the clip: a sidecar without its video would make the
+        # reader report a window that is not there.
+        side = {
+            "version": HEADTAIL_VERSION,
+            "total": total,
+            "head_n": int(head.shape[0]),
+            "tail_n": n_tail,
+            "height": int(head.shape[1]),
+            "width": int(head.shape[2]),
+        }
+        _write_via_temp(
+            meta_path,
+            lambda p: p.write_text(json.dumps(side, sort_keys=True), encoding="utf-8"),
+        )
+        # A .pt from an older run is now redundant *and* would shadow nothing,
+        # but leaving it would keep tens of MB of dead cache on disk.
+        _safe_unlink(paths["frames_ht"])
+        return True
+    except Exception as exc:
+        log.warning(
+            "Head/tail clip encode failed (%s); keeping the lossless tensor cache.",
+            exc,
+        )
+        _safe_unlink(mp4_path)
+        _safe_unlink(meta_path)
+        return False
+
+
+def _load_headtail_mp4(
+    mp4_path: Path,
+    meta_path: Path,
+) -> tuple[torch.Tensor | None, torch.Tensor | None, int]:
+    """``(head, tail, total)`` from ``frames_ht.mp4``; ``(None, None, 0)`` if unusable.
+
+    Two things are checked before the window is trusted, because a wrong window
+    is worse than no window — :func:`_splice_headtail` would otherwise blend
+    foreign pixels into the seam:
+
+    * the decoded frame count must equal ``head_n + tail_n``, so a truncated or
+      re-encoded file is dropped rather than split at the wrong offset;
+    * the sidecar's H/W crops the decode back to the render's real size, undoing
+      the even-dimension padding the encoder applied.
+    """
+    if not mp4_path.is_file() or not meta_path.is_file():
+        return None, None, 0
+    try:
+        side = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log.debug("Head/tail sidecar unreadable for %s: %s", mp4_path.name, exc)
+        return None, None, 0
+    if not isinstance(side, dict):
+        return None, None, 0
+    head_n = int(side.get("head_n") or 0)
+    tail_n = int(side.get("tail_n") or 0)
+    if head_n <= 0:
+        return None, None, 0
+    frames = _decode_clip_frames(mp4_path)
+    if frames is None or int(frames.shape[0]) != head_n + tail_n:
+        log.debug(
+            "Head/tail clip %s holds %s frames, expected %d; ignored.",
+            mp4_path.name,
+            "no" if frames is None else int(frames.shape[0]),
+            head_n + tail_n,
+        )
+        return None, None, 0
+    height = int(side.get("height") or 0)
+    width = int(side.get("width") or 0)
+    if height > 0 and width > 0:
+        frames = frames[:, :height, :width, :]
+    head = frames[:head_n].contiguous()
+    tail = frames[head_n:].contiguous() if tail_n > 0 else frames[:0].contiguous()
+    return head, tail, int(side.get("total") or 0)
+
+
+def _has_headtail(paths: dict[str, Path]) -> bool:
+    """Whether any seam-window form is on disk for this segment."""
+    return (
+        paths["frames_ht_mp4"].is_file() and paths["frames_ht_meta"].is_file()
+    ) or paths["frames_ht"].is_file()
+
+
+def _load_headtail_paths(
+    paths: dict[str, Path],
+) -> tuple[torch.Tensor | None, torch.Tensor | None, int]:
+    """Seam window from whichever form is on disk — video first, tensor legacy."""
+    head, tail, total = _load_headtail_mp4(paths["frames_ht_mp4"], paths["frames_ht_meta"])
+    if head is not None:
+        return head, tail, total
+    if paths["frames_ht"].is_file():
+        return _load_headtail(paths["frames_ht"])
+    return None, None, 0
+
+
 def _splice_headtail(
     full: torch.Tensor,
     head: torch.Tensor,
     tail: torch.Tensor | None,
     total: int,
 ) -> torch.Tensor:
-    """Overlay the exact head/tail window onto the decoded ``clip.mp4`` body.
+    """Overlay the head/tail window onto the decoded ``clip.mp4`` body.
 
-    The clip is the segment's authoritative video; ``frames_ht.pt`` only carries
-    the lossless first/last frames the seam pipeline works on. Both are written
-    by one :func:`save_segment_cache` call, so stitching them is only meaningful
-    while their frame counts agree. When they do not, the pair belongs to two
-    different renders and the clip is returned untouched rather than being turned
-    into a hybrid of both.
+    The clip is the segment's authoritative video; ``frames_ht`` only carries the
+    first/last frames the seam pipeline works on, so the join keeps the pixels
+    the seam was built from instead of the encoder's version of them. Both are
+    written by one :func:`save_segment_cache` call, so stitching them is only
+    meaningful while their frame counts agree. When they do not, the pair
+    belongs to two different renders and the clip is returned untouched rather
+    than being turned into a hybrid of both.
     """
     n_full = int(full.shape[0])
     if n_full <= 0 or head is None or int(head.shape[0]) <= 0:
@@ -524,7 +672,7 @@ def _splice_headtail(
         )
         return full
     if tail is None or int(tail.shape[0]) <= 0:
-        # Short segment: the window holds every frame, already lossless.
+        # Short segment: the window already holds every frame.
         if int(head.shape[0]) < n_full:
             return full
         return _frames_to_float(head[:n_full]).to(full.dtype)
@@ -582,7 +730,7 @@ def save_segment_cache(
     """Persist a segment tensor (+ optional AV latent / export audio). Never raises.
 
     A segment's video lives in ``clip.mp4``; this call writes it **together with**
-    the head/tail window (``frames_ht.pt``), because :func:`load_segment_cache`
+    the head/tail window (``frames_ht``), because :func:`load_segment_cache`
     stitches the two back into one clip. Updating only one of them is what mixed
     two different renders into a single cached segment.
 
@@ -623,8 +771,16 @@ def save_segment_cache(
         # dominant space cost (hundreds of MB/segment). Merge/export rebuild the
         # whole segment from ``clip.mp4`` (written below, in this same call) and
         # restore the seam frames from this window.
-        ht_payload = _frames_to_headtail(tensor)
-        _write_via_temp(ht_path, lambda p: torch.save(ht_payload, p))
+        if not _save_headtail(
+            paths,
+            tensor,
+            fps=float(getattr(plan, "frame_rate", 24) or 24),
+        ):
+            # No encoder available / unsupported pix_fmt: fall back to the
+            # lossless tensor rather than leaving the segment with no seam
+            # window at all. Rare, and worth the disk in that case.
+            ht_payload = _frames_to_headtail(tensor)
+            _write_via_temp(ht_path, lambda p: torch.save(ht_payload, p))
         fp = dict(fp, ht_n=HEADTAIL_N)
         # Legacy full ``frames.pt`` is intentionally NOT written anymore. Stale
         # copies from earlier runs are ignored by load_segment_cache below.
@@ -1413,7 +1569,7 @@ def save_second_pass_cache(
 
     Deliberately a thin wrapper over :func:`save_segment_cache`: the second pass
     must land *exactly* the artefacts the「分段导出」merge reads for the first
-    pass — ``clip.mp4`` (the segment's video), ``frames_ht.pt`` (the head/tail
+    pass — ``clip.mp4`` (the segment's video), ``frames_ht`` (the head/tail
     seam window), ``latent.pt``, ``audio.pt`` and a fingerprint-compatible
     ``meta.json`` — or a later re-export of a second-pass result would silently
     degrade to「仅有 latent」or be refused as stale. Writing them by hand twice
@@ -1606,28 +1762,45 @@ def _decode_latent_to_frames(
 
 def _expected_export_frames(plan, seg, fallback_n=0):
     """Compute the segment's expected ``(trim_frames, export_len)`` exactly like
-    Phase 2's ``generation_frame_budget``, straight from the node's parameters
-    (``continuity_overlap_frames`` / ``frame_count`` / ``seg.index``).
+    Phase 2's ``generation_frame_budget``, straight from the node's parameters.
+
+    A continuity pin replays the previous segment's tail at the head of this
+    one, so ``trim_frames`` is the pin length and ``export_len`` is the
+    segment's own aligned length — *not* snapped down onto the 17-frame cycle
+    grid, which used to cost the last 5 frames of every segment that had a
+    predecessor.
 
     Used both to trim decoded latent frames and to validate an existing frame
     cache's length (a leftover untrimmed frame cache has the wrong count and must
     be re-decoded).
     """
-    from .frame_align import minimax_align_frame_count, minimax_phase_aligned_export_frames
+    from .frame_align import minimax_align_frame_count
     from .h3_motion_context import snap_context_frames
 
     frame_count = int(getattr(seg, "frame_count", 0) or 0)
     visible = minimax_align_frame_count(max(5, frame_count)) if frame_count > 0 else int(fallback_n)
     use_mc = int(getattr(plan, "continuity_overlap_frames", 0) or 0) > 0
     has_prev = int(getattr(seg, "index", 0) or 0) > 0
-    ctx = (
-        snap_context_frames(int(getattr(plan, "continuity_overlap_frames", 0) or 0))
-        if (use_mc and has_prev) else 0
+    next_pin = bool(getattr(seg, "continuity_to_next", False))
+    role = (
+        "both" if (use_mc and has_prev and next_pin) else
+        "prev" if (use_mc and has_prev) else
+        "next" if next_pin else
+        "none"
     )
-    export_len = minimax_phase_aligned_export_frames(visible) if ctx > 0 else visible
-    if export_len <= 0:
-        export_len = int(fallback_n)
-    return int(ctx), int(export_len)
+    overlap = int(getattr(plan, "continuity_overlap_frames", 0) or 0)
+    if visible <= 0:
+        visible = int(fallback_n)
+    if role == "prev":
+        # Referenced segments carry the +5 VAE phase via the head reference, so
+        # the export is the clean 17k, not 17k+5.
+        return int(snap_context_frames(overlap)), int(visible - 5)
+    if role in ("next", "both"):
+        # Referenced segments carry the +5 VAE phase via the frozen references, so
+        # the export is the clean 17k, not 17k+5. ctx follows head pin availability.
+        ctx = snap_context_frames(overlap) if use_mc else 0
+        return int(ctx), int(visible - 5)
+    return 0, int(visible)
 
 
 def _trim_decoded_for_export(
@@ -1640,9 +1813,9 @@ def _trim_decoded_for_export(
     exactly what Phase 3 wrote for this segment; falls back to the node-parameter
     derived boundary (``_expected_export_frames``) when no handoff exists yet.
 
-    The motion-context overlap prefix is always dropped: it is the replayed tail of
-    the previous segment, so keeping it would make a standalone segment start with
-    ~1s of the previous clip (the "4s instead of 5s" symptom). The merged result is
+    The replayed head is always dropped: a pin makes the model reproduce the
+    previous segment's tail — picture and sound — so keeping it would play that
+    tail a second time before this segment starts. The merged result is
     unaffected — the merge stitches these same trimmed bodies.
     """
     from .h3_motion_context import trim_context_prefix
@@ -2126,7 +2299,7 @@ def _segment_can_stitch(
 
     ``concat_chunks_lazy`` reads every segment through :func:`load_segment_cache`,
     which rebuilds the whole clip from ``clip.mp4`` and restores the seam frames
-    from ``frames_ht.pt`` — the legacy full ``frames.pt`` is deliberately no
+    from ``frames_ht`` — the legacy full ``frames.pt`` is deliberately no
     longer written, since only the head/tail frames have to survive on disk.
 
     The gate therefore has to accept a clip, not just a legacy tensor: testing
@@ -2292,7 +2465,7 @@ def run_segment_export(
 
     # --- 连续导出: stitch runs of adjacent checked segments ------------------
     # A segment can be stitched when it has any frame source on disk — normally
-    # the encoded clip, whose seam frames are restored from ``frames_ht.pt``;
+    # the encoded clip, whose seam frames are restored from ``frames_ht``;
     # see :func:`_segment_can_stitch`. The merge streams the clips in from disk
     # (peak ≈ result + one segment, same as「全部导出」) instead of holding a whole
     # run in RAM. Latent-only segments were predecoded above, so they are on disk
@@ -2567,18 +2740,18 @@ def load_segment_cache(
 
     Space optimisation: the full ``frames.pt`` is no longer persisted. We rebuild
     the whole segment from ``clip.mp4`` (which is always written) and, when a
-    ``frames_ht.pt`` exists, overlay the head/tail lanes with the exact cached
-    pixels so seam continuity stays bit-exact. Both files are written by one
-    :func:`save_segment_cache` call; when their frame counts disagree they belong
-    to different renders and the clip is returned untouched instead of being
-    stitched into a hybrid. Legacy ``frames.pt`` caches are still honoured for
-    backward compatibility.
+    ``frames_ht`` window exists, overlay the head/tail lanes with the cached
+    pixels so the seam keeps the frames it was built from. Both files are
+    written by one :func:`save_segment_cache` call; when their frame counts
+    disagree they belong to different renders and the clip is returned untouched
+    instead of being stitched into a hybrid. Legacy ``frames.pt`` and
+    ``frames_ht.pt`` caches are still honoured for backward compatibility.
 
     ``return_fp=True``: returns ``(tensor, handoff)`` instead of just the tensor.
-    ``handoff`` carries ``trim_frames`` — the continuity prefix the generator
-    dropped. Callers that merge (``concat_chunks_lazy``) re-apply it so the
-    on-disk *full* clip (now persisted for standalone downloads) is turned back
-    into the overlap-free segment the seam pipeline expects.
+    ``handoff`` carries ``trim_frames`` — the replayed head the generator
+    dropped. Merge callers (``concat_chunks_lazy``) re-apply it so the on-disk
+    full clip is turned back into the replay-free segment the seam pipeline
+    expects.
     """
     root = _cache_root(node_id, workflow_name)
     if root is None:
@@ -2609,11 +2782,9 @@ def load_segment_cache(
         clip_path = group["clip"]
         full = _load_full_segment_via_clip(clip_path) if clip_path.is_file() else None
         if full is not None:
-            ht_path = group["frames_ht"]
-            if ht_path.is_file():
-                head, tail, total = _load_headtail(ht_path)
-                if head is not None:
-                    full = _splice_headtail(full, head, tail, total)
+            head, tail, total = _load_headtail_paths(group)
+            if head is not None:
+                full = _splice_headtail(full, head, tail, total)
             return full
         return None
 
@@ -2670,9 +2841,9 @@ def load_segment_tail(
 ) -> torch.Tensor | None:
     """Load only the last ``n`` frames of a cached segment (for seam prev_tail).
 
-    Reads directly from ``frames_ht.pt`` (head/tail only) without decoding the
-    whole clip, so the seam pipeline holds only ``_seam_window()`` frames in
-    memory instead of an entire segment tensor.
+    Reads directly from the seam window (``frames_ht``, head/tail only) without
+    decoding the whole clip, so the seam pipeline holds only ``_seam_window()``
+    frames in memory instead of an entire segment tensor.
     """
     root = _cache_root(node_id, workflow_name)
     if root is None:
@@ -2681,8 +2852,7 @@ def load_segment_tail(
     paths = _slot_paths(node_id, workflow_name, idx, variant=variant)
     if paths is None:
         return None
-    ht_path = paths["frames_ht"]
-    if not ht_path.is_file():
+    if not _has_headtail(paths):
         # Fall back to the full segment's tail if only legacy frames exist.
         full = load_segment_cache(
             node_id, seg, plan, workflow_name=workflow_name, variant=variant
@@ -2691,7 +2861,7 @@ def load_segment_tail(
             return None
         k = min(int(n), int(full.shape[0]))
         return full[int(full.shape[0]) - k:].clone()
-    head, tail, total = _load_headtail(ht_path)
+    head, tail, total = _load_headtail_paths(paths)
     if head is None:
         return None
     if tail is not None and int(tail.shape[0]) > 0:

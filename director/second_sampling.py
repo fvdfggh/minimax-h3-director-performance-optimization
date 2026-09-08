@@ -187,16 +187,15 @@ def _wanted_context_frames(params: dict, plan) -> int:
 def _export_frame_budget(plan, seg, decoded_n: int, context_n: int) -> int:
     """Export length of a second-pass segment, on the FIRST pass's terms.
 
-    ``seg.frame_count`` alone is not the export length: the first pass trims to
-    the frame budget derived in :func:`_expected_export_frames` (aligned, and
-    phase-aligned once a continuity prefix exists). Reusing that helper is what
-    keeps a second-pass clip the same length as its first-pass counterpart
-    instead of a few frames longer/shorter.
+    ``seg.frame_count`` alone is not the export length: the first pass exports
+    the segment's own aligned length (see :func:`_expected_export_frames`), and
+    the replayed head is trimmed separately rather than snapping the export
+    short. Reusing that helper is what keeps a second-pass clip the same length
+    as its first-pass counterpart instead of a few frames longer/shorter.
     """
     _planned_trim, planned = _expected_export_frames(plan, seg, fallback_n=decoded_n)
     if int(context_n or 0) <= 0:
-        # No continuity prefix was applied, so the body is the plain aligned
-        # length — the phase-aligned variant only exists to absorb the prefix.
+        # No replayed head was applied, so the body is the plain aligned length.
         frame_count = int(getattr(seg, "frame_count", 0) or 0)
         if frame_count > 0:
             try:
@@ -537,6 +536,10 @@ def run_second_sampling(
             return
         positive, negative = cond["positive"], cond.get("negative")
 
+        # 与一采一致：被参照段导出 17k（相位由参照帧承载），无参照段导出 17k+5。
+        _, expected_export = _expected_export_frames(plan, seg, fallback_n=0)
+        expected_export = int(expected_export)
+
         # seam — same gating as the first pass, or the head of the sample is
         # left unpinned while still being exported.
         positive_seam = positive
@@ -607,9 +610,10 @@ def run_second_sampling(
                     # 3) 对齐下段：把下一段开头 pin 进本段结尾（一采: tail_context_*）
                     tail_context_latent = None
                     tail_context_length = 0
+                    tail_context_offset = 0
                     if bool(getattr(seg, "continuity_to_next", False)):
                         tail_n = resolve_tail_context_length(
-                            new_av, int(seg.frame_count), context_n=context_n
+                            new_av, expected_export, context_n=context_n
                         )
                         if tail_n > 0:
                             next_latent = load_next_segment_av_latent(
@@ -618,6 +622,15 @@ def run_second_sampling(
                             if next_latent is not None:
                                 tail_context_latent = next_latent
                                 tail_context_length = tail_n
+                                # 用已裁切的下一段开头（跳过其自身头裁），与一采一致。
+                                _next_seg = seg_by_index.get(int(seg.index) + 1)
+                                if _next_seg is not None:
+                                    _next_ho = load_segment_handoff_meta(
+                                        node_id, _next_seg, plan,
+                                        allow_stale=True, workflow_name=workflow_name,
+                                    )
+                                    if _next_ho:
+                                        tail_context_offset = int(_next_ho.get("trim_frames", 0) or 0)
                     try:
                         positive_seam, trim_frames, _ = apply_motion_context(
                             positive,
@@ -637,10 +650,12 @@ def run_second_sampling(
                             audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
                             tail_context_latent=tail_context_latent,
                             tail_context_length=tail_context_length,
+                            tail_context_offset=tail_context_offset,
                         )
                     except Exception as exc:
-                        # Do NOT fall back to trim_frames=0: the latent's head
-                        # would be unpinned noise that lands in the exported clip.
+                        # Do NOT swallow this and continue: without the pin the
+                        # sample's head is unguided noise that survives the later
+                        # trim and lands in the export.
                         _fail(idx, "seam", str(exc))
                         return
 
@@ -703,9 +718,10 @@ def run_second_sampling(
             return
         decoded_n = int(images.shape[0])  # 裁剪前的真实采样帧数
         try:
-            # Same frame budget the first pass trims to (aligned / phase-aligned),
-            # NOT the raw widget frame_count — otherwise the second-pass clip ends
-            # up a few frames longer or shorter than the first-pass one.
+            # Same frame budget the first pass exports (the aligned length, with
+            # the replayed head trimmed separately), NOT the raw widget
+            # frame_count — otherwise the second-pass clip ends up a few frames
+            # longer or shorter than the first-pass one.
             export_len = _export_frame_budget(
                 plan, seg, int(images.shape[0]), int(meta["context_n"])
             )
@@ -852,9 +868,9 @@ def export_second_pass(
 
     与一采「连续导出 / 选择运行」统一：直接复用 :func:`run_segment_export`
     （``mode="continuous"``、``variant="2nd"``）。二采在采样阶段已通过
-    :func:`save_second_pass_cache` 把 ``seg2_*_clip.mp4`` + ``frames_ht.pt``（首尾帧
+    :func:`save_second_pass_cache` 把 ``seg2_*_clip.mp4`` + ``frames_ht``（首尾帧
     接缝窗口）+ latent + audio + meta 落盘，产物与一采导出完全一致，因此这里应当和
-    一采对同一份缓存做同样的拼接——从缓存视频读取、用 ``frames_ht.pt`` 的首尾帧还原
+    一采对同一份缓存做同样的拼接——从缓存视频读取、用 ``frames_ht`` 的首尾帧还原
     接缝窗口做平滑——而不是把刚解码、还在内存里的帧直接喂进去。
 
     ``out_dir`` 沿用二采专属导出目录（``minimax_second_pass_export``），保持与

@@ -32,9 +32,7 @@ from .conditioning_cache import (
     text_cache_key,
 )
 from .core_sampling import sample_single_stage
-from .frame_align import (
-    minimax_align_frame_count, minimax_phase_aligned_export_frames, pad_or_trim_frames,
-)
+from .frame_align import minimax_align_frame_count, pad_or_trim_frames
 from .audio_export import (
     AUDIO_MODE_GENERATE, AUDIO_MODE_MUTE, AUDIO_MODE_SOURCE,
     empty_audio_dict, resolve_audio_mode,
@@ -53,6 +51,7 @@ from .h3_motion_context import (
     resolve_tail_context_length,
     snap_context_frames, trim_context_prefix, trim_export_tail,
     video_from_latent,
+    TAIL_CONTEXT_FRAMES,
 )
 from .segment_cache import (
     build_run_selection_clips, continuous_export_runs,
@@ -1164,11 +1163,27 @@ def execute_director_batch(
                 "本段不继承运动——请按顺序重跑该段以恢复接缝连贯。"
             )
 
-        # Depends on use_motion_context: pinning extends the sample by context_n.
+        # The head pin *replays* the previous segment's tail, so it lengthens
+        # the sample and is trimmed after decode. The tail pin needs its room
+        # reserved up front: it is replayed past the export and dropped, and
+        # taking that room out of the free zone instead is what used to clip a
+        # segment's ending.
         context_n = (
             snap_context_frames(plan.continuity_overlap_frames) if use_motion_context else 0
         )
-        sample_len, _planned_trim = generation_frame_budget(num_frames, context_n)
+        next_pin = bool(getattr(seg, "continuity_to_next", False))
+        tail_room = int(TAIL_CONTEXT_FRAMES) if (use_motion_context and next_pin) else 0
+        role = (
+            "both" if (context_n > 0 and next_pin) else
+            "prev" if context_n > 0 else
+            "next" if next_pin else
+            "none"
+        )
+        # sample_len only here; export length is recomputed in Phase 2 from the
+        # same role so the three-zone budget stays the single source of truth.
+        sample_len, _, _, _ = generation_frame_budget(
+            num_frames, context_n, role, tail_room,
+        )
 
         if seg.task_key in {"r2v", "v2v", "rv2v"} and (ref_images or ref_videos or ref_audios or ref_video_audios) and audio_vae is None:
             raise ValueError("r2v/v2v/rv2v requires audio_vae input.")
@@ -1353,7 +1368,16 @@ def execute_director_batch(
     if mp4_run_dir is not None:
         reports.append(f"Segment mp4 export dir: {mp4_run_dir}")
 
-    for seg in run_list:
+    # Two-pass sampling: Pass 1 builds every latent with head references only
+    # (tail disabled); Pass 2 re-samples just the 对齐下段 (NEXT/BOTH) segments,
+    # pinning the next segment's *trimmed* opening now that its latent is on disk.
+    # The next segment must be generated and exported before it can be referenced.
+    _tail_segs = [s for s in run_list if bool(getattr(s, "continuity_to_next", False))]
+    _seg_pass_list = [(s, False) for s in run_list]
+    if _tail_segs:
+        _seg_pass_list += [(s, True) for s in _tail_segs]
+
+    for seg, _enable_tail in _seg_pass_list:
         ui_idx = seg.timeline_index
         seg_pos = run_list.index(seg)
 
@@ -1377,6 +1401,17 @@ def execute_director_batch(
         ctx_h = ref_data["ctx_h"]
         use_motion_context = ref_data["use_motion_context"]
         context_n = ref_data["context_n"]
+
+        # Continuity role + export length — single source of truth for Phase 2.
+        next_pin = bool(getattr(seg, "continuity_to_next", False))
+        role = (
+            "both" if (context_n > 0 and next_pin) else
+            "prev" if context_n > 0 else
+            "next" if next_pin else
+            "none"
+        )
+        _tail_room = int(TAIL_CONTEXT_FRAMES) if (context_n > 0 and role in ("next", "both")) else 0
+        _, _tf, _tb, export_len = generation_frame_budget(num_frames, context_n, role, _tail_room)
 
         # Load pre-encoded conditioning from disk
         cond_data = _load_batch_conditioning(node_id, seg.index, cache_dir)
@@ -1466,9 +1501,10 @@ def execute_director_batch(
             # ------------------------------------------------------------------
             tail_context_latent = None
             tail_context_length = 0
-            if bool(getattr(seg, "continuity_to_next", False)):
+            tail_context_offset = 0
+            if _enable_tail and bool(getattr(seg, "continuity_to_next", False)):
                 tail_n = resolve_tail_context_length(
-                    latent, int(seg.frame_count), context_n=context_n
+                    latent, export_len, context_n=context_n
                 )
                 if tail_n > 0:
                     next_latent = load_next_segment_av_latent(node_id, seg.index, workflow_name=workflow_name)
@@ -1480,10 +1516,17 @@ def execute_director_batch(
                     else:
                         tail_context_latent = next_latent
                         tail_context_length = tail_n
+                        # Read the next segment's trimmed opening: skip its own head
+                        # pin so we reference what it actually exports, per the
+                        # "先裁切完才可被用于下一段进行参照" rule.
+                        tail_context_offset = int(
+                            completed_av_handoff.get(seg.index + 1, {}).get("trim_frames", 0) or 0
+                        )
                         log.info(
-                            "Seg #%d: 对齐下段 active — pinning next segment head %df.",
+                            "Seg #%d: 对齐下段 active — pinning next segment head %df (offset %df).",
                             seg.index + 1,
                             tail_n,
+                            tail_context_offset,
                         )
             positive, trim_frames, prev_export_trim = apply_motion_context(
                 positive, latent, vae=vae,
@@ -1497,6 +1540,7 @@ def execute_director_batch(
                 context_end_frame=prev_end_frame,
                 audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
                 tail_context_latent=tail_context_latent,
+                tail_context_offset=tail_context_offset,
                 tail_context_length=tail_context_length,
             )
             if prev_export_trim > 0:
@@ -1550,16 +1594,11 @@ def execute_director_batch(
         _save_batch_latent(node_id, seg.index, samples, cache_dir)
 
         # Build handoff for next segment.
-        # export_frames must be the real export length, not num_frames: the next
-        # segment derives its pin end limit from (trim + export_frames), and that
-        # end must sit on the 17-frame VAE cycle grid or the pin window stops
-        # short — the remainder is then either trimmed (lost) or replayed as a
-        # seam echo. See minimax_phase_aligned_export_frames.
-        export_len = (
-            minimax_phase_aligned_export_frames(num_frames)
-            if trim_frames > 0
-            else int(num_frames)
-        )
+        # export_frames is the segment's own clean middle length: 17k for any
+        # referenced segment (the +5 VAE phase is carried by the head reference),
+        # 17k+5 for a standalone one. The next segment's pin end limit is
+        # (trim + export), which is exactly where this segment's last exported
+        # frame sits.
         handoff = {
             "trim_frames": int(trim_frames),
             "export_frames": int(export_len),
@@ -1654,11 +1693,9 @@ def execute_director_batch(
         trim_frames = int(handoff.get("trim_frames") or 0)
         export_len = int(handoff.get("export_frames") or 0)
         if export_len <= 0:
-            export_len = (
-                minimax_phase_aligned_export_frames(num_frames)
-                if trim_frames > 0
-                else int(num_frames)
-            )
+            # num_frames is already on the 17k+5 grid and continuity no longer
+            # cuts the export down to 17k.
+            export_len = int(num_frames)
 
         # VAE decode
         decoded, audio_dict = _decode_av_latent(samples, vae, audio_vae, decode_audio=decode_audio)
@@ -1717,10 +1754,10 @@ def execute_director_batch(
         # export so this segment's pin window abuts it exactly. Skipping this
         # replays the gap at every seam (visible stutter) and leaves the merge
         # longer by (seams x gap).
-        # With the 17-frame-grid export length above, gap_after_pin is normally 0
-        # and this whole block is dead code. It stays as a safety net for the
-        # edges where the pin window can still fall short (pixel-pin fallback,
-        # non-standard context lengths, hand-off from an older cache).
+        # Now that export == sample and trim == 0, the pin window ends on the
+        # previous export's last frame, so gap_after_pin is 0 and this block is
+        # dormant. It stays as a safety net for hand-offs from older caches,
+        # whose stored trim/export pair predates this layout.
         # ``pending_prev_trim[seg.index]`` must be applied to timeline segment
         # ``seg.index - 1``.  ``prev_export_seg`` is merely the previous *iterated*
         # segment, so with a sparse「选择运行」(e.g. 0,3,7) it would shave segment

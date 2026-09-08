@@ -524,7 +524,9 @@ async def minimax_clear_cache(request):
 
     Default clears only the transient data in that dir: text/image/video
     conditioning files and the per-run batch scratch intermediates
-    (``seg_*_scratch_*.pt``). The durable rendered segments are kept.
+    (``seg_*_scratch_*.pt``), plus any ``*_frames_ht.pt`` left by runs from
+    before the seam window became a clip — those are superseded dead weight,
+    not part of the render. The durable rendered segments are kept.
 
     With ``clear_all=true`` it additionally wipes every durable ``seg_*`` file —
     every rendered frame / AV latent / audio / clip — forcing a full re-render on
@@ -547,7 +549,7 @@ async def minimax_clear_cache(request):
 
     workflow_name = str(body.get("workflow_name") or "").strip() or None
     clear_all = bool(body.get("clear_all"))
-    cleared = {"conditioning": 0, "batch": 0, "segments": 0}
+    cleared = {"conditioning": 0, "batch": 0, "headtail": 0, "segments": 0}
 
     cache_dir = cache_layout.node_cache_dir(node_id, workflow_name, create=False)
 
@@ -570,7 +572,23 @@ async def minimax_clear_cache(request):
             except OSError as exc:
                 log.warning("MiniMax H3 Director clear scratch %s failed: %s", path, exc)
 
-    # 3) clear_all → also wipe durable segment files (both passes) so the next
+    # 3) Legacy head/tail tensors (``*_frames_ht.pt``), on *every* clear.
+    #    The seam window is a clip now; these are the pre-mp4 copies, tens of MB
+    #    each, that no longer get rewritten because nothing re-renders their
+    #    segment. Unlike the durable artefacts below they are safe to drop
+    #    without forcing a re-render — see cache_layout.iter_legacy_headtail_files.
+    #    Skipped under clear_all, which removes them along with everything else.
+    if cache_dir.is_dir() and not clear_all:
+        for path in cache_layout.iter_legacy_headtail_files(cache_dir):
+            try:
+                path.unlink()
+                cleared["headtail"] += 1
+            except OSError as exc:
+                log.warning(
+                    "MiniMax H3 Director clear legacy head/tail %s failed: %s", path, exc
+                )
+
+    # 4) clear_all → also wipe durable segment files (both passes) so the next
     #    run must re-render. ``seg2_*`` is the「二级采样」cache family.
     if clear_all and cache_dir.is_dir():
         for glob in cache_layout.SEGMENT_GLOBS:

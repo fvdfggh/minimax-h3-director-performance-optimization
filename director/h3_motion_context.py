@@ -1,8 +1,11 @@
 """Director-owned MiniMax H3 segment motion/audio continuation helpers.
 
 Pins the previous segment's tail into the next segment as never-denoised
-conditioning, then trims that prefix from decoded output. Inspired by the
-community Motion Context approach; original Apache-2.0 code for this Director.
+conditioning, and optionally pins the next segment's opening into this one's
+tail. A pin makes the model *replay* the neighbouring segment at this sample's
+edge, so a segment is sampled as a replayed head, its own body, and an optional
+replayed tail — and only the body is exported. Inspired by the community Motion
+Context approach; original Apache-2.0 code for this Director.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from typing import Any
 
 import torch
 
-from .frame_align import minimax_phase_aligned_export_frames
+from .frame_align import minimax_align_frame_count
 from .h3_context_patches import (
     CTX_AUDIO_END_KEY,
     CTX_FRAME_KEY,
@@ -31,6 +34,14 @@ FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
 CONTEXT_FRAME_CHOICES = (5, 22, 39, 56)
 DEFAULT_CONTEXT_FRAMES = 22
 VIDEO_RUN_GRID = (124, 107, 90, 73, 56, 39, 22, 5, 1)
+#: Tail-pin length used for「对齐下段」(align-to-next).
+#:
+#: Deliberately *not* the widget's context length. The tail pin is replayed at
+#: the end of the sample and then dropped, so a longer one only buys extra
+#: sampling — the smallest step is enough to forge the join from both sides.
+#: The head pin is the opposite: it is what carries the continuity you actually
+#: see, so keep choosing it on merit from ``CONTEXT_FRAME_CHOICES``.
+TAIL_CONTEXT_FRAMES = 5
 
 CONTINUITY_TASK_KEYS = frozenset({"t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v"})
 # v8: v7 + export audio cache + fps in fingerprint + trim hydrate on partial re-run.
@@ -38,8 +49,13 @@ CONTINUITY_TASK_KEYS = frozenset({"t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v"})
 #     next segment's pin window ends exactly on the last exported frame and
 #     gap_after_pin is always 0 (no trimmed frames, no seam echo). Cached
 #     exports from v8 and earlier hold 17k+5 frames and must not be reused.
+# v10: v9's export snap reverted — a segment exports its own aligned length
+#      (17k+5) again instead of 17k, and the tail pin gets its room reserved by
+#      ``generation_frame_budget`` rather than taken out of the free zone.
+#      v9/v8 exports are 5 frames short and v8-v9 tail pins ate the ending;
+#      reusing any of them would bring back the clipped speech.
 # Single source of truth — imported by segment_cache.segment_cache_fingerprint.
-CONTINUITY_PIPELINE_ID = "minimax_h3_motion_context_v9"
+CONTINUITY_PIPELINE_ID = "minimax_h3_motion_context_v11"
 # Example workflow tested value (NikoDemon80): audio_context_length=24 with video=22.
 DEFAULT_AUDIO_CONTEXT_FRAMES = 24
 
@@ -84,25 +100,29 @@ def snap_tail_context_frames(raw: int | float | None, max_frames: int) -> int:
 
 
 def resolve_tail_context_length(
-    latent: dict, export_frame_count: int, *, context_n: int
+    latent: dict, export_frame_count: int, *, context_n: int = 0
 ) -> int:
     """Frames of the next segment to pin into this segment's tail.
 
-    The pin lives in the frames the sample already generates-and-discards past
-    the export (``sample - head_pin - export``), so it costs no extra decode and
-    never touches the exported region. Returns 0 when the sample has no spare
-    tail capacity, which disables「对齐下段」rather than shortening the export.
+    The pin replays the next segment's opening at the end of this sample, so it
+    must live in frames the export does not use — whatever the sample carries
+    past ``head_pin + export``. :func:`generation_frame_budget` reserves that
+    room when the segment opts into「对齐下段」; this only measures what actually
+    fits, because the latent grid rarely lines up exactly.
+
+    Returns 0 when there is no spare tail capacity, which disables「对齐下段」
+    rather than shortening the export.
     """
     try:
         samples = latent["samples"]
         latent_t = int(samples.shape[2])
         sample_frames = pixel_frames_for_latent_t(latent_t)
-        export_frames = minimax_phase_aligned_export_frames(int(export_frame_count))
+        export_frames = minimax_align_frame_count(int(export_frame_count))
         head_pin = snap_context_frames(context_n)
         spare = sample_frames - export_frames - head_pin
         if spare <= 0:
             return 0
-        return int(snap_tail_context_frames(context_n, spare))
+        return int(snap_tail_context_frames(TAIL_CONTEXT_FRAMES, spare))
     except Exception:  # never block a run on an optional alignment
         return 0
 
@@ -265,11 +285,16 @@ def _video_tail_blocks(
 def _video_head_blocks(
     latent: dict,
     n: int,
+    *,
+    start_px: int = 0,
 ) -> tuple[list[torch.Tensor], list[int], int]:
-    """Return ``(blocks, offsets, covered)`` for the first ``n`` frames.
+    """Return ``(blocks, offsets, covered)`` for ``n`` frames from ``start_px``.
 
     Mirror of ``_video_tail_blocks``: used to pin the *next* segment's opening
     into the current segment's tail so the join is forged from both sides.
+    ``start_px`` is the offset into the *next* sample — the next segment's own
+    head pin is trimmed before it is referenced, so we read its trimmed opening
+    (``start_px`` = the next segment's ``trim_frames``), not its raw sample head.
     Offsets are relative to the source clip; the caller re-maps them onto the
     target sample timeline with ``step_offsets_from``.
     """
@@ -281,16 +306,23 @@ def _video_head_blocks(
             f"Director continuity: {n} frames is not a whole number of latent steps "
             f"(use {', '.join(str(x) for x in CONTEXT_FRAME_CHOICES)})."
         )
-    if steps > total:
+    start_step = steps_for_frames(start_px)
+    if start_step is None:
         raise ValueError(
-            f"Director continuity: need {steps} latent steps, next segment has {total}."
+            f"Director continuity: tail reference offset {start_px} frames is not a "
+            f"whole number of latent steps."
+        )
+    if start_step + steps > total:
+        raise ValueError(
+            f"Director continuity: tail reference needs {start_step + steps} latent "
+            f"steps, next segment has {total}."
         )
     covered = pixel_frames_for_latent_t(steps)
     if covered != n:
         raise RuntimeError(
             f"Director continuity: {steps} steps cover {covered} frames, expected {n}."
         )
-    blocks = [video[:1, :, k : k + 1].clone() for k in range(steps)]
+    blocks = [video[:1, :, (start_step + k) : (start_step + k + 1)].clone() for k in range(steps)]
     return blocks, step_offsets(steps), covered
 
 
@@ -414,6 +446,7 @@ def apply_motion_context(
     audio_context_length: int | None = None,
     tail_context_latent: dict | None = None,
     tail_context_length: int | None = None,
+    tail_context_offset: int = 0,
 ) -> tuple[Any, int, int]:
     """Inject previous-segment motion (and optional audio) into conditioning.
 
@@ -424,7 +457,12 @@ def apply_motion_context(
 
     Returns ``(positive, trim_frames, prev_export_trim_tail)``.
 
-    ``trim_frames`` is the pinned head length to remove after decode.
+    ``trim_frames`` is how many leading frames to drop after decode: the pin
+    makes the model reproduce the previous segment's tail — picture *and* sound
+    — at the start of this one, so that prefix is a repeat rather than content.
+    It is the *measured* ``span``, not the requested context length: the VAE
+    grid can shorten the pin, and trimming more than was actually pinned would
+    eat into this segment.
     ``prev_export_trim_tail`` is how many frames to drop from the *previous*
     segment's export before concat (phase-align pin often ends a few frames
     before the export end; leaving them causes a visible ~5f echo at the seam).
@@ -548,9 +586,9 @@ def apply_motion_context(
     ]
 
     # --- align-to-next: pin the next segment's opening into this tail ---
-    # Both pins are "cond" rows flagged never-denoised, so the tail is restored
-    # every step exactly like the head. The caller trims head and tail, so the
-    # exported clip is only the freshly generated middle.
+    # Both pins are "cond" rows flagged never-denoised, and both make the model
+    # replay the neighbouring segment at this sample's edge. The head replay is
+    # trimmed after decode; the tail replay lives past the export.
     tail_span = 0
     if tail_context_latent is not None and int(tail_context_length or 0) > 0:
         try:
@@ -579,7 +617,7 @@ def apply_motion_context(
             else:
                 tail_steps_val = int(tail_steps)
                 t_blocks, _t_src_offsets, t_covered = _video_head_blocks(
-                    tail_context_latent, tail_n
+                    tail_context_latent, tail_n, start_px=tail_context_offset
                 )
                 t_video = video_from_latent(tail_context_latent)
                 if (
@@ -640,11 +678,10 @@ def apply_motion_context(
         "minimax_keyframes": merged,
         "minimax_frame_count": frame_count,
     }
-    if tail_span > 0:
-        # Caller trims this many frames off the decoded tail. Published on the
-        # conditioning so it always reflects what was actually pinned (a tail
-        # pin can be skipped for grid/resolution reasons).
-        values["minimax_tail_trim_frames"] = int(tail_span)
+    # No ``minimax_tail_trim_frames``: the tail replay lives past the export
+    # (``generation_frame_budget`` reserves the room), so the export simply stops
+    # before it — there is nothing to trim from a region that was never written.
+    # The span is logged below instead.
     out = node_helpers.conditioning_set_values(positive, values)
 
     context_audio = _usable_context_audio(context_audio)
@@ -763,41 +800,55 @@ def trim_export_tail(
     return images, {"waveform": waveform, "sample_rate": sr}
 
 
-def generation_frame_budget(visible_frames: int, context_frames: int) -> tuple[int, int]:
-    """Return ``(sample_length, trim_frames)`` for Director continuity.
+def generation_frame_budget(
+    visible_frames: int,
+    context_frames: int = 0,
+    role: str = "none",
+    tail_room: int = 0,
+) -> tuple[int, int, int, int]:
+    """Return ``(sample_length, trim_front, trim_back, export_length)``.
 
-    Director contract: UI segment duration == exported frames.
+    Director continuity contract: a segment is sampled as up to three zones and
+    only the middle is exported. Reference frames (head/tail pins) are *frozen*
+    conditioning rows (``img_update=False``) that are never denoised; the export
+    is always the clean middle. A referenced segment therefore drops the ``+5``
+    VAE phase and exports a clean ``17k`` instead of ``17k+5`` — the phase is
+    carried by the reference frames, so nothing is clipped.
 
-    Standalone Motion Context sets ``length`` to the sample and delivers
-    ``length - context`` (shorter than the UI seconds). That produced the
-    27s-vs-30s result. Here we instead:
+    Roles (see ``segment_continuity_role``):
+      * ``none``  standalone. sample = export = 17k+5.
+      * ``prev``  head pinned from the previous segment's tail (17n+5) at the
+                  front. sample = 17(k+n)+5, trim_front = 17n+5, export = 17k.
+      * ``next``  tail pinned from the next segment's opening (5 frames).
+                  sample = 17k+5, trim_back = 5, export = 17k.  [Phase 2/3]
+      * ``both``  head + tail pinned. sample = 17(k+n+1)+5,
+                  trim_front = 17n+5, trim_back = 17, export = 17k. [Phase 2/3]
 
-    1. ``sample = align(visible + context)`` so the pin fits in the head
-    2. Trim ``context`` frames after decode
-    3. Keep exactly ``visible`` frames for export
-    4. Next pin uses ``context_end_frame = trim + visible`` (not the sample
-       absolute end, which includes align overshoot beyond the export)
-    5. If phase-align places the pin a few frames before that export end,
-       drop those frames from the previous export before concat (v7)
-    6. The caller exports ``minimax_phase_aligned_export_frames(visible)`` —
-       17k instead of 17k+5 — so the next pin window ends exactly on the last
-       exported frame and step 5 never fires: no lost frames, no seam echo.
-       (Every context length in ``VIDEO_RUN_GRID`` is 17k+5, which is what makes
-       this exact fit possible.)
+    ``next``/``both`` carry the +5 VAE phase on the frozen tail reference too,
+    so their export is also 17k. The two-pass ``run_batch`` sampler guarantees
+    the next segment's latent exists on disk before these sample (trim_back is
+    realised by the export-length cap, not a separate decode pass).
     """
     from .frame_align import minimax_align_frame_count
 
     visible = minimax_align_frame_count(max(5, int(visible_frames)))
-    ctx = snap_context_frames(context_frames) if context_frames else 0
-    if ctx <= 0:
-        return visible, 0
-    sample = minimax_align_frame_count(visible + ctx)
-    if ctx >= sample:
-        raise ValueError(
-            f"Director continuity: context {ctx}f must be smaller than sample "
-            f"length {sample}f."
-        )
-    return sample, ctx
+    k = (visible - 5) // 17
+    if role == "prev":
+        n = max(0, (int(context_frames) - 5) // 17) if context_frames else 0
+        sample = 17 * (k + n) + 5
+        return sample, 17 * n + 5, 0, visible - 5
+    if role == "next":
+        # No head pin; the tail pin (next opening, TAIL_CONTEXT_FRAMES) lives past
+        # the export. sample = 17k+5, trim_back = TAIL_CONTEXT_FRAMES, export = 17k.
+        return visible, 0, TAIL_CONTEXT_FRAMES, visible - 5
+    if role == "both":
+        # Head pin (prev tail) + tail pin (next opening, 5 + 12 = 17 frames).
+        # sample = 17(k+n+1)+5, trim_front = 17n+5, trim_back = 17, export = 17k.
+        n = max(0, (int(context_frames) - 5) // 17) if context_frames else 0
+        sample = 17 * (k + n + 1) + 5
+        return sample, 17 * n + 5, 17, visible - 5
+    # none
+    return visible, 0, 0, visible
 
 
 def handoff_end_frame(*, trim_frames: int, export_frames: int) -> int:

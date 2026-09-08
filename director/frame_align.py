@@ -31,6 +31,11 @@ def pad_or_trim_frames(frames: torch.Tensor, target_len: int) -> torch.Tensor:
 def minimax_phase_aligned_export_frames(frame_count: int) -> int:
     """Snap an aligned export length down onto the 17-frame VAE cycle grid.
 
+    No longer used to size an export: continuity pins turned out to be
+    conditioning rows rather than occupied frames, so a segment now exports its
+    whole aligned length (see ``h3_motion_context.generation_frame_budget``).
+    Kept because the 17-frame reasoning below still explains the seam geometry.
+
     Motion context pins the previous segment's tail at a latent step that is a
     multiple of 5, i.e. a pixel offset that is a multiple of 17
     (``pixel_frames_for_latent_t``: 1 + 4 + 4 + 4 + 4 = 17 per 5 steps).

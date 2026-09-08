@@ -12780,8 +12780,9 @@ app.registerExtension({
             // 「清空缓存」 / 「清空节点所有缓存」 buttons. Unlike the old checkbox they
             // fire immediately via the HTTP route instead of riding a run's edge — so
             // clearing works even when the timeline has nothing to run.
-            //   · 清空缓存           → this node's conditioning + batch scratch files only
-            //                          (transient; never touches the durable segment files).
+            //   · 清空缓存           → this node's conditioning + batch scratch files, plus
+            //                          any legacy *_frames_ht.pt seam window (superseded by
+            //                          *_frames_ht.mp4; never touches the durable segment files).
             //   · 清空节点所有缓存   → additionally wipes every durable seg_* file in the
             //                          unified minimax_director_cache dir, forcing a full
             //                          re-render of every segment.
@@ -12798,6 +12799,7 @@ app.registerExtension({
                     : [
                         "· 文本编码缓存（conditioning）",
                         "· batch 中间缓存（scratch）",
+                        "· 旧版首尾帧缓存（*_frames_ht.pt，已改为 mp4，可安全回收）",
                     ];
                 if (!window.confirm(
                     "确认清空" + scope + "吗？\n\n" +
@@ -12805,7 +12807,7 @@ app.registerExtension({
                     "节点 ID：" + nodeId + "\n\n" +
                     "将删除：\n" +
                     willDelete.join("\n") +
-                    (clearAll ? "\n\n警告：片段缓存删除后需重新渲染所有片段！" : "\n\n不影响统一缓存目录内的片段帧/音频/AV latent。")
+                    (clearAll ? "\n\n警告：片段缓存删除后需重新渲染所有片段！" : "\n\n不影响片段帧 / 音频 / AV latent / clip，仅回收旧版首尾帧张量占用的空间。")
                 )) {
                     return;
                 }
@@ -12825,11 +12827,13 @@ app.registerExtension({
                         const cond = data.cleared?.conditioning ?? 0;
                         const batch = data.cleared?.batch ?? 0;
                         const segments = data.cleared?.segments ?? 0;
+                        const headtail = data.cleared?.headtail ?? 0;
                         const msg = [
                             "缓存已清空",
                             "工作流：" + (wfName || "（未命名）"),
                             "删除文本缓存：" + cond + " 个文件",
                             "删除中间缓存：" + (batch ? "已删除" : "无"),
+                            ...(headtail ? ["删除旧版首尾帧缓存：" + headtail + " 个文件"] : []),
                             ...(clearAll ? ["删除片段缓存：" + (segments ? "已删除" : "无")] : []),
                         ].join("\n");
                         console.log(

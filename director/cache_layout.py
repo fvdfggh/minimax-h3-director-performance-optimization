@@ -14,7 +14,8 @@ Kind                        File name                               Lifetime
 text encoding               ``cond_text_<hash>.pt``                 reusable
 sampled latent              ``seg_<hash>_latent.pt``                durable
 decoded frames              ``seg_<hash>_frames.pt``                legacy/optional
-head+tail frames            ``seg_<hash>_frames_ht.pt``             durable
+head+tail frames            ``seg_<hash>_frames_ht.mp4`` (+.json)   durable
+head+tail frames            ``seg_<hash>_frames_ht.pt``             legacy
 audio latent                ``seg_<hash>_audio.pt``                 durable
 rendered clip               ``seg_<hash>_clip.mp4``                 durable
 segment meta / handoff      ``seg_<hash>_meta.json`` / ``_handoff`` durable
@@ -94,10 +95,39 @@ VIT_CACHE_MAX_BYTES = 8 * 1024**3
 LATENT_SUFFIX = "_latent.pt"
 FRAMES_SUFFIX = "_frames.pt"
 FRAMES_HT_SUFFIX = "_frames_ht.pt"
+#: Video-backed head/tail window and its sidecar. See :data:`FRAMES_HT_N` for the
+#: rationale of keeping only the seam window, and ``segment_cache`` for why the
+#: window is stored as a clip rather than a raw tensor: the tensor form is
+#: uncompressed uint8 (~88 MB for 32 frames at 720p) and dwarfs every other
+#: artefact of the segment, including the *whole* render in ``clip.mp4``.
+#:
+#: The sidecar exists because a container cannot carry what the reader needs:
+#: ``total`` (frame count of the render the window was cut from, used to reject a
+#: window and a clip from two different takes) and the unpadded H/W (mp4 needs
+#: even dimensions, so an odd-sized segment encodes one row/column wider).
+FRAMES_HT_MP4_SUFFIX = "_frames_ht.mp4"
+FRAMES_HT_META_SUFFIX = "_frames_ht.json"
 #: Number of leading/trailing frames kept in ``frames_ht`` (mirrors
 #: ``segment_continuity._seam_window()`` so the seam pipeline has real pixels
 #: without persisting the whole segment tensor).
 FRAMES_HT_N = 16
+#: libx264 quality / chroma for the head+tail clip.
+#:
+#: The window is what makes a seam bit-exact, so it used to be stored losslessly
+#: — at ~88 MB per segment that was by far the largest file in the cache. Trading
+#: exactness for an order-of-magnitude smaller cache is a deliberate default:
+#:
+#: * ``crf 12`` keeps the window visibly cleaner than the ``crf 18`` body it is
+#:   spliced onto, so the join does not read as a soft patch.
+#: * ``yuv420p`` matches ``clip.mp4``'s chroma, so window and body agree; with
+#:   444p the first/last frames would be sharper *and* less subsampled than the
+#:   frames right after them.
+#:
+#: Set ``crf=0`` for a mathematically lossless window (still smaller than the
+#: tensor, but several times larger than this default).
+HEADTAIL_CRF = 12
+HEADTAIL_PIX_FMT = "yuv420p"
+HEADTAIL_PRESET = "veryfast"
 AUDIO_SUFFIX = "_audio.pt"
 CLIP_SUFFIX = "_clip.mp4"
 META_SUFFIX = "_meta.json"
@@ -205,6 +235,8 @@ def segment_paths(root: Path, stem: str) -> dict[str, Path]:
         "latent": root / f"{stem}{LATENT_SUFFIX}",
         "frames": root / f"{stem}{FRAMES_SUFFIX}",
         "frames_ht": root / f"{stem}{FRAMES_HT_SUFFIX}",
+        "frames_ht_mp4": root / f"{stem}{FRAMES_HT_MP4_SUFFIX}",
+        "frames_ht_meta": root / f"{stem}{FRAMES_HT_META_SUFFIX}",
         "audio": root / f"{stem}{AUDIO_SUFFIX}",
         "clip": root / f"{stem}{CLIP_SUFFIX}",
         "meta": root / f"{stem}{META_SUFFIX}",
@@ -221,6 +253,8 @@ SEGMENT_SUFFIXES = (
     "_pre_frames.pt",
     "_pre_latent.pt",
     "_pre_meta.json",
+    "_frames_ht.json",
+    "_frames_ht.mp4",
     "_frames_ht.pt",
     "_handoff.json",
     "_latent.pt",
@@ -271,6 +305,9 @@ def iter_segment_files(root: Path) -> list[Path]:
     suffixes = (
         LATENT_SUFFIX,
         FRAMES_SUFFIX,
+        FRAMES_HT_SUFFIX,
+        FRAMES_HT_MP4_SUFFIX,
+        FRAMES_HT_META_SUFFIX,
         AUDIO_SUFFIX,
         CLIP_SUFFIX,
         META_SUFFIX,
@@ -285,6 +322,27 @@ def iter_segment_files(root: Path) -> list[Path]:
             if SCRATCH_MARK in name:
                 continue  # scratch, not durable
             if any(name.endswith(s) for s in suffixes):
+                out.append(p)
+    return out
+
+
+def iter_legacy_headtail_files(root: Path) -> list[Path]:
+    """``*_frames_ht.pt`` seam windows written before the window became a clip.
+
+    ``_frames_ht.mp4`` superseded them, but a segment that is never re-rendered
+    keeps its tensor copy forever — nothing else rewrites that slot — and the
+    tensor is the largest file a segment owns (~88 MB at 720p), so old runs leave
+    a cache that is mostly dead weight.
+
+    Dropping them is safe and is *not* the same as dropping the render: the
+    window only ever refined frames that also exist in ``clip.mp4``, so a reader
+    without it rebuilds the segment from the clip and the seam falls back to the
+    clip's own head/tail frames.
+    """
+    out: list[Path] = []
+    for glob in SEGMENT_GLOBS:
+        for p in root.rglob(glob):
+            if p.is_file() and p.name.endswith(FRAMES_HT_SUFFIX):
                 out.append(p)
     return out
 

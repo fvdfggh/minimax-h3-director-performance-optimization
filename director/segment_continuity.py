@@ -1717,14 +1717,13 @@ def concat_chunks_lazy(
         if chunk is None:
             raise _miss(seg, label)
         chunk = chunk.float()
-        # Segment clip caches now persist the *full* VAE decode (continuity prefix
+        # Segment clip caches persist the *full* VAE decode (replayed head
         # included), so a standalone download is the exact requested length. The
-        # merge, however, must reproduce the old trimmed clip: apply the same
-        # continuity prefix trim the generator used, turning the full clip back into
-        # the overlap-free segment the seam pipeline expects. Without this, every
-        # non-first segment would carry its prefix into the join and the merged
-        # video would grow / stutter at each seam — exactly the regression we move
-        # to the segment download instead.
+        # merge must reproduce the trimmed clip: drop the replayed head again,
+        # turning the full clip back into the replay-free segment the seam
+        # pipeline expects. Without this every non-first segment would carry its
+        # replay into the join and the merged video would grow / stutter at each
+        # seam, exactly the regression we move to the segment download instead.
         if fp is not None:
             trim = int(fp.get("trim_frames") or 0)
             exp = int(fp.get("export_frames") or 0)

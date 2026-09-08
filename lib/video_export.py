@@ -85,8 +85,16 @@ def write_frames_to_mp4(
     *,
     fps: float,
     audio: dict[str, Any] | None = None,
+    crf: int = 18,
+    pix_fmt: str = "yuv420p",
+    preset: str = "veryfast",
 ) -> Path:
-    """Write NHWC float frames to ``path`` as H.264 MP4. Raises on failure."""
+    """Write NHWC float frames to ``path`` as H.264 MP4. Raises on failure.
+
+    ``crf`` / ``pix_fmt`` / ``preset`` are exposed because the head+tail seam
+    window wants a different quality point than a rendered clip; the defaults
+    reproduce exactly what every caller encoded before they existed.
+    """
     ffmpeg = _ffmpeg_bin()
     if not ffmpeg:
         raise RuntimeError(
@@ -134,11 +142,11 @@ def write_frames_to_mp4(
             "-c:v",
             "libx264",
             "-pix_fmt",
-            "yuv420p",
+            pix_fmt,
             "-preset",
-            "veryfast",
+            preset,
             "-crf",
-            "18",
+            f"{int(crf)}",
             "-movflags",
             "+faststart",
         ]

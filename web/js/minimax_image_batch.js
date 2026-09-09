@@ -751,12 +751,19 @@ function relPath(upload) {
     return sub ? `${sub}/${name}` : name;
 }
 
-function viewUrl(imageFile) {
+function viewUrl(imageFile, type = "input") {
     const norm = String(imageFile || "").replace(/\\/g, "/");
     const slash = norm.lastIndexOf("/");
     const filename = slash >= 0 ? norm.slice(slash + 1) : norm;
     const subfolder = slash >= 0 ? norm.slice(0, slash) : "";
-    const params = new URLSearchParams({ filename, type: "input" });
+    // Must echo the record's own ``type``: ``/api/view`` resolves the file under
+    // whichever directory that names. Hardcoding input made any non-input media
+    // 404 in the preview even though the backend could read it — Director's own
+    // renders live in output/. ComfyUI only serves input/output/temp.
+    const dirType = ["input", "output", "temp"].includes(String(type || "").toLowerCase())
+        ? String(type).toLowerCase()
+        : "input";
+    const params = new URLSearchParams({ filename, type: dirType });
     if (subfolder) params.set("subfolder", subfolder);
     return api.apiURL(`/view?${params.toString()}`);
 }
@@ -1741,20 +1748,22 @@ function openAssetPreviewModal(kind, ref) {
         body.textContent = t("r2v.preview.noFile");
     } else if (kind === "image") {
         const img = document.createElement("img");
-        img.src = viewUrl(file);
+        img.src = viewUrl(file, ref?.type);
         img.alt = "";
         body.appendChild(img);
     } else if (kind === "video") {
         const v = document.createElement("video");
         v.controls = true;
         v.autoplay = true;
-        v.src = viewUrl(file);
+        // Echo the record's ``type``: Director-referenced renders resolved as
+        // input 404'd here, even though the backend read them fine.
+        v.src = viewUrl(file, ref?.type);
         body.appendChild(v);
     } else {
         const a = document.createElement("audio");
         a.controls = true;
         a.autoplay = true;
-        a.src = viewUrl(file);
+        a.src = viewUrl(file, ref?.type);
         body.appendChild(a);
     }
 
@@ -2169,7 +2178,7 @@ function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
             el.appendChild(progress);
             const audio = document.createElement("audio");
             audio.preload = "metadata";
-            audio.src = viewUrl(file);
+            audio.src = viewUrl(file, ref?.type);
             audio.className = "bd-r2v-media";
             el.appendChild(audio);
             bindR2vMediaPlayback(audio, playBtn, progress);
@@ -2212,7 +2221,7 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     const label = refVideoLabel(slot);
     const file = ref?.videoFile || "";
     const posterSrc = ref?.previewImageUrl
-        || (ref?.previewImageFile ? viewUrl(ref.previewImageFile) : "");
+        || (ref?.previewImageFile ? viewUrl(ref.previewImageFile, ref?.type) : "");
     const hasMedia = !!(file || posterSrc || ref?.linked);
     const titleFile = file || ref?.fileName || ref?.previewImageFile || "";
     el.className = `bd-batch-video${hasMedia ? " has-video" : ""}`;
@@ -2238,7 +2247,7 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
             video.preload = "metadata";
             video.muted = true;
             video.playsInline = true;
-            video.src = viewUrl(file);
+            video.src = viewUrl(file, ref?.type);
             video.className = "bd-r2v-media";
             thumb.appendChild(video);
             const playBtn = document.createElement("button");

@@ -7770,8 +7770,14 @@ class MiniMaxH3DirectorEditor {
         });
     }
 
-    async listInputMedia(kind) {
-        const resp = await api.fetchApi(`/minimax/director/list_input_media?kind=${encodeURIComponent(kind)}`);
+    async listInputMedia(kind, { includeCache = false } = {}) {
+        // ``includeCache`` pulls in Director's own rendered clips from output/.
+        // Opt-in per call so image/audio pickers keep their current contents —
+        // this is only ever useful for video, and only when the user is hunting
+        // for something they generated earlier.
+        const params = new URLSearchParams({ kind });
+        if (includeCache) params.set("includeCache", "1");
+        const resp = await api.fetchApi(`/minimax/director/list_input_media?${params.toString()}`);
         if (!resp.ok) {
             const text = (await resp.text()).trim();
             if (resp.status === 404) throw new Error(t("mediaPicker.needRestart"));
@@ -7793,7 +7799,7 @@ class MiniMaxH3DirectorEditor {
         });
     }
 
-    showInputMediaPicker({ kind, title, accept, currentValue = "", multi = false } = {}) {
+    showInputMediaPicker({ kind, title, accept, currentValue = "", multi = false, includeCache = false } = {}) {
         return new Promise((resolve) => {
             this._closeBdModal();
 
@@ -8138,7 +8144,7 @@ class MiniMaxH3DirectorEditor {
                 tbodyEl.innerHTML = "";
                 renderPreview(null);
                 try {
-                    listedItems = await this.listInputMedia(kind);
+                    listedItems = await this.listInputMedia(kind, { includeCache });
                     itemsByPath = new Map(listedItems.map((item) => [item.relPath, item]));
                     renderRows();
                     if (multi) {
@@ -8330,6 +8336,11 @@ class MiniMaxH3DirectorEditor {
             title: opts.title || t("mediaPicker.pickVideo"),
             accept: "video/*,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
             currentValue: opts.currentValue || "",
+            // Rendered clips count as pickable source material here — that is
+            // the whole point of reusing an earlier render as a reference.
+            // Entries render as ordinary rows; nothing about the picker's
+            // look changes.
+            includeCache: true,
         });
         return this._resolveVideoChoice(choice);
     }
@@ -8342,6 +8353,7 @@ class MiniMaxH3DirectorEditor {
             accept: "video/*,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
             currentValue: opts.currentValue || "",
             multi: true,
+            includeCache: true,
         });
         if (!Array.isArray(choices) || !choices.length) return [];
         const out = [];

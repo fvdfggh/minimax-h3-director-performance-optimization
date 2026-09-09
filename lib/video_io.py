@@ -35,26 +35,83 @@ def _require_av():
         ) from exc
 
 
+def _directories_for_type(type_name: str) -> list[str]:
+    """Absolute directories to search for a media ``type``, most specific first.
+
+    Keeps to input/output/temp — the directories ComfyUI itself resolves for
+    ``/api/view?type=…`` — so a timeline can never point outside them.
+    """
+    key = (type_name or "input").strip().lower() or "input"
+    out: list[str] = []
+    try:
+        primary = folder_paths.get_directory_by_type(key)
+    except Exception:
+        primary = None
+    if primary:
+        out.append(primary)
+    if key != "input":
+        # Fall back to input, not the reverse: a record written before ``type``
+        # was honoured still has to resolve, and input is where uploads land.
+        try:
+            inp = folder_paths.get_input_directory()
+        except Exception:
+            inp = None
+        if inp and inp not in out:
+            out.append(inp)
+    return out
+
+
 def resolve_video_path(video: dict) -> str:
-    """Resolve timeline video metadata to an absolute path under ComfyUI input."""
+    """Resolve timeline video metadata to an absolute file path.
+
+    Honours ``video["type"]`` (``input`` / ``output`` / ``temp``), which every
+    reference-video record already carries and this function used to discard —
+    it pinned *all* candidates under ComfyUI's input directory, so any clip
+    living elsewhere was reported missing even though the caller had told us
+    exactly where it was. That kept Director's own renders unreachable: they are
+    written under ``output/minimax_director_cache/…``.
+
+    Resolution order, mirroring how ComfyUI's own ``/api/view`` reads files:
+
+      1. the directory matching ``type`` (default ``input``), trying
+         ``subfolder + basename``, then ``videoFile`` as-is, then ``basename``;
+      2. for non-input types, the same three shapes under ``input``.
+
+    I/O backends add extra directories; ``get_directory_by_type`` already knows
+    which ones exist, so this stays correct for those too.
+    """
     video_file = (video.get("videoFile") or video.get("fileName") or "").strip()
     if not video_file:
         raise ValueError("No video file in MiniMax H3 Director timeline.")
 
-    base = folder_paths.get_input_directory()
     subfolder = (video.get("subfolder") or "").strip().replace("\\", "/")
+    # Basename only, with any traversal attempt stripped before it reaches join.
+    clean_name = os.path.basename(str(video_file).replace("\\", "/"))
+    if not clean_name or clean_name in (".", ".."):
+        raise ValueError(f"Invalid video file reference: {video_file!r}")
 
-    candidates = []
-    if subfolder and not video_file.startswith(subfolder):
-        candidates.append(os.path.join(base, subfolder, os.path.basename(video_file)))
-    candidates.append(os.path.join(base, video_file.replace("/", os.sep)))
-    candidates.append(os.path.join(base, os.path.basename(video_file)))
+    bases = _directories_for_type(video.get("type"))
+    if not bases:
+        bases = [folder_paths.get_input_directory()]
 
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
+    for base in bases:
+        root = os.path.abspath(base)
+        candidates = []
+        if subfolder:
+            candidates.append(os.path.join(root, subfolder.replace("/", os.sep), clean_name))
+        candidates.append(os.path.join(root, str(video_file).replace("/", os.sep)))
+        candidates.append(os.path.join(root, clean_name))
+        for path in candidates:
+            resolved = os.path.abspath(path)
+            # Never let a crafted subfolder/file escape the type root.
+            if os.path.commonpath([resolved, root]) != root:
+                continue
+            if os.path.isfile(resolved):
+                return resolved
 
-    raise ValueError(f"Video file not found in ComfyUI input: {video_file}")
+    raise ValueError(
+        f"Video file not found ({video.get('type') or 'input'}): {video_file}"
+    )
 
 
 def ffprobe_bin() -> str | None:

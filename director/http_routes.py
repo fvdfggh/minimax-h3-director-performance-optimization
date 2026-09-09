@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import uuid
+from pathlib import Path
 
 import folder_paths
 from aiohttp import web
@@ -68,7 +69,111 @@ def _peek_image_size(path: str) -> tuple[int, int]:
         return 0, 0
 
 
-def _list_input_media(kind: str) -> list[dict]:
+#: Cap on how many Director rendered clips are listed. The cache tree grows one
+#: file group per segment per node, so an unbounded walk would stall the picker
+#: on a large project; newest-first means the cap costs relevance, not recency.
+MAX_DIRECTOR_CLIPS = 300
+
+
+def _list_director_clips(exclude_rel: set[str] | None = None) -> list[dict]:
+    """Rendered Director clips (``*_clip.mp4``) living under ``output/``.
+
+    Video picker entries for the "use something I already generated as a
+    reference" case. They are returned with ``type="output"``, which is exactly
+    what :func:`resolve_video_path` and ``/api/view`` need now that both honour
+    it; before that they were unlistable *and* unresolvable.
+
+    Grouped by the parent directory (``<workflow slug>/node_<id>``) rather than
+    reported per file: mediainfo probes are the expensive part, so each group is
+    probed once for dimensions and its members inherit them. Files are skipped
+    when a directory can no longer be read, keeping one bad node from emptying
+    the whole list.
+    """
+    try:
+        from .cache_layout import CACHE_ROOT, CLIP_SUFFIX, output_root
+
+        out_root = Path(output_root())
+        cache_root = out_root / CACHE_ROOT
+    except Exception as exc:  # pragma: no cover - import guard
+        log.warning("MiniMax H3 Director cache root unavailable: %s", exc)
+        return []
+    if not cache_root.is_dir():
+        return []
+
+    groups: dict[str, dict] = {}
+    for dirpath, _dirs, files in os.walk(cache_root):
+        rel_dir = ""
+        try:
+            rel_dir = os.path.relpath(dirpath, cache_root).replace("\\", "/")
+        except ValueError:
+            continue
+        if rel_dir == ".":
+            rel_dir = ""
+        members: list[str] = []
+        for name in files:
+            if not name.endswith(CLIP_SUFFIX):
+                continue
+            abs_path = os.path.join(dirpath, name)
+            try:
+                mtime = float(os.stat(abs_path).st_mtime)
+            except OSError:
+                continue
+            rel_path = f"{CACHE_ROOT}/{rel_dir}/{name}" if rel_dir else f"{CACHE_ROOT}/{name}"
+            members.append((abs_path, name, rel_path, mtime))
+        if not members:
+            continue
+        members.sort(key=lambda item: (-item[3], item[1]))
+        groups[rel_dir] = {"members": members, "newest": max(m[3] for m in members)}
+
+    # Newest group first: long projects bury today's renders under months of runs.
+    ordered = sorted(groups.items(), key=lambda kv: (-kv[1]["newest"], kv[0]))
+
+    items: list[dict] = []
+    seen: set[str] = set(exclude_rel or set())
+    peek_video = None
+    try:
+        from ..lib.video_io import peek_video_size as peek_video
+    except Exception:  # pragma: no cover - probe failures are non-fatal
+        peek_video = None
+
+    for _rel_dir, info in ordered:
+        if len(items) >= MAX_DIRECTOR_CLIPS:
+            break
+        width, height = 0, 0
+        # Probe the newest member once: same node ⇒ same dimensions.
+        first_abs = info["members"][0][0]
+        if peek_video is not None:
+            try:
+                width, height = peek_video(first_abs)
+            except Exception:
+                width, height = 0, 0
+        for abs_path, name, rel_path, mtime in info["members"]:
+            if len(items) >= MAX_DIRECTOR_CLIPS:
+                break
+            if rel_path in seen:
+                # Guard against an input-dir file whose relative path happens to
+                # match: the picker keys rows by relPath, so a collision would
+                # silently bind one row to the other's ``type``.
+                continue
+            seen.add(rel_path)
+            items.append(
+                {
+                    "name": name,
+                    "fileName": name,
+                    "relPath": rel_path,
+                    "subfolder": os.path.dirname(rel_path).replace("\\", "/"),
+                    "type": "output",
+                    "modified": mtime,
+                    "width": width,
+                    "height": height,
+                    "mediaKind": "video",
+                    "source": "director-cache",
+                }
+            )
+    return items
+
+
+def _list_input_media(kind: str, include_cache: bool = False) -> list[dict]:
     input_dir = folder_paths.get_input_directory()
     exts = _get_media_exts(kind)
     peek_video = None
@@ -121,6 +226,10 @@ def _list_input_media(kind: str) -> list[dict]:
                 }
             )
     items.sort(key=lambda item: (-item["modified"], item["relPath"]))
+    if include_cache and kind == "video":
+        # Appended rather than merged inline: uploads and renders solve different
+        # problems, and keeping them contiguous makes each block scannable.
+        items.extend(_list_director_clips(exclude_rel={item["relPath"] for item in items}))
     return items
 
 
@@ -412,7 +521,13 @@ async def minimax_list_input_media(request):
         kind = str(request.query.get("kind") or "").strip().lower()
         if not kind:
             return web.Response(status=400, text="Missing kind.")
-        items = _list_input_media(kind)
+        # Generated Director renders live under output/, so they only appear when
+        # the caller asks for them — and only for video, which is the only kind
+        # they can be.
+        include_cache = str(request.query.get("includeCache") or "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        items = _list_input_media(kind, include_cache=include_cache)
     except ValueError as exc:
         return web.Response(status=400, text=str(exc))
     except Exception as exc:

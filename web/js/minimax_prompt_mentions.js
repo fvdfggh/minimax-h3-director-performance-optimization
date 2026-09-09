@@ -782,7 +782,7 @@ function writeTextareaValue(textarea, value) {
  * Wire @-mention dropdown + token chip editor on a prompt textarea.
  * Typing `@` lists uploaded reference images / audios / videos; pick one to insert official tags.
  */
-export function wirePromptImageMentions(editorHost, textarea, getMedia) {
+export function wirePromptImageMentions(editorHost, textarea, getMedia, options = {}) {
     if (!textarea || textarea.dataset.mentionWired) return;
     textarea.dataset.mentionWired = "1";
     injectStyles();
@@ -790,6 +790,14 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
     const rich = ensureTokenShell(textarea);
     const chipOpts = {
         onActivate: ({ kind, ordinal }) => {
+            // 调用方可以接管点击（例如直接弹出素材预览）；返回 true 则不再做定位滚动。
+            let handled = false;
+            try {
+                handled = !!options?.onMentionActivate?.({ kind, ordinal });
+            } catch {
+                /* optional hook */
+            }
+            if (handled) return;
             try {
                 editorHost?.highlightRefSlot?.(kind, ordinal - 1);
             } catch {

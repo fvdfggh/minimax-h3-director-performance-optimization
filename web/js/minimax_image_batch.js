@@ -74,29 +74,23 @@ export function nextRefIndexAfter(refs, hasFn) {
     return max + 1;
 }
 
-/** When common params are on, group picture slots start after common's last filled index. */
+/** 素材不再限量：公共/组内均可无限上传，超出 9/3/3 的仅展示、不进图（前端红色告警）。 */
+const R2V_UNLIMITED = Number.MAX_SAFE_INTEGER;
+
+/** When common assets exist, group picture slots start after common's last filled index. */
 export function r2vCommonPicOffset(editor) {
     if (!editor?.isR2vCommonEnabled?.()) return 0;
-    return Math.min(
-        R2V_PICTURE_SLOTS,
-        nextRefIndexAfter(editor.timeline?.global?.refs, _refHasImage),
-    );
+    return nextRefIndexAfter(editor.timeline?.global?.refs, _refHasImage);
 }
 
 export function r2vCommonAudioOffset(editor) {
     if (!editor?.isR2vCommonEnabled?.()) return 0;
-    return Math.min(
-        MAX_REFERENCE_AUDIOS,
-        nextRefIndexAfter(editor.timeline?.global?.refAudios, _refHasAudio),
-    );
+    return nextRefIndexAfter(editor.timeline?.global?.refAudios, _refHasAudio);
 }
 
 export function r2vCommonVideoOffset(editor) {
     if (!editor?.isR2vCommonEnabled?.()) return 0;
-    return Math.min(
-        MAX_REFERENCE_VIDEOS,
-        nextRefIndexAfter(editor.timeline?.global?.refVideos, _refHasVideo),
-    );
+    return nextRefIndexAfter(editor.timeline?.global?.refVideos, _refHasVideo);
 }
 
 export function listCommonImageRefs(editor) {
@@ -180,7 +174,7 @@ export function rebaseR2vGroupSlotsForCommon(editor) {
     let changed = false;
     for (const seg of editor.timeline?.segments || []) {
         if (Array.isArray(seg.refs) && seg.refs.length) {
-            const r = _rebaseIndexedMedia(seg.refs, _refHasImage, picOff, R2V_PICTURE_SLOTS);
+            const r = _rebaseIndexedMedia(seg.refs, _refHasImage, picOff, R2V_UNLIMITED);
             if (r.changed) {
                 seg.refs = r.list;
                 changed = true;
@@ -188,7 +182,7 @@ export function rebaseR2vGroupSlotsForCommon(editor) {
         }
         if (Array.isArray(seg.refAudios) && seg.refAudios.length) {
             const r = _rebaseIndexedMedia(
-                seg.refAudios, _refHasAudio, audOff, MAX_REFERENCE_AUDIOS,
+                seg.refAudios, _refHasAudio, audOff, R2V_UNLIMITED,
             );
             if (r.changed) {
                 seg.refAudios = r.list;
@@ -197,7 +191,7 @@ export function rebaseR2vGroupSlotsForCommon(editor) {
         }
         if (Array.isArray(seg.refVideos) && seg.refVideos.length) {
             const r = _rebaseIndexedMedia(
-                seg.refVideos, _refHasVideo, vidOff, MAX_REFERENCE_VIDEOS,
+                seg.refVideos, _refHasVideo, vidOff, R2V_UNLIMITED,
             );
             if (r.changed) {
                 seg.refVideos = r.list;
@@ -430,7 +424,9 @@ function stopAllPlayers(root) {
 export const IMAGE_BATCH_STYLES = `
 .bd-btn.bd-disabled,.bd-btn:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
 .bd-mode button.bd-disabled,.bd-mode button:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
-.bd-batch{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
+.bd-batch{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px}
+/* 只有真的渲染了素材组(r2v)卡片时才用「不收缩」的高度方案；t2v/i2v 等保持默认。 */
+.bd-batch:has(.bd-batch-r2v),.bd-batch-list:has(.bd-batch-r2v){flex:0 0 auto}
 .bd-batch-i2v-notice{display:none;color:#ffb74d;background:#3a2a12;border:1px solid #a67c00;border-radius:6px;padding:8px 10px;font-size:11px;line-height:1.5}
 .bd-batch-i2v-notice.visible{display:block}
 .bd-batch-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -452,9 +448,9 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 /* Default cap; batch-fill mode overrides via .bd-wrap.bd-batch-fill + JS max-height.
    放宽上限, 避免素材组等较长的批处理列表被压在 640px 内滚动. */
-.bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px;min-height:0;flex:0 0 auto}
-/* 仅素材组(r2v)卡片存在的列表兜底最小高度 1280; 其他模块一律 640, 不受视口影响 */
-.bd-batch-list:has(.bd-batch-r2v){max-height:none;min-height:1280px}
+.bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px;min-height:0}
+/* 素材组(r2v)列表不截断高度：具体高度由卡片内的素材框决定（见下） */
+.bd-batch-list:has(.bd-batch-r2v){max-height:none}
 .bd-batch-card{background:linear-gradient(165deg,#1a1a1a 0%,#141414 55%,#111 100%);border:1px solid #2c2c2c;border-radius:10px;padding:12px 14px;display:grid;gap:10px;align-items:stretch;box-shadow:inset 0 1px 0 rgba(255,255,255,.03);flex:0 0 auto}
 /* t2v: 提示词为主，预览收成右侧窄栏 */
 .bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(132px,168px)}
@@ -492,6 +488,7 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff;flex-shrink:0}
 .bd-batch-continuity span{white-space:nowrap}
 .bd-batch-head-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+.bd-batch-pager-row{grid-column:1/-1;display:flex;align-items:center;justify-content:flex-start;gap:6px;flex-wrap:wrap;margin:4px 0 6px;flex-shrink:0}
 .bd-batch-fc{display:flex;align-items:center;gap:6px;color:#aaa;font-size:12px}
 .bd-batch-r2v .bd-batch-fc{color:#c8c8c8;font-size:12px;gap:8px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:8px;padding:5px 10px}
 .bd-batch-fc input{width:72px;background:#181818;border:1px solid #444;border-radius:5px;color:#eee;padding:5px 8px;font-size:13px}
@@ -507,8 +504,10 @@ export const IMAGE_BATCH_STYLES = `
 /* 素材组列独立加高: 不再强制与右侧提示词列等高(align-items:start),
    左侧素材组列按自身 min-height 成形, 右侧提示词列按内容自适应 */
 .bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:start;min-height:0;flex:1 1 auto}
-/* 素材组列：按内容自适应, 内容超出时内部滚动 */
+/* 素材组列：最低高度 1080（与 r2v 行高预算一致）并封顶，超出内部滚动；
+   不再随素材数量被撑高 —— 1080 是「素材框」自己的高度，不是外层列表的。 */
 .bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0;overflow-y:auto;flex:1 1 auto}
+.bd-batch-r2v .bd-batch-r2v-assets{min-height:1080px;max-height:1080px}
 .bd-batch-r2v-assets>.bd-r2v-section{flex:0 0 auto}
 .bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:320px;flex:1 1 auto}
 .bd-r2v-section{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0;box-sizing:border-box}
@@ -525,6 +524,79 @@ export const IMAGE_BATCH_STYLES = `
 .bd-r2v-common-inherit .bd-batch-ref:hover{border-color:#2a3a4a;background:#080808;transform:none}
 .bd-r2v-common-inherit .bd-batch-ref .cap{color:#8af}
 .bd-r2v-slot-hint{font-size:10px;color:#6a7a8a;line-height:1.35;margin:0}
+
+/* ---- r2v 布局改造：页码组件 ---- */
+.bd-r2v-group-pager{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}
+.bd-r2v-page-box{min-width:26px;height:24px;padding:0 6px;box-sizing:border-box;border:1px solid #3a4a5a;border-radius:5px;background:#1b222b;color:#c8d6e5;font-size:11px;line-height:1;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:border-color .15s,background .15s,color .15s}
+.bd-r2v-page-box:hover{border-color:#6a9aca;background:#26313d;color:#fff}
+.bd-r2v-page-box.on{border-color:#4a9fd8;background:#1f3a4d;color:#eaf6ff;font-weight:700}
+.bd-r2v-page-box.bd-r2v-page-common{min-width:auto;padding:0 9px;letter-spacing:.02em}
+.bd-r2v-page-box.over{border-color:#e05a5a;background:#3a1a1a;color:#ffb3b3}
+.bd-r2v-page-box.over:hover{border-color:#ff6a6a;background:#4a2020;color:#fff}
+
+.bd-r2v-mini-pager{display:flex;align-items:center;justify-content:center;gap:3px;margin-top:6px;flex-wrap:wrap}
+.bd-r2v-mini-pager-label{font-size:10px;color:#7a8a9a;margin-right:2px}
+.bd-r2v-mini-pager-btn{min-width:20px;height:20px;padding:0 4px;box-sizing:border-box;border:1px solid #333;border-radius:4px;background:#14181d;color:#9fb0c0;font-size:10px;line-height:1;display:inline-flex;align-items:center;justify-content:center;cursor:pointer}
+.bd-r2v-mini-pager-btn:hover:not(:disabled){border-color:#5a8ab0;color:#eaf6ff;background:#1e2731}
+.bd-r2v-mini-pager-btn.on{border-color:#4a9fd8;background:#1f3a4d;color:#eaf6ff;font-weight:700}
+.bd-r2v-mini-pager-btn.nav{padding:0 6px}
+.bd-r2v-mini-pager-btn.gap{border:none;background:transparent;color:#5a6a7a;cursor:default}
+
+/* ---- r2v 布局改造：模块头（公共/片段 + 折叠） ---- */
+/* .bd-r2v-section-head / -actions 同时被全局面板（t2v/i2v/单段等非 r2v）复用，
+   所以这里不再写无前缀的全局规则 —— 否则「选已有 / 计数」会被 margin-left:auto
+   推到最右，非 r2v 界面跟着变样。只按 r2v 作用域覆盖。 */
+.bd-batch-r2v .bd-r2v-section-actions{gap:6px;margin-left:auto}
+.bd-r2v-scope-group{display:inline-flex;border:1px solid #3a4a5a;border-radius:5px;overflow:hidden}
+.bd-r2v-scope-btn{border:none;background:#1b222b;color:#9fb0c0;font-size:11px;padding:3px 8px;cursor:pointer;line-height:1.4}
+.bd-r2v-scope-btn:hover{background:#26313d;color:#eaf6ff}
+.bd-r2v-scope-btn+.bd-r2v-scope-btn{border-left:1px solid #3a4a5a}
+.bd-r2v-scope-btn.on{background:#1f3a4d;color:#eaf6ff;font-weight:700}
+.bd-r2v-fold-btn{min-width:22px;height:22px;border:1px solid #3a4a5a;border-radius:5px;background:#1b222b;color:#9fb0c0;font-size:11px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+.bd-r2v-fold-btn:hover{border-color:#6a9aca;color:#eaf6ff;background:#26313d}
+.bd-batch-r2v .bd-r2v-section.folded{cursor:default}
+
+/* ---- r2v 布局改造：素材 tile hover 热区 ---- */
+.bd-batch-r2v .bd-batch-ref,.bd-batch-r2v .bd-batch-video,.bd-batch-r2v .bd-batch-audio{position:relative}
+.bd-r2v-tile-actions{position:absolute;inset:0;display:flex;flex-direction:column;opacity:0;pointer-events:none;transition:opacity .12s;z-index:2}
+.bd-batch-ref:hover .bd-r2v-tile-actions,.bd-batch-video:hover .bd-r2v-tile-actions,.bd-batch-audio:hover .bd-r2v-tile-actions{opacity:1;pointer-events:auto}
+.bd-r2v-tile-act{flex:1 1 50%;width:100%;border:none;background:rgba(0,0,0,.62);color:#eaf6ff;font-size:10px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0}
+.bd-r2v-tile-preview{border-bottom:1px solid rgba(255,255,255,.12)}
+.bd-r2v-tile-preview:hover{background:rgba(30,90,140,.78)}
+.bd-r2v-tile-copy:hover{background:rgba(20,110,70,.78)}
+
+/* 常驻在首格的「点击上传」空位：与其他空 tile 区分开 */
+.bd-batch-r2v .bd-r2v-empty-slot{border-style:dashed;border-color:#4a6a8a;background:#0b0f14}
+.bd-batch-r2v .bd-r2v-empty-slot:hover{border-color:#6a9aca;background:#101a24}
+
+/* ---- r2v 布局改造：引用量统计 ---- */
+.bd-prompt-head{display:flex;align-items:center;gap:8px;min-width:0}
+.bd-ref-stat{display:inline-flex;align-items:center;gap:8px;margin-left:auto;font-size:10px;color:#8ea;flex-wrap:wrap;justify-content:flex-end}
+.bd-ref-stat-item{white-space:nowrap}
+.bd-ref-stat-item.over{color:#ff7a7a;font-weight:700}
+.bd-batch-prompts.over{border-color:#e05a5a;box-shadow:0 0 0 1px rgba(224,90,90,.35) inset}
+.bd-batch-card.over{border-color:#e05a5a;box-shadow:0 0 0 1px rgba(224,90,90,.3)}
+.bd-r2v-over-hint{margin:0 0 6px;padding:4px 8px;border:1px solid #e05a5a;background:rgba(224,90,90,.12);border-radius:5px;color:#ff9a9a;font-size:11px;line-height:1.4}
+
+/* ---- r2v 布局改造：预览弹窗 / toast ---- */
+.bd-r2v-preview-overlay{position:fixed;inset:0;z-index:10001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.72)}
+.bd-r2v-preview-modal{max-width:min(90vw,860px);max-height:86vh;display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid #3a4a5a;border-radius:10px;background:#141a21}
+.bd-r2v-preview-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.bd-r2v-preview-head b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e6e6e6;font-size:12px}
+.bd-r2v-preview-body{display:flex;align-items:center;justify-content:center;min-height:120px;overflow:auto}
+.bd-r2v-preview-body img,.bd-r2v-preview-body video{max-width:100%;max-height:70vh;background:#000}
+.bd-r2v-preview-body audio{width:min(420px,80vw)}
+.bd-r2v-toast{position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:10002;padding:7px 14px;border-radius:6px;border:1px solid #3a4a5a;background:#1b222b;color:#eaf6ff;font-size:12px;pointer-events:none}
+
+/* ---- r2v 布局改造：预览 tab ---- */
+.bd-r2v-clip-body{display:flex;align-items:center;justify-content:center;min-width:0;min-height:80px;max-height:100%;overflow:hidden}
+.bd-r2v-clip-body>canvas,.bd-r2v-clip-body>video,.bd-r2v-clip-body>img{max-width:100%;max-height:100%;object-fit:contain;background:#000}
+.bd-r2v-clip-body>.bd-batch-vpreview,.bd-r2v-clip-body>.bd-batch-live-preview{width:100%}
+.bd-r2v-preview-tabs{display:flex;gap:6px;margin:0 0 6px}
+.bd-r2v-preview-tab{border:1px solid #3a4a5a;border-radius:5px;background:#1b222b;color:#9fb0c0;font-size:11px;padding:3px 10px;cursor:pointer;line-height:1.4}
+.bd-r2v-preview-tab:hover:not(:disabled){border-color:#6a9aca;color:#eaf6ff;background:#26313d}
+.bd-r2v-preview-tab.on{border-color:#4a9fd8;background:#1f3a4d;color:#eaf6ff;font-weight:700}
+.bd-r2v-preview-tab:disabled{opacity:.45;cursor:not-allowed}
 .bd-batch-src{width:88px;height:88px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;color:#666;font-size:9px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-src.has-img{border-style:solid;border-color:#444}
 .bd-batch-src img{width:100%;height:100%;object-fit:contain;background:#000}
@@ -698,7 +770,6 @@ export function mountImageBatchPanel(root) {
                 <input type="checkbox" data-r="batch-run-all-cb">
                 <span data-i18n="toolbar.selectAll">全选</span>
             </label>
-            <button type="button" class="bd-btn" data-a="batch-detail-mode" data-i18n="toolbar.batchDetailSolo" data-i18n-title="tooltip.batchDetailSolo">单显模式</button>
             <span class="bd-meta" data-r="batch-hint" data-i18n="batch.hint.defaultImage">每组生成 1 张图片</span>
         </div>
         <div class="bd-batch-i2v-notice" data-r="batch-i2v-notice"></div>
@@ -715,7 +786,6 @@ export function mountImageBatchPanel(root) {
         runSelectBtn: panel.querySelector('[data-a="batch-run-select"]'),
         runSelectAllWrap: panel.querySelector('[data-r="batch-run-all-wrap"]'),
         runSelectAllCb: panel.querySelector('[data-r="batch-run-all-cb"]'),
-        detailModeBtn: panel.querySelector('[data-a="batch-detail-mode"]'),
     };
 }
 
@@ -728,10 +798,6 @@ export function wireBatchRunSelectControls(editor, batchUi) {
     batchUi.runSelectBtn?.addEventListener("click", (e) => {
         e.stopPropagation();
         editor.toggleRunSelectMode?.();
-    });
-    batchUi.detailModeBtn?.addEventListener("click", (e) => {
-        e.stopPropagation();
-        toggleBatchDetailMode(editor);
     });
     batchUi.runSelectAllCb?.addEventListener("change", (e) => {
         e.stopPropagation();
@@ -1089,10 +1155,11 @@ async function assignSegRefFromPicked(editor, index, slot, picked) {
     editor.commit();
 }
 
-async function pickExistingSegRef(editor, index, offset, slots) {
-    const seg = editor.timeline.segments[index];
-    if (!seg) return;
-    const slot = nextEmptyGroupSlot(seg.refs, offset, slots, (r) => r?.imageFile || r?.imageB64);
+async function pickExistingSegRef(editor, index, offset, slots, opts = {}) {
+    // bag: 公共素材页写入 timeline.global，否则写入当前素材组。
+    const bag = opts.bag || editor.timeline.segments[index];
+    if (!bag) return;
+    const slot = nextEmptyGroupSlot(bag.refs, offset, slots, (r) => r?.imageFile || r?.imageB64);
     if (slot < 0) {
         alert(t("mediaPicker.slotsFull"));
         return;
@@ -1101,13 +1168,26 @@ async function pickExistingSegRef(editor, index, offset, slots) {
         const picked = await editor.chooseImageInput({
             title: t("mediaPicker.pickReferenceImage"),
         });
-        await assignSegRefFromPicked(editor, index, slot, picked);
+        await assignRefFromPicked(editor, bag, slot, picked, opts);
     } catch (err) {
         console.error("[MiniMax H3Director] batch ref pick failed:", err);
         alert(t("upload.alertFailed", { err: err?.message || err }));
     }
 }
 
+async function assignRefFromPicked(editor, bag, slot, picked, opts = {}) {
+    if (!picked?.imageFile) return;
+    bag.refs = (bag.refs || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+    bag.refs.push({ index: slot, imageFile: picked.imageFile, imageB64: "" });
+    if (opts.bag) rebaseR2vGroupSlotsForCommon(editor);
+    editor.renderImageBatchGroups();
+    editor.commit();
+}
+
+/**
+ * 参考图拖动排序：r2v 素材模块已取消（那里不再绑定 drop），
+ * 但 i2v / r2i 的参考图网格仍在使用，必须保留实现。
+ */
 function moveBatchRefSlot(editor, segIndex, fromSlot, toSlot) {
     if (fromSlot === toSlot) return;
     const seg = editor.timeline.segments[segIndex];
@@ -1253,10 +1333,10 @@ async function uploadSegVideo(editor, index, slot) {
     });
 }
 
-async function pickExistingSegVideo(editor, index, offset, slots) {
-    const seg = editor.timeline.segments[index];
-    if (!seg) return;
-    const slot = nextEmptyGroupSlot(seg.refVideos, offset, slots, (r) => r?.videoFile || r?.fileName);
+async function pickExistingSegVideo(editor, index, offset, slots, opts = {}) {
+    const bag = opts.bag || editor.timeline.segments[index];
+    if (!bag) return;
+    const slot = nextEmptyGroupSlot(bag.refVideos, offset, slots, (r) => r?.videoFile || r?.fileName);
     if (slot < 0) {
         alert(t("mediaPicker.slotsFull"));
         return;
@@ -1266,16 +1346,15 @@ async function pickExistingSegVideo(editor, index, offset, slots) {
             title: t("mediaPicker.pickReferenceVideo"),
         });
         if (!picked?.relPath) return;
-        const live = editor.timeline.segments[index];
-        if (!live) return;
-        live.refVideos = (live.refVideos || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-        live.refVideos.push({
+        bag.refVideos = (bag.refVideos || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+        bag.refVideos.push({
             index: slot,
             videoFile: picked.relPath,
             fileName: picked.fileName || picked.relPath,
             type: picked.type || "input",
             subfolder: picked.subfolder || "",
         });
+        if (opts.bag) rebaseR2vGroupSlotsForCommon(editor);
         editor.renderImageBatchGroups();
         editor.commit();
     } catch (err) {
@@ -1284,10 +1363,10 @@ async function pickExistingSegVideo(editor, index, offset, slots) {
     }
 }
 
-async function pickExistingSegAudio(editor, index, offset, slots) {
-    const seg = editor.timeline.segments[index];
-    if (!seg) return;
-    const slot = nextEmptyGroupSlot(seg.refAudios, offset, slots, (r) => r?.audioFile || r?.fileName);
+async function pickExistingSegAudio(editor, index, offset, slots, opts = {}) {
+    const bag = opts.bag || editor.timeline.segments[index];
+    if (!bag) return;
+    const slot = nextEmptyGroupSlot(bag.refAudios, offset, slots, (r) => r?.audioFile || r?.fileName);
     if (slot < 0) {
         alert(t("mediaPicker.slotsFull"));
         return;
@@ -1297,20 +1376,19 @@ async function pickExistingSegAudio(editor, index, offset, slots) {
             title: t("mediaPicker.pickReferenceAudio"),
         });
         if (!picked?.relPath) return;
-        const live = editor.timeline.segments[index];
-        if (!live) return;
-        if (hasDuplicateReferenceAudio(live.refAudios, picked.relPath, slot)) {
+        if (hasDuplicateReferenceAudio(bag.refAudios, picked.relPath, slot)) {
             alert(t("ref.audioDuplicate"));
             return;
         }
-        live.refAudios = (live.refAudios || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-        live.refAudios.push({
+        bag.refAudios = (bag.refAudios || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+        bag.refAudios.push({
             index: slot,
             audioFile: picked.relPath,
             fileName: picked.fileName || picked.relPath,
             type: picked.type || "input",
             subfolder: picked.subfolder || "",
         });
+        if (opts.bag) rebaseR2vGroupSlotsForCommon(editor);
         editor.renderImageBatchGroups();
         editor.commit();
     } catch (err) {
@@ -1410,38 +1488,633 @@ async function dropFilesIntoGroupSlots(editor, index, files, e, {
     }
 }
 
-function createR2vSection(title, countText, { onPickExisting, pickDisabled = false } = {}) {
+/**
+ * 素材模块（参考图片 / 参考视频 / 参考音频统一形态）。
+ * 头部从左到右：标题 · [公共][片段]（互斥） · [选已有] · 计数 · [展开/收起]（最右）
+ */
+function createR2vSection({
+    title,
+    countText = "",
+    scope,
+    onScopeChange,
+    onPickExisting,
+    showScope = true,
+    folded = false,
+    onToggleFold,
+} = {}) {
     const section = document.createElement("div");
     section.className = "bd-r2v-section";
+    if (folded) section.classList.add("folded");
+
     const head = document.createElement("div");
     head.className = "bd-r2v-section-head";
+
     const titleEl = document.createElement("span");
     titleEl.className = "bd-r2v-section-title";
     titleEl.textContent = title;
+    head.appendChild(titleEl);
+
     const actions = document.createElement("span");
     actions.className = "bd-r2v-section-actions";
+
+    if (showScope) {
+        const grp = document.createElement("span");
+        grp.className = "bd-r2v-scope-group";
+        for (const s of ["common", "segment"]) {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.className = `bd-r2v-scope-btn${scope === s ? " on" : ""}`;
+            b.textContent = t(s === "common" ? "r2v.scope.common" : "r2v.scope.segment");
+            b.title = t(s === "common" ? "tooltip.r2vScopeCommon" : "tooltip.r2vScopeSegment");
+            b.onclick = (e) => {
+                e.stopPropagation();
+                if (scope !== s) onScopeChange?.(s);
+            };
+            grp.appendChild(b);
+        }
+        actions.appendChild(grp);
+    }
+
     if (onPickExisting) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "bd-r2v-pick-existing";
         btn.textContent = t("mediaPicker.pickExisting");
-        btn.title = pickDisabled ? t("mediaPicker.slotsFull") : t("mediaPicker.pickExistingHint");
-        btn.disabled = !!pickDisabled;
+        btn.title = t("mediaPicker.pickExistingHint");
         btn.onclick = (e) => {
             e.stopPropagation();
-            if (btn.disabled) return;
             void onPickExisting();
         };
         actions.appendChild(btn);
     }
-    const countEl = document.createElement("span");
-    countEl.className = "bd-r2v-section-count";
-    countEl.textContent = countText;
-    actions.appendChild(countEl);
-    head.appendChild(titleEl);
+
+    if (countText) {
+        const countEl = document.createElement("span");
+        countEl.className = "bd-r2v-section-count";
+        countEl.textContent = countText;
+        actions.appendChild(countEl);
+    }
+
+    const fold = document.createElement("button");
+    fold.type = "button";
+    fold.className = "bd-r2v-fold-btn";
+    fold.textContent = folded ? "▸" : "▾";
+    fold.title = t(folded ? "r2v.fold.expand" : "r2v.fold.collapse");
+    fold.onclick = (e) => {
+        e.stopPropagation();
+        onToggleFold?.();
+    };
+    actions.appendChild(fold);
+
     head.appendChild(actions);
     section.appendChild(head);
     return section;
+}
+
+/* ---------------- 素材模块：数据存取 ---------------- */
+
+const R2V_ASSET_META = {
+    image: {
+        key: "refs",
+        has: _refHasImage,
+        grid: "bd-batch-refs",
+        tile: "bd-batch-ref",
+        title: "r2v.section.pictures",
+        accept: "image/*",
+        isFile: isBatchImageFile,
+        assignSeg: (editor, index, slot, file) => assignSegRefFromFile(editor, index, slot, file),
+    },
+    video: {
+        key: "refVideos",
+        has: _refHasVideo,
+        grid: "bd-batch-videos",
+        tile: "bd-batch-video",
+        title: "r2v.section.videos",
+        accept: "video/*,.mp4,.mov,.webm,.mkv",
+        isFile: isBatchVideoFile,
+        assignSeg: (editor, index, slot, file) => assignSegVideoFromFile(editor, index, slot, file),
+    },
+    audio: {
+        key: "refAudios",
+        has: _refHasAudio,
+        grid: "bd-batch-audios",
+        title: "r2v.section.audios",
+        accept: "audio/*,video/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.wma,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
+        isFile: isReferenceAudioSourceFile,
+        assignSeg: (editor, index, slot, file) => assignSegAudioFromFile(editor, index, slot, file),
+    },
+};
+
+function r2vEnsureGlobal(editor) {
+    const tl = editor?.timeline;
+    if (!tl) return null;
+    if (!tl.global) tl.global = { refs: [], refVideos: [], refAudios: [], prompt: "" };
+    const g = tl.global;
+    for (const k of ["refs", "refVideos", "refAudios"]) {
+        if (!Array.isArray(g[k])) g[k] = [];
+    }
+    return g;
+}
+
+/** 当前模块 + scope 对应的容器、列表、起始绝对编号 */
+export function r2vAssetStore(editor, seg, kind, scope) {
+    const meta = R2V_ASSET_META[kind];
+    if (scope === "common") {
+        const g = r2vEnsureGlobal(editor) || {};
+        return { bag: g, key: meta.key, items: g[meta.key] || [], offset: 0 };
+    }
+    const offset = kind === "image"
+        ? r2vCommonPicOffset(editor)
+        : kind === "video"
+            ? r2vCommonVideoOffset(editor)
+            : r2vCommonAudioOffset(editor);
+    if (!Array.isArray(seg[meta.key])) seg[meta.key] = [];
+    return { bag: seg, key: meta.key, items: seg[meta.key], offset };
+}
+
+function r2vSortedAssets(items, hasFn) {
+    return [...(items || [])]
+        .filter((r) => hasFn(r))
+        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0));
+}
+
+/** 页码 / 折叠状态的隔离键：素材组 + scope + 模块。 */
+function r2vAssetPageKey(editor, index, kind, scope) {
+    return `${isR2vCommonPage(editor) ? "common" : index}:${scope}:${kind}`;
+}
+
+/** 新素材的编号：追加到末尾（不回填空洞），且永不占用公共素材的编号。 */
+function r2vAppendIndex(items, offset, hasFn) {
+    const used = (items || [])
+        .filter((r) => hasFn(r))
+        .map((r) => Number(r.index ?? r.slot ?? 0))
+        .filter((n) => Number.isFinite(n));
+    const max = used.length ? Math.max(...used) : -1;
+    return Math.max(Number(offset) || 0, max + 1);
+}
+
+/**
+ * 每页能放的素材数。首格被常驻的上传空位占用时减一，
+ * 保证总格子数仍是 9 / 6 / 6（3×3、3×2、3×2），不会多出一行。
+ */
+function r2vPageCapacity(kind, hasEmptySlot) {
+    const size = R2V_ASSET_PAGE_SIZE[kind] || 6;
+    return hasEmptySlot ? Math.max(1, size - 1) : size;
+}
+
+/** 下一个可用的绝对编号（从 offset 起找空位） */
+function r2vNextIndex(items, offset, hasFn) {
+    const used = new Set(
+        (items || []).filter((r) => hasFn(r)).map((r) => Number(r.index ?? r.slot ?? 0)),
+    );
+    let i = Math.max(0, Number(offset) || 0);
+    while (used.has(i)) i += 1;
+    return i;
+}
+
+/** 提示词 token：<Picture 1> / <Video 1> / <Audio 1> */
+export function r2vAssetTag(kind, abs) {
+    const n = Number(abs) + 1;
+    if (kind === "video") return `<Video ${n}>`;
+    if (kind === "audio") return `<Audio ${n}>`;
+    return `<Picture ${n}>`;
+}
+
+async function copyAssetTag(kind, abs) {
+    const text = r2vAssetTag(kind, abs);
+    try {
+        await navigator.clipboard.writeText(text);
+    } catch {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); } catch { /* ignore */ }
+        ta.remove();
+    }
+    showR2vToast(t("r2v.tile.copied", { tag: text }));
+}
+
+/** 轻量提示（复制成功 / 无可添加素材等），1.4s 自动消失。 */
+function showR2vToast(msg) {
+    const el = document.createElement("div");
+    el.className = "bd-r2v-toast";
+    el.textContent = msg;
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 1400);
+}
+
+/** 素材预览弹窗（图片 / 视频 / 音频） */
+function openAssetPreviewModal(kind, ref) {
+    const file = ref?.imageFile || ref?.videoFile || ref?.audioFile || ref?.fileName || "";
+    const overlay = document.createElement("div");
+    overlay.className = "bd-modal-overlay bd-r2v-preview-overlay";
+    const modal = document.createElement("div");
+    modal.className = "bd-modal bd-r2v-preview-modal";
+    const head = document.createElement("div");
+    head.className = "bd-r2v-preview-head";
+    const title = document.createElement("b");
+    title.textContent = ref?.fileName || file.split("/").pop() || t("r2v.tile.preview");
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "bd-btn";
+    close.textContent = "×";
+    close.onclick = () => dismiss();
+    head.appendChild(title);
+    head.appendChild(close);
+
+    const body = document.createElement("div");
+    body.className = "bd-r2v-preview-body";
+    if (!file) {
+        body.textContent = t("r2v.preview.noFile");
+    } else if (kind === "image") {
+        const img = document.createElement("img");
+        img.src = viewUrl(file);
+        img.alt = "";
+        body.appendChild(img);
+    } else if (kind === "video") {
+        const v = document.createElement("video");
+        v.controls = true;
+        v.autoplay = true;
+        v.src = viewUrl(file);
+        body.appendChild(v);
+    } else {
+        const a = document.createElement("audio");
+        a.controls = true;
+        a.autoplay = true;
+        a.src = viewUrl(file);
+        body.appendChild(a);
+    }
+
+    modal.appendChild(head);
+    modal.appendChild(body);
+    overlay.appendChild(modal);
+    // 统一关闭入口：Esc / 点遮罩 / 关闭按钮都走这里，保证解绑 keydown。
+    function dismiss() {
+        document.removeEventListener("keydown", onKey);
+        overlay.remove();
+    }
+    function onKey(e) {
+        if (e.key === "Escape") dismiss();
+    }
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) dismiss();
+    });
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+}
+
+/**
+ * 提示词里点击引用 token（<Picture 3> / <Video 1> …）→ 弹出对应素材预览。
+ * 编号是绝对编号：先在公共素材里找，再到组内找。
+ * @returns {boolean} 命中并打开预览为 true（调用方据此跳过默认的滚动定位）。
+ */
+function openPromptMentionPreview(editor, seg, kind, ordinal1) {
+    const meta = R2V_ASSET_META[kind];
+    if (!meta) return false;
+    const abs = Math.max(0, Number(ordinal1) - 1);
+    const g = editor?.timeline?.global || {};
+    const pool = [...(g[meta.key] || []), ...(seg ? (seg[meta.key] || []) : [])];
+    const ref = pool.find((r) => meta.has(r) && Number(r.index ?? r.slot ?? 0) === abs);
+    if (!ref) return false;
+    // 在 pointerdown 里直接开弹窗会和光标定位抢焦点，放到下一个 tick。
+    setTimeout(() => openAssetPreviewModal(kind, ref), 0);
+    return true;
+}
+
+/**
+ * 给已填充的素材 tile 加 hover 热区：
+ * 上半「预览」（点击弹窗）/ 下半「复制 id」（点击复制 <Picture 1>）。
+ */
+function decorateAssetTile(slot, { kind, abs, ref, editor, seg, index, scope }) {
+    const layer = document.createElement("div");
+    layer.className = "bd-r2v-tile-actions";
+    const prev = document.createElement("button");
+    prev.type = "button";
+    prev.className = "bd-r2v-tile-act bd-r2v-tile-preview";
+    prev.textContent = t("r2v.tile.preview");
+    prev.onclick = (e) => {
+        e.stopPropagation();
+        openAssetPreviewModal(kind, ref);
+    };
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "bd-r2v-tile-act bd-r2v-tile-copy";
+    copy.textContent = t("r2v.tile.copyId");
+    copy.title = t("tooltip.r2vCopyId", { tag: r2vAssetTag(kind, abs) });
+    copy.onclick = (e) => {
+        e.stopPropagation();
+        void copyAssetTag(kind, abs);
+    };
+    layer.appendChild(prev);
+    layer.appendChild(copy);
+    slot.appendChild(layer);
+
+    // 重建删除按钮，统一走当前 scope（公共页不能误删组内素材）。
+    const oldX = slot.querySelector(".x");
+    if (oldX) oldX.remove();
+    const x = document.createElement("span");
+    x.className = "x";
+    x.textContent = "×";
+    x.title = t("ref.remove");
+    x.onclick = (e) => {
+        e.stopPropagation();
+        removeR2vAsset(editor, seg, index, kind, scope, abs);
+    };
+    slot.appendChild(x);
+}
+
+function renderAssetSlot(slot, ref, abs, index, editor, kind) {
+    if (kind === "video") return renderVideoSlot(slot, ref, abs, index, editor, { r2v: true });
+    if (kind === "audio") return renderAudioSlot(slot, ref, abs, index, editor, { r2v: true });
+    return renderR2vRefSlot(slot, ref, abs, index, editor);
+}
+
+function uploadR2vAsset(editor, seg, index, kind, scope, abs) {
+    const meta = R2V_ASSET_META[kind];
+    pickFile(meta.accept, (file) => {
+        void (async () => {
+            const ok = scope === "common"
+                ? await assignCommonAssetFromFile(editor, kind, abs, file)
+                : await meta.assignSeg(editor, index, abs, file);
+            if (ok === false) return;
+            gotoLastAssetPage(editor, index, kind, scope);
+        })();
+    });
+}
+
+/** 把该模块翻到最后一页 —— 新素材追加在末尾，否则当前页会看不到刚传的文件。 */
+function gotoLastAssetPage(editor, index, kind, scope) {
+    const meta = R2V_ASSET_META[kind];
+    const st = r2vAssetStore(editor, editor?.timeline?.segments?.[index] || {}, kind, scope);
+    const count = r2vSortedAssets(st.items, meta.has).length;
+    const last = Math.max(0, Math.ceil(count / r2vPageCapacity(kind, true)) - 1);
+    if (!editor.r2vAssetPage) editor.r2vAssetPage = {};
+    editor.r2vAssetPage[r2vAssetPageKey(editor, index, kind, scope)] = last;
+    editor.renderImageBatchGroups?.();
+    editor.updateDomWidgetHeight?.();
+}
+
+function removeR2vAsset(editor, seg, index, kind, scope, abs) {
+    const meta = R2V_ASSET_META[kind];
+    if (scope === "common") {
+        const g = r2vEnsureGlobal(editor);
+        if (!g) return;
+        g[meta.key] = (g[meta.key] || []).filter((r) => Number(r.index ?? r.slot) !== abs);
+        rebaseR2vGroupSlotsForCommon(editor);
+    } else {
+        seg[meta.key] = (seg[meta.key] || []).filter((r) => Number(r.index ?? r.slot) !== abs);
+    }
+    editor.renderImageBatchGroups();
+    editor.commit();
+}
+
+async function assignCommonAssetFromFile(editor, kind, abs, file) {
+    const g = r2vEnsureGlobal(editor);
+    if (!g) return false;
+    if (kind === "image") {
+        if (!file?.type?.startsWith("image/")) return false;
+        try {
+            const uploaded = await uploadImage(file);
+            setCommonAsset(editor, kind, abs, { imageFile: relPath(uploaded), imageB64: "" });
+            return true;
+        } catch (err) {
+            console.error("[MiniMax H3Director] common image upload failed:", err);
+            return false;
+        }
+    }
+    if (kind === "audio") {
+        if (!isReferenceAudioSourceFile(file)) return false;
+        try {
+            const prepared = await prepareLocalReferenceAudio(file);
+            if (hasDuplicateReferenceAudio(g.refAudios, prepared.relPath, abs)) {
+                alert(t("ref.audioDuplicate"));
+                return false;
+            }
+            setCommonAsset(editor, kind, abs, {
+                audioFile: prepared.relPath,
+                fileName: prepared.fileName || file.name,
+                type: prepared.type || "input",
+                subfolder: prepared.subfolder || "",
+            });
+            return true;
+        } catch (err) {
+            console.error("[MiniMax H3Director] common audio upload failed:", err);
+            return false;
+        }
+    }
+    return assignCommonVideoFromFile(editor, abs, file);
+}
+
+async function assignCommonVideoFromFile(editor, abs, file) {
+    if (!isBatchVideoFile(file)) return false;
+    try {
+        const uploaded = await uploadMedia(file);
+        setCommonAsset(editor, "video", abs, {
+            videoFile: relPath(uploaded),
+            fileName: uploaded?.name || file.name,
+            type: "input",
+            subfolder: uploaded?.subfolder || "",
+        });
+        return true;
+    } catch (err) {
+        console.error("[MiniMax H3Director] common video upload failed:", err);
+        alert(t("upload.refVideoBatchFailed", { err: err?.message || err }));
+        return false;
+    }
+}
+
+/** 写入公共素材；公共占用数变化会影响组内起始编号，因此必须 rebase。 */
+function setCommonAsset(editor, kind, abs, patch) {
+    const g = r2vEnsureGlobal(editor);
+    if (!g) return;
+    const key = R2V_ASSET_META[kind].key;
+    g[key] = (g[key] || []).filter((r) => Number(r.index ?? r.slot) !== abs);
+    g[key].push({ index: abs, ...patch });
+    rebaseR2vGroupSlotsForCommon(editor);
+    editor.renderImageBatchGroups();
+    editor.commit();
+}
+
+/** 批量写入所选素材；items 为 _resolveXxxChoice 的结果数组。 */
+function appendR2vPicked(editor, kind, bag, items, { rebase = false, offset = 0 } = {}) {
+    const meta = R2V_ASSET_META[kind];
+    const key = meta.key;
+    // 组内素材必须从 offset（公共已占用数）起编号，否则会撞上公共的绝对编号。
+    let slot = r2vNextIndex(bag[key], offset, meta.has);
+    const used = new Set((bag[key] || []).map((r) => Number(r.index ?? r.slot ?? 0)));
+    let added = 0;
+    for (const it of items || []) {
+        while (used.has(slot)) slot += 1;
+        if (kind === "image") {
+            if (!it?.imageFile) continue;
+            bag[key] = (bag[key] || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+            bag[key].push({ index: slot, imageFile: it.imageFile, imageB64: "" });
+        } else if (kind === "video") {
+            if (!it?.relPath) continue;
+            bag[key] = (bag[key] || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+            bag[key].push({
+                index: slot,
+                videoFile: it.relPath,
+                fileName: it.fileName || it.relPath,
+                type: it.type || "input",
+                subfolder: it.subfolder || "",
+            });
+        } else {
+            if (!it?.relPath) continue;
+            if (hasDuplicateReferenceAudio(bag[key], it.relPath, slot)) continue;
+            bag[key] = (bag[key] || []).filter((r) => Number(r.index ?? r.slot) !== slot);
+            bag[key].push({
+                index: slot,
+                audioFile: it.relPath,
+                fileName: it.fileName || it.relPath,
+                type: it.type || "input",
+                subfolder: it.subfolder || "",
+            });
+        }
+        used.add(slot);
+        slot += 1;
+        added += 1;
+    }
+    if (!added) return 0;
+    // 公共素材占用数变化会改变组内起始编号，必须 rebase 一次。
+    if (rebase) rebaseR2vGroupSlotsForCommon(editor);
+    editor.renderImageBatchGroups();
+    editor.commit();
+    return added;
+}
+
+/** 模块头「选已有」：默认进入已有素材列表，支持批量选择。 */
+async function pickExistingR2vAssets(editor, seg, index, kind, scope) {
+    const st = r2vAssetStore(editor, seg, kind, scope);
+    const bag = st.bag;
+    if (!bag) return;
+    const titleKey = kind === "image"
+        ? "mediaPicker.pickReferenceImage"
+        : kind === "video"
+            ? "mediaPicker.pickReferenceVideo"
+            : "mediaPicker.pickReferenceAudio";
+    try {
+        const items = kind === "image"
+            ? await editor.chooseImageInputs({ title: t(titleKey) })
+            : kind === "video"
+                ? await editor.chooseVideoInputs({ title: t(titleKey) })
+                : await editor.chooseAudioInputs({ title: t(titleKey) });
+        if (!items?.length) return;
+        const n = appendR2vPicked(editor, kind, bag, items, {
+            rebase: scope === "common",
+            offset: st.offset,
+        });
+        if (!n) showR2vToast(t("r2v.pick.noneAdded"));
+    } catch (err) {
+        console.error("[MiniMax H3Director] r2v pick existing failed:", err);
+        alert(t("upload.alertFailed", { err: err?.message || err }));
+    }
+}
+
+/** 单个素材模块：头部 + 网格 + 页码 */
+function buildR2vAssetModule(editor, seg, index, kind, { externalLocked = false } = {}) {
+    const meta = R2V_ASSET_META[kind];
+    const commonPage = isR2vCommonPage(editor);
+    const scope = commonPage ? "common" : (editor.r2vScope?.[kind] || "segment");
+    const st = r2vAssetStore(editor, seg, kind, scope);
+    const all = r2vSortedAssets(st.items, meta.has);
+    // 上传空位常驻首格并占用一个名额，每页素材数相应减一（总格子数不变，不换行）。
+    const capacity = r2vPageCapacity(kind, !externalLocked);
+    const pageCount = Math.max(1, Math.ceil(all.length / capacity));
+    if (!editor.r2vAssetPage) editor.r2vAssetPage = {};
+    // 页码 / 折叠态按「素材组 + 模块 + scope」隔离，避免切换素材组时串用。
+    const pageKey = r2vAssetPageKey(editor, index, kind, scope);
+    const page = Math.max(0, Math.min(Number(editor.r2vAssetPage[pageKey]) || 0, pageCount - 1));
+    editor.r2vAssetPage[pageKey] = page;
+    const folded = !!editor.r2vFold?.[pageKey];
+
+    const section = createR2vSection({
+        title: t(meta.title),
+        countText: String(all.length),
+        scope,
+        showScope: !commonPage,
+        folded,
+        onScopeChange: (s) => {
+            if (!editor.r2vScope) editor.r2vScope = {};
+            editor.r2vScope[kind] = s;
+            editor.renderImageBatchGroups?.();
+            editor.updateDomWidgetHeight?.();
+        },
+        onToggleFold: () => {
+            if (!editor.r2vFold) editor.r2vFold = {};
+            editor.r2vFold[pageKey] = !folded;
+            editor.renderImageBatchGroups?.();
+            editor.updateDomWidgetHeight?.();
+        },
+        onPickExisting: externalLocked ? null : () => pickExistingR2vAssets(editor, seg, index, kind, scope),
+    });
+
+    if (folded) return section;
+
+    const grid = document.createElement("div");
+    grid.className = meta.grid;
+    // 「点击上传」空位固定在左上角第一个格子，每页都有，不排在素材末尾。
+    if (!externalLocked) {
+        const abs = r2vAppendIndex(st.items, st.offset, meta.has);
+        const empty = document.createElement("div");
+        renderAssetSlot(empty, null, abs, index, editor, kind);
+        empty.classList.add("bd-r2v-empty-slot");
+        empty.onclick = (e) => {
+            e.stopPropagation();
+            uploadR2vAsset(editor, seg, index, kind, scope, abs);
+        };
+        grid.appendChild(empty);
+    }
+    const slice = all.slice(page * capacity, page * capacity + capacity);
+    for (const ref of slice) {
+        const abs = Number(ref.index ?? ref.slot ?? 0);
+        const slot = document.createElement("div");
+        renderAssetSlot(slot, ref, abs, index, editor, kind);
+        decorateAssetTile(slot, { kind, abs, ref, editor, seg, index, scope });
+        slot.onclick = (e) => {
+            if (e.target.closest?.(".bd-r2v-tile-act, .x, .bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, video, audio")) return;
+            if (kind !== "image" && e.target.closest?.(".bd-r2v-thumb")) {
+                slot.querySelector(".bd-r2v-play")?.click();
+                return;
+            }
+            if (externalLocked) return;
+            uploadR2vAsset(editor, seg, index, kind, scope, abs);
+        };
+        grid.appendChild(slot);
+    }
+    section.appendChild(grid);
+
+    section.appendChild(createMiniPager({
+        page,
+        count: pageCount,
+        onChange: (p) => {
+            editor.r2vAssetPage[pageKey] = p;
+            editor.renderImageBatchGroups?.();
+            editor.updateDomWidgetHeight?.();
+        },
+    }));
+    return section;
+}
+
+function appendR2vMediaSections(card, seg, index, editor, { externalLocked = false } = {}) {
+    const body = document.createElement("div");
+    body.className = "bd-batch-r2v-body";
+
+    const assets = document.createElement("div");
+    assets.className = "bd-batch-r2v-assets";
+    for (const kind of ["image", "video", "audio"]) {
+        assets.appendChild(buildR2vAssetModule(editor, seg, index, kind, { externalLocked }));
+    }
+
+    const main = document.createElement("div");
+    main.className = "bd-batch-r2v-main";
+
+    body.appendChild(assets);
+    body.appendChild(main);
+    card.appendChild(body);
+    return main;
 }
 
 function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
@@ -1648,6 +2321,7 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
  * r2v layout: left = pictures/videos/audio · right = prompt + preview (returned).
  * @returns {HTMLElement} main column for prompt/preview
  */
+/* [r2v 布局改造] 旧的三模块实现已由上方 appendR2vMediaSections 取代，整段停用。
 function appendR2vMediaSections(card, seg, index, editor) {
     const picOffset = r2vCommonPicOffset(editor);
     const audOffset = r2vCommonAudioOffset(editor);
@@ -1936,10 +2610,12 @@ function appendR2vMediaSections(card, seg, index, editor) {
     card.appendChild(body);
     return main;
 }
+停用结束] */
 
 function renderR2vRefSlot(el, ref, slot, index, editor) {
     const label = refImageLabel(slot);
     const has = !!ref?.imageFile;
+    el.className = "bd-batch-ref";
     el.classList.toggle("has-img", has);
     el.innerHTML = "";
     el.title = t("ref.clickUploadMove", { label });
@@ -2172,28 +2848,402 @@ function renderPreview(el, seg, running, isVideo, fps, editor) {
     else renderImagePreview(el, seg, running, editor);
 }
 
+/* ==========================================================================
+ * r2v: 预览模块「一采 / 二采」tab（二采直连视频缓存）
+ * ========================================================================== */
+
+const _clipProbe = new Map();
+const CLIP_PROBE_TTL_MS = 30000;
+
+/** 清掉探测缓存（运行结束后调用，保证 tab 状态及时刷新）。 */
+export function invalidateR2vClipProbe(key) {
+    if (key == null) {
+        _clipProbe.clear();
+        return;
+    }
+    _clipProbe.delete(key);
+}
+
+/**
+ * 缓存目录按 <workflow slug>/node_<id> 分层，slug 必须和运行时写缓存时用的
+ * 稳定 id 完全一致 —— 隐藏的 workflow_name widget 只在排队时才被同步，
+ * 直接读它可能还是空，导致后端落到裸的 node_<id>/ 目录、永远找不到 clip。
+ */
+function r2vWorkflowId(editor) {
+    return String(editor?.getWorkflowId?.() || "");
+}
+
+function clipProbeKey(editor, index, variant) {
+    const nodeId = String(editor?.node?.id ?? "");
+    return `${nodeId}|${r2vWorkflowId(editor)}|${index}|${variant}`;
+}
+
+export function segmentClipUrl(editor, index, variant) {
+    const nodeId = String(editor?.node?.id ?? "");
+    const wf = r2vWorkflowId(editor);
+    const q = [
+        `node_id=${encodeURIComponent(nodeId)}`,
+        `index=${encodeURIComponent(index)}`,
+        `variant=${variant === "2nd" ? "2nd" : "1st"}`,
+    ];
+    if (wf) q.push(`workflow_name=${encodeURIComponent(wf)}`);
+    return `/minimax/director/segment_clip?${q.join("&")}`;
+}
+
+/** HEAD 一下只读路由，判断该片段是否已有对应 pass 的视频缓存。 */
+async function probeClipUrl(url) {
+    try {
+        const r = await fetch(url, { method: "HEAD" });
+        if (r.ok) return { ok: true, url };
+        // 旧进程只注册了 GET（未重启时 HEAD 会 405/501）→ 用 1 字节 Range 兜底。
+        if (r.status === 405 || r.status === 501) {
+            const r2 = await fetch(url, { headers: { Range: "bytes=0-0" } });
+            return { ok: r2.ok || r2.status === 206, url };
+        }
+        return { ok: false, url };
+    } catch {
+        return { ok: false, url };
+    }
+}
+
+function probeSegmentClip(editor, index, variant) {
+    const key = clipProbeKey(editor, index, variant);
+    const hit = _clipProbe.get(key);
+    if (hit && Date.now() - hit.at < CLIP_PROBE_TTL_MS) return hit.promise;
+    const url = segmentClipUrl(editor, index, variant);
+    const promise = probeClipUrl(url);
+    _clipProbe.set(key, { at: Date.now(), promise });
+    return promise;
+}
+
+function mountCachedClip(body, url) {
+    stopPlayer(body);
+    body.innerHTML = "";
+    const v = document.createElement("video");
+    v.controls = true;
+    v.playsInline = true;
+    v.preload = "metadata";
+    v.src = url;
+    body.appendChild(v);
+}
+
+function mountR2vPreviewWithTabs(el, seg, index, running, fps, editor) {
+    stopPlayer(el);
+    el.innerHTML = "";
+    if (!editor.r2vPreviewTab) editor.r2vPreviewTab = "1st";
+    const active = editor.r2vPreviewTab === "2nd" ? "2nd" : "1st";
+
+    const tabs = document.createElement("div");
+    tabs.className = "bd-r2v-preview-tabs";
+    const body = document.createElement("div");
+    // 独立类名：不要复用弹窗的 .bd-r2v-preview-body，否则弹窗样式串到预览区。
+    body.className = "bd-r2v-clip-body";
+
+    const mkTab = (variant, label) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = `bd-r2v-preview-tab${active === variant ? " on" : ""}`;
+        b.textContent = label;
+        b.onclick = (e) => {
+            e.stopPropagation();
+            if (b.disabled) return;
+            editor.r2vPreviewTab = variant;
+            // 复用 30s 探测缓存（不主动失效），切 tab 才不会每次都重发 HEAD。
+            mountR2vPreviewWithTabs(el, seg, index, running, fps, editor);
+        };
+        return b;
+    };
+
+    const tab1 = mkTab("1st", t("r2v.preview.first"));
+    const tab2 = mkTab("2nd", t("r2v.preview.second"));
+    tabs.appendChild(tab1);
+    tabs.appendChild(tab2);
+    el.appendChild(tabs);
+    el.appendChild(body);
+
+    if (active === "1st") {
+        if (running) {
+            // 生成中：走实时预览，不做缓存探测（跑完会自动重渲染）。
+            renderPreview(body, seg, true, true, seg.previewFps || fps, editor);
+        } else {
+            // 一采同样优先播缓存片段（比 base64 预览帧清晰得多）。
+            void probeSegmentClip(editor, index, "1st").then((res) => {
+                if (editor.r2vPreviewTab !== "1st") return;
+                if (res.ok) mountCachedClip(body, res.url);
+                else renderPreview(body, seg, false, true, seg.previewFps || fps, editor);
+            });
+        }
+        // 预热探测：没有二采缓存就提前置灰，免得用户点进去才发现。
+        void probeSegmentClip(editor, index, "2nd").then((res) => {
+            if (res.ok) return;
+            tab2.disabled = true;
+            tab2.title = t("r2v.preview.noSecond");
+        });
+        return;
+    }
+
+    // 二采：有缓存就直接播缓存文件，没有则置灰并提示。
+    tab2.disabled = true;
+    body.textContent = t("r2v.preview.noSecond");
+    void probeSegmentClip(editor, index, "2nd").then((res) => {
+        if (!res.ok) return;
+        tab2.disabled = false;
+        if (editor.r2vPreviewTab === "2nd") mountCachedClip(body, res.url);
+    });
+}
+
+/* ==========================================================================
+ * r2v: 引用量统计 / 页码组件
+ * ========================================================================== */
+
+/** 每页素材数：图片 3×3、视频 3×2、音频 3×2 */
+export const R2V_ASSET_PAGE_SIZE = { image: 9, video: 6, audio: 6 };
+/** MiniMax 官方上限：超出仅展示不生效，前端以红色告警 */
+export const R2V_REF_LIMITS = { image: 9, video: 3, audio: 3 };
+/** 提示词 token 格式：<Picture 1> / <Video 1> / <Audio 1> */
+const R2V_TAG_RE = /<(picture|video|audio)\s+(\d+)\s*>/gi;
+const R2V_KIND_TAG = { image: "picture", video: "video", audio: "audio" };
+
+function collectPromptTags(text, tag) {
+    const out = new Set();
+    if (!text) return out;
+    R2V_TAG_RE.lastIndex = 0;
+    let m = R2V_TAG_RE.exec(text);
+    while (m) {
+        if (String(m[1]).toLowerCase() === tag) out.add(Number(m[2]));
+        m = R2V_TAG_RE.exec(text);
+    }
+    return out;
+}
+
+/**
+ * 素材组页提示词引用量 = 组内提示词引用 ∪ 公共提示词引用（编号均为绝对编号，直接合并去重）。
+ * @returns {{image:{used:number,max:number,over:boolean},video:…,audio:…,over:boolean}}
+ */
+export function computePromptRefUsage(editor, seg) {
+    const g = editor?.timeline?.global || {};
+    const res = { over: false };
+    for (const kind of Object.keys(R2V_KIND_TAG)) {
+        const tag = R2V_KIND_TAG[kind];
+        const max = R2V_REF_LIMITS[kind];
+        const tags = new Set([
+            ...collectPromptTags(g.prompt, tag),
+            ...collectPromptTags(seg?.prompt, tag),
+        ]);
+        const used = tags.size;
+        // 编号越界（如 <Picture 12>）同样不生效：plan.py 按 index >= MAX 截断。
+        const maxTag = [...tags].reduce((acc, n) => (n > acc ? n : acc), 0);
+        const over = used > max || maxTag > max;
+        res[kind] = { used, max, over };
+        if (over) res.over = true;
+    }
+    return res;
+}
+
+/** 公共素材页引用量：只统计公共提示词。 */
+export function computeCommonRefUsage(editor) {
+    const g = editor?.timeline?.global || {};
+    const res = { over: false };
+    for (const kind of Object.keys(R2V_KIND_TAG)) {
+        const tag = R2V_KIND_TAG[kind];
+        const max = R2V_REF_LIMITS[kind];
+        const tags = collectPromptTags(g.prompt, tag);
+        const used = tags.size;
+        const maxTag = [...tags].reduce((acc, n) => (n > acc ? n : acc), 0);
+        const over = used > max || maxTag > max;
+        res[kind] = { used, max, over };
+        if (over) res.over = true;
+    }
+    return res;
+}
+
+/** 当前页（公共页 / 素材组页）的引用量。 */
+export function currentPageRefUsage(editor, seg) {
+    return isR2vCommonPage(editor)
+        ? computeCommonRefUsage(editor)
+        : computePromptRefUsage(editor, seg);
+}
+
+export function isR2vCommonPage(editor) {
+    return editor?.r2vPage === "common";
+}
+
+/** 提示词标题右侧的引用量：图片 1/9 视频 1/3 音频 1/3（溢出项标红） */
+export function renderRefStat(editor, seg, prompts) {
+    const host = prompts?.querySelector?.('[data-r="ref-stat"]');
+    if (!host) return null;
+    const u = currentPageRefUsage(editor, seg);
+    host.innerHTML = "";
+    for (const kind of ["image", "video", "audio"]) {
+        const s = document.createElement("span");
+        s.className = "bd-ref-stat-item";
+        if (u[kind]?.over) s.classList.add("over");
+        s.textContent = `${t(`r2v.kind.${kind}`)} ${u[kind].used}/${u[kind].max}`;
+        host.appendChild(s);
+    }
+    prompts.classList.toggle("over", !!u.over);
+    return u;
+}
+
+/** 公共素材页的卡片数据代理：读写直接落到 timeline.global。 */
+export function r2vCommonCardSeg(editor) {
+    const g = r2vEnsureGlobal(editor) || {};
+    for (const k of ["refs", "refVideos", "refAudios"]) {
+        if (!Array.isArray(g[k])) g[k] = [];
+    }
+    return {
+        __common: true,
+        id: "__common__",
+        get refs() { return g.refs; },
+        set refs(v) { g.refs = v; },
+        get refVideos() { return g.refVideos; },
+        set refVideos(v) { g.refVideos = v; },
+        get refAudios() { return g.refAudios; },
+        set refAudios(v) { g.refAudios = v; },
+        get prompt() { return g.prompt || ""; },
+        set prompt(v) { g.prompt = v; },
+        durationSec: 0,
+        frameCount: 0,
+        length: 0,
+        previewFps: 24,
+    };
+}
+
+/** 当前页内的素材列表（公共页→global，素材组页→seg）。 */
+function pageAssetBag(editor, seg) {
+    if (isR2vCommonPage(editor)) {
+        const g = editor?.timeline?.global;
+        if (!g) return null;
+        return { refs: g.refs, refVideos: g.refVideos, refAudios: g.refAudios, prompt: g.prompt, isCommon: true };
+    }
+    return { refs: seg?.refs, refVideos: seg?.refVideos, refAudios: seg?.refAudios, prompt: seg?.prompt, isCommon: false };
+}
+
+function setR2vPage(editor, page) {
+    flushBatchPromptInputs(editor);
+    flushBatchDurationInputs(editor);
+    editor.r2vPage = page;
+    if (typeof page === "number") editor.selectedIndex = page;
+    editor.renderImageBatchGroups?.();
+    editor.updateDomWidgetHeight?.();
+}
+
+/**
+ * 素材组页码：公共素材按钮 + 不省略的方框数字。
+ * 该组引用溢出时，对应方框置红。
+ */
+function createGroupPaginator(editor, usageByIndex) {
+    const wrap = document.createElement("div");
+    wrap.className = "bd-r2v-group-pager";
+    const cur = editor.r2vPage;
+    const mkBtn = (label, page, opts = {}) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "bd-r2v-page-box";
+        if (opts.extraClass) b.className += ` ${opts.extraClass}`;
+        b.textContent = label;
+        if (page === cur) b.classList.add("on");
+        if (opts.over) b.classList.add("over");
+        if (opts.title) b.title = opts.title;
+        b.onclick = (e) => {
+            e.stopPropagation();
+            setR2vPage(editor, page);
+        };
+        return b;
+    };
+    wrap.appendChild(mkBtn(t("r2v.page.common"), "common", {
+        extraClass: "bd-r2v-page-common",
+        title: t("tooltip.r2vCommonPage"),
+    }));
+    const segs = editor.timeline?.segments || [];
+    segs.forEach((_s, i) => {
+        const u = usageByIndex?.[i];
+        wrap.appendChild(mkBtn(String(i + 1), i, {
+            over: !!u?.over,
+            title: u?.over ? t("r2v.pageOverHint") : t("tooltip.r2vGroupPage", { n: i + 1 }),
+        }));
+    });
+    return wrap;
+}
+
+/** 带省略号的页码序列：[1] … 4 5 6 … 12 */
+function pageWindow(page, count) {
+    if (count <= 7) return Array.from({ length: count }, (_v, i) => i);
+    const items = [0];
+    let start = Math.max(1, page - 1);
+    let end = Math.min(count - 2, page + 1);
+    if (page <= 2) { start = 1; end = 3; }
+    if (page >= count - 3) { start = count - 4; end = count - 2; }
+    if (start > 1) items.push("…");
+    for (let i = start; i <= end; i++) items.push(i);
+    if (end < count - 2) items.push("…");
+    items.push(count - 1);
+    return items;
+}
+
+/**
+ * 可复用页码组件（带省略号），用于各素材模块底部。
+ * @param {{page:number,count:number,onChange:(p:number)=>void,label?:string}} opts
+ */
+export function createMiniPager({ page = 0, count = 1, onChange, label = "" } = {}) {
+    const wrap = document.createElement("div");
+    wrap.className = "bd-r2v-mini-pager";
+    // 每个素材模块下都挂一个页码组件（单页时也渲染，保持结构一致）。
+    if (!count || count < 1) return wrap;
+    if (label) {
+        const lb = document.createElement("span");
+        lb.className = "bd-r2v-mini-pager-label";
+        lb.textContent = label;
+        wrap.appendChild(lb);
+    }
+    const go = (p) => {
+        const next = Math.max(0, Math.min(count - 1, p));
+        if (next === page) return;
+        onChange?.(next);
+    };
+    const mk = (text, target, cls) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = `bd-r2v-mini-pager-btn${cls ? ` ${cls}` : ""}`;
+        b.textContent = text;
+        if (target === page) b.classList.add("on");
+        if (target === "…") {
+            b.disabled = true;
+            b.classList.add("gap");
+        } else {
+            b.onclick = (e) => {
+                e.stopPropagation();
+                go(target);
+            };
+        }
+        return b;
+    };
+    wrap.appendChild(mk("‹", page - 1, "nav"));
+    for (const item of pageWindow(page, count)) {
+        if (item === "…") wrap.appendChild(mk("…", "…", ""));
+        else wrap.appendChild(mk(String(item + 1), item, ""));
+    }
+    wrap.appendChild(mk("›", page + 1, "nav"));
+    return wrap;
+}
+
+/**
+ * 全显模式只在 r2v（素材组）里移除 —— 那里恒为「单显」。
+ * t2v / i2v 等其它批处理模式保留原来的状态，否则已切到「全显」的工作流
+ * 会突然只剩一张卡，非 r2v 界面等于回归。
+ */
 export function isBatchDetailSolo(editor) {
+    const key = resolveTaskKey(editor?.getTaskKey?.() || editor?.taskTypeWidget?.value);
+    if (key === "r2v") return true;
     return (editor?.timeline?.batchDetailMode || "solo") !== "all";
 }
 
-function syncBatchDetailModeButton(editor) {
-    const btn = editor?.batchDetailModeBtn;
-    if (!btn) return;
-    const solo = isBatchDetailSolo(editor);
-    btn.textContent = t(solo ? "toolbar.batchDetailSolo" : "toolbar.batchDetailAll");
-    btn.title = t(solo ? "tooltip.batchDetailSolo" : "tooltip.batchDetailAll");
-    btn.setAttribute("data-i18n", solo ? "toolbar.batchDetailSolo" : "toolbar.batchDetailAll");
-    btn.setAttribute("data-i18n-title", solo ? "tooltip.batchDetailSolo" : "tooltip.batchDetailAll");
+function syncBatchDetailModeButton(_editor) {
+    // 模式切换按钮已移除，空实现。
 }
 
-export function toggleBatchDetailMode(editor) {
-    if (!editor?.timeline) return;
-    flushBatchPromptInputs(editor);
-    flushBatchDurationInputs(editor);
-    editor.timeline.batchDetailMode = isBatchDetailSolo(editor) ? "all" : "solo";
-    syncBatchDetailModeButton(editor);
-    editor.commit?.(false, { syncTimeline: true });
-    editor.updateDomWidgetHeight?.();
+export function toggleBatchDetailMode(_editor) {
+    // 模式切换已移除，空实现。
 }
 
 export function selectBatchGroup(editor, index) {
@@ -2201,12 +3251,21 @@ export function selectBatchGroup(editor, index) {
     if (!segs.length) return;
     const next = Math.max(0, Math.min(segs.length - 1, Number(index) || 0));
     if (next === editor.selectedIndex) {
+        // 停在公共素材页点当前组：页面状态要从 "common" 切回该组。
+        if (editor.r2vPage != null && editor.r2vPage !== next) {
+            editor.r2vPage = next;
+            editor.renderImageBatchGroups?.();
+            editor.updateDomWidgetHeight?.();
+            return;
+        }
         editor._syncR2vCardSelection?.();
         return;
     }
     flushBatchPromptInputs(editor);
     flushBatchDurationInputs(editor);
     editor.selectedIndex = next;
+    // 停在「公共素材页」时点组 chip / 时间轴片段要真正跳到该组，否则页面不动。
+    if (editor.r2vPage != null) editor.r2vPage = next;
     if (isBatchDetailSolo(editor)) {
         editor.renderImageBatchGroups?.();
     } else {
@@ -2348,12 +3407,21 @@ export function renderImageBatchGroups(editor) {
     if (editor.selectedIndex == null || editor.selectedIndex < 0 || editor.selectedIndex >= segs.length) {
         editor.selectedIndex = 0;
     }
+    const isR2v = key === "r2v" && variant === "refs";
+    if (isR2v) {
+        if (editor.r2vPage == null) editor.r2vPage = editor.selectedIndex;
+        if (typeof editor.r2vPage === "number" && editor.r2vPage >= segs.length) editor.r2vPage = 0;
+        ctx.usageByIndex = segs.map((s) => computePromptRefUsage(editor, s));
+        ctx.isR2v = true;
+    }
     syncBatchDetailModeButton(editor);
     renderBatchGroupPicker(editor, ctx);
     const solo = isBatchDetailSolo(editor);
     const indices = solo ? [editor.selectedIndex] : segs.map((_, i) => i);
     for (const index of indices) {
-        const seg = segs[index];
+        const seg = isR2v && isR2vCommonPage(editor)
+            ? r2vCommonCardSeg(editor)
+            : segs[index];
         if (!seg) continue;
         appendBatchCard(list, editor, seg, index, ctx);
     }
@@ -2364,6 +3432,8 @@ export function renderImageBatchGroups(editor) {
 function appendBatchCard(list, editor, seg, index, ctx) {
         const { key, variant, isVideo, runningIdx, fps, externalLocked } = ctx;
         const isR2v = key === "r2v";
+        // 公共素材页：与素材组页结构完全一致，只是没有专有素材、提示词写入 global。
+        const commonPage = isR2v && isR2vCommonPage(editor);
         const card = document.createElement("div");
         const layoutClass = isR2v
             ? "bd-batch-r2v"
@@ -2392,7 +3462,8 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         const head = document.createElement("div");
         head.className = "bd-batch-head";
         // Timeline + cards stay in sync for run-select (incl. r2v).
-        if (runSelectOn) {
+        // 公共素材页不是可运行的片段，隐藏运行勾选。
+        if (runSelectOn && !commonPage) {
             const runCb = document.createElement("input");
             runCb.type = "checkbox";
             runCb.className = "bd-batch-run-check";
@@ -2405,11 +3476,14 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             head.appendChild(runCb);
         }
         const title = document.createElement("b");
-        title.textContent = t(isR2v ? "batch.groupTitle.asset" : "batch.groupTitle.prompt", { n: index + 1 });
-        head.appendChild(title);
+        if (!isR2v) {
+            title.textContent = t("batch.groupTitle.prompt", { n: index + 1 });
+            head.appendChild(title);
+        }
+        // r2v 的素材组页码不进 head：它独占一行，位于「引用上段」选择器下方。
         // Per-segment continuity (master「段间引导」must be on; skip segment 1).
         const masterCont = isContinuityMasterEnabled(editor.timeline?.output);
-        if (masterCont && index > 0 && isVideo) {
+        if (masterCont && index > 0 && isVideo && !commonPage) {
             const contLabel = document.createElement("label");
             contLabel.className = "bd-batch-continuity";
             contLabel.title = t("tooltip.segmentContinuityFromPrev");
@@ -2436,7 +3510,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         // segment's opening. Cache-driven middle-out mode, so it only exists
         // under「选择运行」, defaults to OFF, and is disabled when the next
         // segment has no cached AV latent to align against.
-        if (masterCont && isVideo && editor.isRunSelectEnabled?.()) {
+        if (masterCont && isVideo && editor.isRunSelectEnabled?.() && !commonPage) {
             const nextLabel = document.createElement("label");
             nextLabel.className = "bd-batch-continuity bd-batch-continuity-next";
             const nextCb = document.createElement("input");
@@ -2465,40 +3539,8 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         }
         const meta = document.createElement("div");
         meta.className = "bd-batch-head-meta";
-        if (isR2v) {
-            const sizeRow = document.createElement("label");
-            sizeRow.className = "bd-batch-refsize";
-            sizeRow.title = t("tooltip.refImageSize");
-            const sizeLabel = document.createElement("span");
-            sizeLabel.setAttribute("data-i18n", "output.refImageSize.label");
-            sizeLabel.textContent = t("output.refImageSize.label");
-            const sizeSel = document.createElement("select");
-            sizeSel.className = "bd-select";
-            const curSize = resolveSegmentRefImageSize(seg, editor.timeline?.output);
-            seg.refImageSize = curSize;
-            for (const opt of ["match", "max"]) {
-                const o = document.createElement("option");
-                o.value = opt;
-                o.setAttribute("data-i18n", `output.refImageSize.${opt}`);
-                o.textContent = t(`output.refImageSize.${opt}`);
-                if (opt === curSize) o.selected = true;
-                sizeSel.appendChild(o);
-            }
-            sizeSel.onchange = (e) => {
-                e.stopPropagation();
-                const liveIdx = (editor.timeline.segments || []).findIndex((s) => s?.id && s.id === seg.id);
-                const live = editor.timeline.segments?.[liveIdx >= 0 ? liveIdx : index];
-                if (!live) return;
-                live.refImageSize = resolveSegmentRefImageSize({ refImageSize: sizeSel.value });
-                editor.commit?.(false, { syncTimeline: true });
-                editor.flushTimelineSync?.();
-            };
-            sizeSel.onclick = (e) => e.stopPropagation();
-            sizeRow.appendChild(sizeLabel);
-            sizeRow.appendChild(sizeSel);
-            meta.appendChild(sizeRow);
-        }
-        if (isVideo) {
+        // r2v「参考图尺寸」已按需求移除；字段保留（后端仍读 seg.refImageSize）。
+        if (isVideo && !commonPage) {
             const secRow = document.createElement("label");
             secRow.className = "bd-batch-fc";
             const curSec = resolveSegmentDurationSec(seg, defaultFrameCount(key));
@@ -2546,7 +3588,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             }
             meta.appendChild(secRow);
         }
-        if (!externalLocked) {
+        if (!externalLocked && !commonPage) {
             const del = document.createElement("button");
             del.type = "button";
             del.className = "bd-batch-del";
@@ -2560,7 +3602,33 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             meta.appendChild(del);
         }
         head.appendChild(meta);
+
+        // 引用溢出：素材组标题（页码）上方红字提醒 + 整卡红边。
+        if (isR2v) {
+            const usage = commonPage
+                ? computeCommonRefUsage(editor)
+                : (ctx.usageByIndex?.[index] || computePromptRefUsage(editor, seg));
+            card.classList.toggle("over", !!usage?.over);
+            if (usage?.over) {
+                const overHint = document.createElement("div");
+                overHint.className = "bd-r2v-over-hint";
+                overHint.textContent = t("r2v.overHint", {
+                    detail: ["image", "video", "audio"]
+                        .filter((k) => usage[k]?.over)
+                        .map((k) => `${t(`r2v.kind.${k}`)} ${usage[k].used}/${usage[k].max}`)
+                        .join(" · "),
+                });
+                card.appendChild(overHint);
+            }
+        }
         card.appendChild(head);
+        // 素材组页码单独一行（在「引用上段」选择器下方，左上对齐）。
+        if (isR2v) {
+            const pagerRow = document.createElement("div");
+            pagerRow.className = "bd-batch-pager-row";
+            pagerRow.appendChild(createGroupPaginator(editor, ctx.usageByIndex));
+            card.appendChild(pagerRow);
+        }
 
         if (variant === "source") {
             const media = document.createElement("div");
@@ -2588,7 +3656,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         }
         let r2vMain = null;
         if (variant === "refs" && isR2v) {
-            r2vMain = appendR2vMediaSections(card, seg, index, editor);
+            r2vMain = appendR2vMediaSections(card, seg, index, editor, { externalLocked });
         } else if (variant === "refs") {
             const media = document.createElement("div");
             media.className = "bd-batch-media";
@@ -2618,15 +3686,31 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         const prompts = document.createElement("div");
         prompts.className = "bd-batch-prompts";
         const ph = t(isR2v ? "placeholder.batchR2v" : "placeholder.batchDefault");
+        // 公共页的提示词写入 timeline.global，绝不能带 data-batch-prompt-index，
+        // 否则 flushBatchPromptInputs 会把它覆盖到 segments[index].prompt。
+        const promptAttrs = commonPage
+            ? 'data-f="prompt" data-common-prompt="1"'
+            : `data-f="prompt" data-batch-prompt-index="${index}" data-batch-seg-id="${seg.id || ""}"`;
         prompts.innerHTML = `
-            <span class="bd-label">${t("batch.prompt")}</span>
-            <textarea data-f="prompt" data-batch-prompt-index="${index}" data-batch-seg-id="${seg.id || ""}" placeholder=""></textarea>`;
+            <div class="bd-prompt-head"><span class="bd-label">${t("batch.prompt")}</span>${isR2v ? '<span class="bd-ref-stat" data-r="ref-stat"></span>' : ""}</div>
+            <textarea ${promptAttrs} placeholder=""></textarea>`;
         prompts.querySelector("textarea").placeholder = ph;
-        prompts.querySelector("textarea").value = seg.prompt || "";
+        prompts.querySelector("textarea").value = (commonPage
+            ? (editor.timeline?.global?.prompt || "")
+            : (seg.prompt || ""));
         const promptEl = prompts.querySelector('[data-f="prompt"]');
         const segIndex = index;
         const segId = seg.id;
+        const refreshRefStat = () => renderRefStat(editor, commonPage ? null : seg, prompts);
+        if (isR2v) refreshRefStat();
         promptEl.oninput = (e) => {
+            if (commonPage) {
+                const g = r2vEnsureGlobal(editor);
+                if (g) g.prompt = e.target.value;
+                editor.scheduleTimelineSync();
+                refreshRefStat();
+                return;
+            }
             // Write by index/id — never capture a stale `seg` after normalize.
             const live = (editor.timeline.segments || []).find((s) => s?.id && s.id === segId)
                 || editor.timeline.segments?.[segIndex];
@@ -2634,12 +3718,21 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             live.prompt = e.target.value;
             live.negativePrompt = live.negativePrompt ?? "";
             editor.scheduleTimelineSync();
+            refreshRefStat();
             // External groups execute from Group-node widgets — keep them aligned.
             editor.writeExternalGroupPrompt?.(segIndex, live.prompt);
         };
         if (isR2v) {
             wirePromptImageMentions(editor, promptEl, () => {
                 const g = editor.timeline?.global || {};
+                // 公共素材页只应看到公共素材（编号 1…N）。
+                if (commonPage) {
+                    return {
+                        refs: g.refs || [],
+                        audios: g.refAudios || [],
+                        videos: g.refVideos || [],
+                    };
+                }
                 const on = !!(g.commonEnabled ?? g.common_enabled);
                 const live = (editor.timeline.segments || []).find((s) => s?.id && s.id === segId)
                     || editor.timeline.segments?.[segIndex]
@@ -2654,12 +3747,26 @@ function appendBatchCard(list, editor, seg, index, ctx) {
                         ? mergeMediaByIndex(g.refVideos || [], live.refVideos || [])
                         : (live.refVideos || []),
                 };
+            }, {
+                // 点提示词里的 <Picture N> / <Video N> / <Audio N> → 弹出素材预览。
+                onMentionActivate: ({ kind, ordinal }) => {
+                    const live = (editor.timeline.segments || []).find((s) => s?.id && s.id === segId)
+                        || editor.timeline.segments?.[segIndex]
+                        || seg;
+                    return openPromptMentionPreview(editor, commonPage ? null : live, kind, ordinal);
+                },
             });
         }
 
         const preview = document.createElement("div");
         preview.className = "bd-batch-preview";
-        renderPreview(preview, seg, index === runningIdx, isVideo, seg.previewFps || fps, editor);
+        if (isR2v && isVideo && !commonPage) {
+            mountR2vPreviewWithTabs(
+                preview, seg, index, index === runningIdx, seg.previewFps || fps, editor,
+            );
+        } else {
+            renderPreview(preview, seg, index === runningIdx, isVideo, seg.previewFps || fps, editor);
+        }
 
         if (isR2v && r2vMain) {
             r2vMain.appendChild(prompts);
@@ -2700,15 +3807,17 @@ export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {})
         const card = batchCardEl(editor, segmentIndex);
         const preview = card?.querySelector?.(".bd-batch-preview");
         if (preview) {
+            // r2v 预览带「一采/二采」tab：只替换 tab 内容区，别把 tab 条一起抹掉。
+            const host = preview.querySelector(".bd-r2v-clip-body") || preview;
             const step = seg.previewStep;
             const total = seg.previewTotalSteps;
             const badgeText = (step && total)
                 ? t("batch.generatingStep", { step, total })
                 : t("batch.generating");
-            let img = preview.querySelector("img.bd-live-preview");
-            let badge = preview.querySelector(".bd-batch-live-badge");
+            let img = host.querySelector("img.bd-live-preview");
+            let badge = host.querySelector(".bd-batch-live-badge");
             if (!img) {
-                mountLivePreview(preview, seg, badgeText);
+                mountLivePreview(host, seg, badgeText);
             } else {
                 img.src = frameSrc(imageB64);
                 if (badge) badge.textContent = badgeText;
@@ -2731,6 +3840,8 @@ export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {})
         }
         return;
     }
+    // 该片段产物已刷新：二采 tab 的探测结果作废，下次渲染重新探测。
+    invalidateR2vClipProbe();
     editor.renderImageBatchGroups();
 }
 
@@ -2757,7 +3868,7 @@ export function getImageBatchUiHeight(editor) {
     // of being capped at BATCH_LIST_MAX_H, so the 素材组 container gets more room.
     // 单显(solo)素材组容器高度: 调高 r2v 行高估算, 让素材组列获得更大展示空间。
     const isR2vRefs = key === "r2v" && imageBatchVariant(key) === "refs";
-    const rowH = isR2vRefs ? 1280 : (isVideoBatchTask(key) ? 155 : 130);
+    const rowH = isR2vRefs ? 1080 : (isVideoBatchTask(key) ? 155 : 130);
     const showPicker = solo && (editor?.timeline?.segments?.length || 0) > 1 && !editor?.usesBatchTimeline?.();
     const pickerH = showPicker ? 56 : 0;
     const listContentH = n * rowH + Math.max(0, n - 1) * BATCH_LIST_GAP + pickerH;
@@ -2964,9 +4075,9 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
         const budget0 = slotH > 0
             ? slotH
             : Math.max(minH, Number(wrap.clientHeight || host.clientHeight) || minH);
-        // r2v 单显(素材组): 确保 main 至少容纳 列表兜底高度 + 运行状态框, 避免状态框被 overflow 裁掉。
-        const listFloor2 = hasR2vCard ? 1280 : 0;
-        const budget = Math.max(budget0, listFloor2 + statusH + topChrome + 12);
+        // 1080 现在是素材框(.bd-batch-r2v-assets)自身的 CSS 高度，外层列表不再硬编码兜底，
+        // 否则外层框被撑高、素材框反而随内容拉伸。高度完全由 listH(rowH 预算) 决定。
+        const budget = Math.max(budget0, statusH + topChrome + 12);
         const mainH = Math.max(0, budget - statusH - topChrome);
 
         // r2v 单显: 若所需高度超出节点当前分配, 直接撑高节点, 否则被 .bd-wrap overflow:hidden 裁掉运行状态框。
@@ -2974,12 +4085,14 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
         const node = editor?.node;
         if (node?.size) {
             const needH = budget + inset + 4;
-            if (listFloor2 > 0) {
+            if (hasR2vCard) {
+                // r2v: 节点只增不减, 避免素材框/状态栏被 .bd-wrap overflow:hidden 裁掉。
                 if ((node.size[1] || 0) < needH - 2) {
                     node.setSize?.([node.size[0], needH]);
                     node.setDirtyCanvas?.(true, true);
                 }
             } else if ((node.size[1] || 0) > needH + 2) {
+                // 非 r2v: 节点可缩回, 使状态栏贴在当前红框(640)外部底部而非悬在远处。
                 node.setSize?.([node.size[0], needH]);
                 node.setDirtyCanvas?.(true, true);
             }
@@ -3032,14 +4145,13 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
             batchH - (batchToolbar?.offsetHeight || 0) - noticeH - pickerH - 10,
         );
         list.style.flex = "0 0 auto";
-        // r2v 单显(素材组)模式: 红框滚动容器硬性兜底最小高度, 在面板内滚动而非撑爆面板,
-        // 使底部运行状态栏始终可见并贴在红框外部下方。
-        const soloR2v = hasR2vCard;
-        const listFloor = soloR2v ? 1280 : 0;
-        list.style.minHeight = `${listFloor}px`;
+        // 素材框(.bd-batch-r2v-assets)自身已用 CSS 固定 min/max=1080，外层 list 不再塞 1080，
+        // 直接按 rowH 预算(listH)成形，卡片内素材框负责内部滚动，状态栏贴底可见。
+        const listFloor = 0;
+        list.style.minHeight = "";
         if (trusted && slotH > 0) {
-            list.style.height = `${Math.max(listH, listFloor)}px`;
-            list.style.maxHeight = `${Math.max(listH, listFloor)}px`;
+            list.style.height = `${listH}px`;
+            list.style.maxHeight = `${listH}px`;
         } else {
             // 非 trusted: 让红框在面板(flex:1 1 auto; min-height:0)内自适应并滚动,
             // 不设死 maxHeight, 仅保留 min-height 兜底, 保证状态栏不被裁。

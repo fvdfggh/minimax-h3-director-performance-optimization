@@ -571,9 +571,11 @@ const STYLES = `
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{
   flex:0 0 auto;min-height:320px;height:auto;max-height:none
 }
-/* 素材组列在填充 solo 模式下独立加高 + 内部滚动, 不被高度限制裁剪 */
+/* 素材组列：保持内部滚动、不被外层高度裁剪。
+   具体高度（1280）由卡片内 .bd-batch-r2v .bd-batch-r2v-assets 统一定义，
+   这里不再重复写死，避免两个数字打架。 */
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-assets{
-  flex:1 1 auto;min-height:800px;overflow-y:auto
+  flex:1 1 auto;overflow-y:auto
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{
   flex:0 0 auto;min-height:140px;max-height:none;overflow:visible
@@ -664,8 +666,18 @@ const STYLES = `
 .bd-media-tr{display:grid;grid-template-columns:minmax(0,1fr) 86px 128px;align-items:center;cursor:pointer;border-bottom:1px solid #262626;color:#ddd;font-size:11px;line-height:1.35}
 .bd-media-table.bd-media-nodims .bd-media-thead,
 .bd-media-table.bd-media-nodims .bd-media-tr{grid-template-columns:minmax(0,1fr) 128px}
+/* 批量选择模式：表格多一列复选框，列宽固定 24px 保持与文件名/尺寸/时间对齐 */
+.bd-media-table.bd-media-multi .bd-media-thead,
+.bd-media-table.bd-media-multi .bd-media-tr{grid-template-columns:24px minmax(0,1fr) 86px 128px}
+.bd-media-table.bd-media-multi.bd-media-nodims .bd-media-thead,
+.bd-media-table.bd-media-multi.bd-media-nodims .bd-media-tr{grid-template-columns:24px minmax(0,1fr) 128px}
+.bd-media-th-cb{padding:0;display:flex;align-items:center;justify-content:center;cursor:default}
+.bd-media-td-cb{display:flex;align-items:center;justify-content:center;padding:7px 6px}
+.bd-media-cb{cursor:pointer}
 .bd-media-tr:hover{background:#222}
+/* selected = 当前预览项（底色）；checked = 已勾选（左侧蓝条，批量模式） */
 .bd-media-tr.selected{background:#2c2c2c}
+.bd-media-tr.checked{background:#26303a;box-shadow:inset 3px 0 0 #4a9fd8}
 .bd-media-td{padding:8px 10px;min-width:0}
 .bd-media-td-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#eee}
 .bd-media-td-dims,.bd-media-td-time{color:#9a9a9a;white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -1247,7 +1259,10 @@ function scheduleDirectorLayoutSettle(editor) {
         // On reload the node kept its old saved size; grow it to the (possibly larger)
         // content min so the 素材组 list actually gets the taller slot. Only grows,
         // never shrinks a user-enlarged node — safe for workflow size preservation.
-        ensureDirectorNodeFitsContent(editor?.node, editor);
+        // 仅素材组(r2v)需要这个兜底：其它模式保持节点原尺寸，否则加载后会被撑高。
+        if (resolveTaskKey(editor?.getTaskKey?.() || editor?.taskTypeWidget?.value) === "r2v") {
+            ensureDirectorNodeFitsContent(editor?.node, editor);
+        }
         syncBatchPanelFillHeight(editor, { settle: true });
     };
     requestAnimationFrame(() => {
@@ -2691,6 +2706,7 @@ class MiniMaxH3DirectorEditor {
                 </div>
             </div>`;
         this.mainBody.appendChild(bottom);
+        this.splitEl = bottom;
 
         const batchUi = mountImageBatchPanel(this.mainBody);
         this.batchPanel = batchUi.panel;
@@ -2699,7 +2715,6 @@ class MiniMaxH3DirectorEditor {
         this.batchI2vNotice = batchUi.i2vNotice;
         this.batchAddBtn = batchUi.addBtn;
         this.batchPicker = batchUi.picker;
-        this.batchDetailModeBtn = batchUi.detailModeBtn;
         wireBatchRunSelectControls(this, batchUi);
 
         this.fl2vUi = mountFl2vPanel(this.mainBody);
@@ -3015,50 +3030,12 @@ class MiniMaxH3DirectorEditor {
             };
         }
         this.globalTask.onchange = () => {
-            const selValue = this.globalTask.value;
-            console.log("###SEL-CHANGE### 你选了选择器值=", selValue, " => getTaskKey=", this.getTaskKey(), " hasR2vCard=", !!this.root.querySelector(".bd-batch-list .bd-batch-r2v"));
-            this.onGlobalField("taskType", selValue);
+            this.onGlobalField("taskType", this.globalTask.value);
         };
         this.globalPrompt.oninput = () => this.onGlobalField("prompt", this.globalPrompt.value);
-        if (this.r2vCommonFold) {
-            this.r2vCommonFold.onclick = (e) => {
-                stopDomEvent(e);
-                if (!this.usesR2vCommonPanel() || !this.isR2vCommonEnabled()) return;
-                this.timeline.global = this.timeline.global || {
-                    refs: [], refAudios: [], prompt: "",
-                    commonEnabled: true, commonCollapsed: false,
-                };
-                this.timeline.global.commonCollapsed = !this.isR2vCommonCollapsed();
-                this.syncR2vCommonCollapse();
-                this.scheduleTimelineSync();
-                this.updateDomWidgetHeight?.();
-            };
-        }
-        if (this.r2vCommonToggle) {
-            this.r2vCommonToggle.onclick = (e) => {
-                stopDomEvent(e);
-                if (!this.usesR2vCommonPanel()) return;
-                this.timeline.global = this.timeline.global || {
-                    refs: [], refAudios: [], refVideos: [], prompt: "",
-                    commonEnabled: false, commonCollapsed: false,
-                };
-                this.timeline.global.refs = this.timeline.global.refs || [];
-                this.timeline.global.refAudios = this.timeline.global.refAudios || [];
-                this.timeline.global.refVideos = this.timeline.global.refVideos || [];
-                const nextOn = !this.isR2vCommonEnabled();
-                this.timeline.global.commonEnabled = nextOn;
-                // Enable → expand; disable → collapse and stop runtime merge.
-                this.timeline.global.commonCollapsed = !nextOn;
-                if (nextOn) {
-                    rebaseR2vGroupSlotsForCommon(this);
-                }
-                // Must refresh visibility + render ref/audio slots (they stay empty until first paint).
-                this.updateModeUI();
-                this.renderImageBatchGroups?.();
-                this.scheduleTimelineSync();
-                this.updateDomWidgetHeight?.();
-            };
-        }
+        // 「启用公共参数」/「收起公共参数」在 r2v 下已移除（公共素材成为常驻页），
+        // 这里不再绑定任何点击行为，仅保留节点引用以防其他代码访问。
+
         if (this.continuousRefCb) {
             this.continuousRefCb.onchange = () => {
                 this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {} };
@@ -6191,16 +6168,29 @@ class MiniMaxH3DirectorEditor {
         return !!this.isR2vBatch?.();
     }
 
-    /** Whether shared common params are enabled at run time. Default off. */
+    /**
+     * Shared params are always on in r2v — there is no「启用公共参数」toggle any
+     * more: the shared asset page is a permanent page of the paginator, so the
+     * runtime merge (concat prompt + merge refs) must always see it.
+     */
     isR2vCommonEnabled() {
         if (!this.usesR2vCommonPanel()) return false;
-        return !!(this.timeline?.global?.commonEnabled ?? this.timeline?.global?.common_enabled);
+        return true;
     }
 
-    /** UI-only fold; when enabled+collapsed, runtime still merges common params. */
+    /** UI-only fold; shared page is always expanded (no fold state any more). */
     isR2vCommonCollapsed() {
-        if (!this.isR2vCommonEnabled()) return true;
-        return !!(this.timeline?.global?.commonCollapsed ?? this.timeline?.global?.common_collapsed);
+        return false;
+    }
+
+    /**
+     * Stable workflow id used by every cache path (``<root>/<slug>/node_<id>``).
+     * Read-only routes（分段导出状态 / 二采状态 / segment_clip）must use this —
+     * the hidden ``workflow_name`` widget is only synced at queue time, so
+     * reading it here can still yield "" and point at the bare ``node_<id>`` dir.
+     */
+    getWorkflowId() {
+        return getStableWorkflowId();
     }
 
     /** Global / shared-ref panel owns timeline.global refs + prompt when enabled. */
@@ -6210,47 +6200,29 @@ class MiniMaxH3DirectorEditor {
 
     syncR2vCommonCollapse() {
         const r2v = this.usesR2vCommonPanel();
-        const on = this.isR2vCommonEnabled();
-        const folded = this.isR2vCommonCollapsed();
-        const bodyHidden = !on || folded;
         this.globalPanel?.classList.toggle("bd-r2v-common-panel", r2v);
-        this.globalPanel?.classList.toggle("bd-r2v-common-collapsed", r2v && bodyHidden);
-        this.r2vCommonHint?.classList.toggle("hidden", !r2v || bodyHidden);
-        if (this.r2vCommonFold) {
-            this.r2vCommonFold.classList.toggle("hidden", !r2v || !on);
-            if (r2v && on) {
-                const fkey = folded ? "panel.r2vCommonExpand" : "panel.r2vCommonCollapse";
-                this.r2vCommonFold.textContent = t(fkey);
-                this.r2vCommonFold.setAttribute("data-i18n", fkey);
-                this.r2vCommonFold.title = t(
-                    folded ? "tooltip.r2vCommonExpand" : "tooltip.r2vCommonCollapse",
-                );
-            }
-        }
-        if (this.r2vCommonToggle) {
-            this.r2vCommonToggle.classList.toggle("on", on);
-            const key = on ? "panel.r2vCommonDisable" : "panel.r2vCommonEnable";
-            this.r2vCommonToggle.textContent = t(key);
-            this.r2vCommonToggle.setAttribute("data-i18n", key);
-            this.r2vCommonToggle.title = t(on ? "tooltip.r2vCommonDisable" : "tooltip.r2vCommonEnable");
-        }
-        if (this.r2vCommonStatus) {
-            this.r2vCommonStatus.classList.toggle("on", on);
-            const skey = !on
-                ? "panel.r2vCommonOff"
-                : (folded ? "panel.r2vCommonOnCollapsed" : "panel.r2vCommonOn");
-            this.r2vCommonStatus.textContent = t(skey);
-            this.r2vCommonStatus.setAttribute("data-i18n", skey);
+        this.globalPanel?.classList.toggle("bd-r2v-common-collapsed", false);
+        // r2v: the whole 公共参数 block is removed — shared assets/prompt live on
+        // their own paginator page inside the batch card instead.
+        this.splitEl?.classList.toggle("hidden", !!r2v);
+        this.r2vCommonHint?.classList.toggle("hidden", true);
+        this.r2vCommonFold?.classList.toggle("hidden", true);
+        this.r2vCommonToggle?.classList.toggle("hidden", true);
+        this.r2vCommonStatus?.classList.toggle("hidden", true);
+        if (r2v && this.timeline?.global) {
+            // Keep the persisted flag in sync so the backend merge always runs.
+            this.timeline.global.commonEnabled = true;
+            this.timeline.global.commonCollapsed = false;
         }
         if (r2v && this.globalPrompt) {
             this.globalPrompt.placeholder = t("placeholder.r2vCommonPrompt");
             this.globalPrompt.setAttribute("data-i18n-placeholder", "placeholder.r2vCommonPrompt");
         }
         // Keep shared layout class in sync so image/audio slot chrome paints correctly.
-        // Layout chrome follows enablement (not UI fold) so group inherit previews stay correct.
+        // Shared assets are always on in r2v, so the layout class is always applied.
         if (r2v) {
-            this.globalPromptLayout?.classList.toggle("bd-rv2v-layout", on);
-            this.globalPanel?.classList.toggle("bd-rv2v-panel", on);
+            this.globalPromptLayout?.classList.toggle("bd-rv2v-layout", true);
+            this.globalPanel?.classList.toggle("bd-rv2v-panel", true);
         }
     }
 
@@ -7822,7 +7794,7 @@ class MiniMaxH3DirectorEditor {
         });
     }
 
-    showInputMediaPicker({ kind, title, accept, currentValue = "" } = {}) {
+    showInputMediaPicker({ kind, title, accept, currentValue = "", multi = false } = {}) {
         return new Promise((resolve) => {
             this._closeBdModal();
 
@@ -7874,13 +7846,31 @@ class MiniMaxH3DirectorEditor {
                 tableEl.classList.add("bd-media-nodims");
                 tableEl.querySelector('.bd-media-th[data-sort="dims"]')?.remove();
             }
+            if (multi) {
+                // 批量模式：表格多一列复选框，给 thead 补一个占位 cell 保持列对齐，
+                // 否则复选框会把 name 列挤掉，time 列还会换到下一行。
+                tableEl.classList.add("bd-media-multi");
+                // 注意：不要用 .bd-media-th —— 它会被列头文案/排序逻辑选中，
+                // 而这里没有可填充的 span，会抛 "Cannot set properties of null"。
+                const cbHead = document.createElement("span");
+                cbHead.className = "bd-media-th-cb";
+                cbHead.appendChild(document.createElement("span"));
+                cbHead.setAttribute("aria-hidden", "true");
+                const theadEl = tableEl.querySelector(".bd-media-thead");
+                theadEl?.insertBefore(
+                    cbHead,
+                    theadEl?.querySelector(".bd-media-th[data-sort='name']"),
+                );
+            }
             const thEls = [...panel.querySelectorAll(".bd-media-th")];
             thEls.forEach((th) => {
                 const key = th.dataset.sort;
                 const label = key === "dims" ? t("mediaPicker.dims")
                     : key === "time" ? t("mediaPicker.time")
                     : t("mediaPicker.file");
-                th.querySelector("span").textContent = label;
+                // 缺 span 只跳过自己，不要让整个弹窗初始化失败。
+                const labelEl = th.querySelector("span");
+                if (labelEl) labelEl.textContent = label;
             });
 
             let selectedValue = currentValue || "";
@@ -7888,14 +7878,16 @@ class MiniMaxH3DirectorEditor {
             let listedItems = [];
             let sortKey = "time";
             let sortDir = "desc";
+            // 批量选择：选中集合（multi=true 时生效，返回数组）
+            const multiSel = new Set();
 
             const finish = (val) => {
                 this._closeBdModal();
                 resolve(val);
             };
 
-            const selectedChoice = () => {
-                const item = itemsByPath.get(selectedValue || "");
+            const choiceFor = (relPath) => {
+                const item = itemsByPath.get(relPath || "");
                 if (!item) return null;
                 return {
                     source: "existing",
@@ -7905,6 +7897,17 @@ class MiniMaxH3DirectorEditor {
                     type: item.type || "input",
                     mediaKind: item.mediaKind || kind,
                 };
+            };
+
+            const selectedChoice = () => choiceFor(selectedValue);
+
+            const selectedChoices = () => {
+                // 保持列表顺序，用户勾选顺序无关紧要
+                return sortedItems()
+                    .map((it) => it.relPath)
+                    .filter((p) => multiSel.has(p))
+                    .map((p) => choiceFor(p))
+                    .filter(Boolean);
             };
 
             const formatMediaTime = (unixSec) => {
@@ -8000,7 +8003,24 @@ class MiniMaxH3DirectorEditor {
                 metaEl.appendChild(pathEl);
             };
 
-            const selectRow = (relPath, { scroll = false } = {}) => {
+            const selectRow = (relPath, { scroll = false, toggleCheck = false } = {}) => {
+                if (multi) {
+                    if (!relPath) return;
+                    // 行点击 = 预览；只有点复选框才切换勾选。
+                    if (toggleCheck) {
+                        if (multiSel.has(relPath)) multiSel.delete(relPath);
+                        else multiSel.add(relPath);
+                    }
+                    selectedValue = relPath;
+                    tbodyEl.querySelectorAll(".bd-media-tr").forEach((row) => {
+                        const on = row.dataset.path === selectedValue;
+                        row.classList.toggle("selected", on);
+                        if (on && scroll) row.scrollIntoView({ block: "nearest" });
+                    });
+                    renderPreview(itemsByPath.get(relPath));
+                    syncMultiRows();
+                    return;
+                }
                 selectedValue = relPath || "";
                 tbodyEl.querySelectorAll(".bd-media-tr").forEach((row) => {
                     const on = row.dataset.path === selectedValue;
@@ -8008,6 +8028,22 @@ class MiniMaxH3DirectorEditor {
                     if (on && scroll) row.scrollIntoView({ block: "nearest" });
                 });
                 renderPreview(itemsByPath.get(selectedValue));
+            };
+
+            const syncMultiRows = () => {
+                tbodyEl.querySelectorAll(".bd-media-tr").forEach((row) => {
+                    const on = multiSel.has(row.dataset.path);
+                    // checked = 已勾选（左侧蓝条）；selected = 当前预览项（底色）。
+                    row.classList.toggle("checked", on);
+                    row.classList.toggle("selected", row.dataset.path === selectedValue);
+                    const cb = row.querySelector(".bd-media-cb");
+                    if (cb) cb.checked = on;
+                });
+                const n = multiSel.size;
+                statusEl.textContent = n
+                    ? t("mediaPicker.multiSelected", { n })
+                    : t("mediaPicker.count", { n: listedItems.length });
+                okBtn.disabled = n === 0;
             };
 
             const renderRows = () => {
@@ -8023,14 +8059,31 @@ class MiniMaxH3DirectorEditor {
                     syncHeaderState();
                     return;
                 }
-                if (!selectedValue || !itemsByPath.has(selectedValue)) {
+                if (!multi && (!selectedValue || !itemsByPath.has(selectedValue))) {
                     selectedValue = rows[0].relPath || "";
                 }
                 for (const item of rows) {
                     const row = document.createElement("div");
                     row.className = "bd-media-tr";
                     row.dataset.path = item.relPath;
-                    if (item.relPath === selectedValue) row.classList.add("selected");
+                    if (multi) {
+                        if (multiSel.has(item.relPath)) row.classList.add("checked");
+                        if (item.relPath === selectedValue) row.classList.add("selected");
+                    } else if (item.relPath === selectedValue) {
+                        row.classList.add("selected");
+                    }
+                    if (multi) {
+                        const cbTd = document.createElement("div");
+                        cbTd.className = "bd-media-td bd-media-td-cb";
+                        const cb = document.createElement("input");
+                        cb.type = "checkbox";
+                        cb.className = "bd-media-cb";
+                        cb.checked = multiSel.has(item.relPath);
+                        cb.onclick = (e) => e.stopPropagation();
+                        cb.onchange = () => selectRow(item.relPath, { toggleCheck: true });
+                        cbTd.appendChild(cb);
+                        row.appendChild(cbTd);
+                    }
                     const nameTd = document.createElement("div");
                     nameTd.className = "bd-media-td bd-media-td-name";
                     const mediaPrefix = kind === "reference_audio"
@@ -8051,18 +8104,29 @@ class MiniMaxH3DirectorEditor {
                     }
                     row.addEventListener("click", () => selectRow(item.relPath));
                     row.addEventListener("dblclick", () => {
+                        if (multi) return; // 批量模式下双击不提交，避免误关
                         const choice = selectedChoice();
                         if (choice) finish(choice);
                     });
                     tbodyEl.appendChild(row);
                 }
                 syncHeaderState();
-                renderPreview(itemsByPath.get(selectedValue));
-                const selectedRow = tbodyEl.querySelector(".bd-media-tr.selected");
-                selectedRow?.scrollIntoView({ block: "nearest" });
+                if (multi) {
+                    // 默认预览第一项，避免刚打开弹窗时右侧预览区一片空白。
+                    if (!selectedValue && rows.length) {
+                        selectedValue = rows[0].relPath || "";
+                        renderPreview(itemsByPath.get(selectedValue));
+                    }
+                    syncMultiRows();
+                } else {
+                    renderPreview(itemsByPath.get(selectedValue));
+                    const selectedRow = tbodyEl.querySelector(".bd-media-tr.selected");
+                    selectedRow?.scrollIntoView({ block: "nearest" });
+                }
             };
 
             const moveSelection = (delta) => {
+                if (multi) return; // 批量模式下方向键不应改动勾选集合
                 const rows = sortedItems();
                 if (!rows.length) return;
                 const idx = rows.findIndex((item) => item.relPath === selectedValue);
@@ -8078,9 +8142,13 @@ class MiniMaxH3DirectorEditor {
                     listedItems = await this.listInputMedia(kind);
                     itemsByPath = new Map(listedItems.map((item) => [item.relPath, item]));
                     renderRows();
-                    statusEl.textContent = listedItems.length
-                        ? t("mediaPicker.count", { n: listedItems.length })
-                        : t("mediaPicker.empty");
+                    if (multi) {
+                        syncMultiRows();
+                    } else {
+                        statusEl.textContent = listedItems.length
+                            ? t("mediaPicker.count", { n: listedItems.length })
+                            : t("mediaPicker.empty");
+                    }
                 } catch (err) {
                     listedItems = [];
                     itemsByPath = new Map();
@@ -8115,9 +8183,33 @@ class MiniMaxH3DirectorEditor {
             uploadBtn.textContent = t("mediaPicker.upload");
             uploadBtn.onclick = async () => {
                 const file = await this.pickLocalFile(accept || "");
-                if (file) finish({ source: "file", file });
+                if (!file) return;
+                finish(multi ? [{ source: "file", file }] : { source: "file", file });
             };
             actionsTop.appendChild(uploadBtn);
+
+            if (multi) {
+                const selAll = document.createElement("button");
+                selAll.type = "button";
+                selAll.className = "bd-btn";
+                selAll.textContent = t("mediaPicker.selectAll");
+                selAll.onclick = () => {
+                    for (const it of listedItems) multiSel.add(it.relPath);
+                    syncMultiRows();
+                    renderRows();
+                };
+                actionsTop.appendChild(selAll);
+                const clearSel = document.createElement("button");
+                clearSel.type = "button";
+                clearSel.className = "bd-btn";
+                clearSel.textContent = t("mediaPicker.clearSelection");
+                clearSel.onclick = () => {
+                    multiSel.clear();
+                    syncMultiRows();
+                    renderRows();
+                };
+                actionsTop.appendChild(clearSel);
+            }
 
             const actionsBottom = document.createElement("div");
             actionsBottom.className = "bd-modal-actions";
@@ -8131,8 +8223,15 @@ class MiniMaxH3DirectorEditor {
             const okBtn = document.createElement("button");
             okBtn.type = "button";
             okBtn.className = "bd-btn bd-btn-primary";
-            okBtn.textContent = t("mediaPicker.useSelected");
+            okBtn.textContent = multi
+                ? t("mediaPicker.useSelectedMulti")
+                : t("mediaPicker.useSelected");
             okBtn.onclick = () => {
+                if (multi) {
+                    const choices = selectedChoices();
+                    if (choices.length) finish(choices);
+                    return;
+                }
                 const choice = selectedChoice();
                 if (choice) finish(choice);
             };
@@ -8179,6 +8278,28 @@ class MiniMaxH3DirectorEditor {
             accept: "image/*,.jpg,.jpeg,.png,.webp,.bmp,.gif,.tif,.tiff",
             currentValue: opts.currentValue || "",
         });
+        return this._resolveImageChoice(choice);
+    }
+
+    /** 批量版：返回数组（元素结构同 chooseImageInput）。 */
+    async chooseImageInputs(opts = {}) {
+        const choices = await this.showInputMediaPicker({
+            kind: "image",
+            title: opts.title || t("mediaPicker.pickReferenceImage"),
+            accept: "image/*,.jpg,.jpeg,.png,.webp,.bmp,.gif,.tif,.tiff",
+            currentValue: opts.currentValue || "",
+            multi: true,
+        });
+        if (!Array.isArray(choices) || !choices.length) return [];
+        const out = [];
+        for (const c of choices) {
+            const r = await this._resolveImageChoice(c);
+            if (r) out.push(r);
+        }
+        return out;
+    }
+
+    async _resolveImageChoice(choice) {
         if (!choice) return null;
         if (choice.source === "file" && choice.file) {
             const uploaded = await uploadToInput(choice.file);
@@ -8211,6 +8332,28 @@ class MiniMaxH3DirectorEditor {
             accept: "video/*,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
             currentValue: opts.currentValue || "",
         });
+        return this._resolveVideoChoice(choice);
+    }
+
+    /** 批量版：返回数组（元素结构同 chooseVideoInput）。 */
+    async chooseVideoInputs(opts = {}) {
+        const choices = await this.showInputMediaPicker({
+            kind: "video",
+            title: opts.title || t("mediaPicker.pickReferenceVideo"),
+            accept: "video/*,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
+            currentValue: opts.currentValue || "",
+            multi: true,
+        });
+        if (!Array.isArray(choices) || !choices.length) return [];
+        const out = [];
+        for (const c of choices) {
+            const r = await this._resolveVideoChoice(c);
+            if (r) out.push(r);
+        }
+        return out;
+    }
+
+    async _resolveVideoChoice(choice) {
         if (!choice) return null;
         if (choice.source === "file" && choice.file) {
             const uploaded = await uploadToInputSmart(choice.file);
@@ -8236,6 +8379,28 @@ class MiniMaxH3DirectorEditor {
             accept: "audio/*,video/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.wma,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
             currentValue: opts.currentValue || "",
         });
+        return this._resolveAudioChoice(choice);
+    }
+
+    /** 批量版：返回数组（元素结构同 chooseAudioInput）。 */
+    async chooseAudioInputs(opts = {}) {
+        const choices = await this.showInputMediaPicker({
+            kind: "reference_audio",
+            title: opts.title || t("mediaPicker.pickReferenceAudio"),
+            accept: "audio/*,video/*,.wav,.mp3,.flac,.ogg,.m4a,.aac,.wma,.mp4,.mov,.webm,.mkv,.avi,.m4v,.mpg,.mpeg,.mts,.ts",
+            currentValue: opts.currentValue || "",
+            multi: true,
+        });
+        if (!Array.isArray(choices) || !choices.length) return [];
+        const out = [];
+        for (const c of choices) {
+            const r = await this._resolveAudioChoice(c);
+            if (r) out.push(r);
+        }
+        return out;
+    }
+
+    async _resolveAudioChoice(choice) {
         if (!choice) return null;
         if (choice.source === "file" && choice.file) {
             return prepareLocalReferenceAudio(choice.file);

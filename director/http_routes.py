@@ -892,8 +892,59 @@ async def minimax_segment_export(request):
         return web.json_response({"error": str(exc)}, status=500)
 
 
+async def minimax_segment_clip(request):
+    """Stream a cached segment clip so the UI「二采」tab can play it in place.
+
+    Read-only: resolves the same slot map the export status uses, so it always
+    follows the segment currently living at ``index`` (and its superseded group
+    when the newest stem is still empty). Never writes anything.
+    """
+    node_id = str(request.query.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+    try:
+        index = int(request.query.get("index") or 0)
+    except Exception:
+        return web.Response(status=400, text="Invalid segment index.")
+    if index < 0:
+        return web.Response(status=400, text="Invalid segment index.")
+
+    variant = str(request.query.get("variant") or "").strip().lower()
+    workflow_name = str(request.query.get("workflow_name") or "").strip() or None
+
+    try:
+        from .segment_cache import clip_cache_path
+        from .segment_slots import VARIANT_FIRST, VARIANT_SECOND
+    except Exception as exc:  # pragma: no cover - import guard
+        log.warning("MiniMax H3 Director segment-clip import failed: %s", exc)
+        return web.Response(status=500, text="Segment cache unavailable.")
+
+    variant_key = VARIANT_SECOND if variant in ("2nd", "second", "2") else VARIANT_FIRST
+    try:
+        path = clip_cache_path(
+            node_id, index, workflow_name=workflow_name,
+            allow_prev=True, variant=variant_key,
+        )
+    except Exception as exc:
+        log.warning("MiniMax H3 Director segment-clip failed: %s", exc)
+        return web.Response(status=404, text="Segment clip not cached.")
+    if path is None:
+        return web.Response(status=404, text="Segment clip not cached.")
+    try:
+        if not path.is_file() or path.stat().st_size <= 0:
+            return web.Response(status=404, text="Segment clip not cached.")
+    except OSError:
+        return web.Response(status=404, text="Segment clip not cached.")
+
+    return web.FileResponse(
+        str(path),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _register_route(routes, method: str, path: str, handler) -> None:
     if hasattr(routes, "add_route"):
+        # aiohttp UrlDispatcher: registers exactly this method (no implicit HEAD).
         routes.add_route(method, path, handler)
     elif method == "POST" and hasattr(routes, "post"):
         routes.post(path)(handler)
@@ -951,6 +1002,10 @@ def register_routes() -> bool:
         "/minimax/director/align_to_next_status",
         minimax_align_to_next_status,
     )
+    # HEAD 无需注册：RouteTableDef.get() 走 UrlDispatcher.add_get()，默认
+    # allow_head=True 会自动挂上 HEAD；再显式注册一次会直接 RuntimeError
+    # （"Added route will never be executed, method HEAD is already registered"）。
+    _register_route(routes, "GET", "/minimax/director/segment_clip", minimax_segment_clip)
     _register_route(
         routes,
         "POST",

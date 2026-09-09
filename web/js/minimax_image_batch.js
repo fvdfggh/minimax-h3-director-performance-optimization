@@ -576,6 +576,7 @@ export const IMAGE_BATCH_STYLES = `
 .bd-ref-stat{display:inline-flex;align-items:center;gap:8px;margin-left:auto;font-size:10px;color:#8ea;flex-wrap:wrap;justify-content:flex-end}
 .bd-ref-stat-item{white-space:nowrap}
 .bd-ref-stat-item.over{color:#ff7a7a;font-weight:700}
+.bd-ref-stat-total{margin-left:8px;padding-left:8px;border-left:1px solid rgba(255,255,255,.18)}
 .bd-batch-prompts.over{border-color:#e05a5a;box-shadow:0 0 0 1px rgba(224,90,90,.35) inset}
 .bd-batch-card.over{border-color:#e05a5a;box-shadow:0 0 0 1px rgba(224,90,90,.3)}
 .bd-r2v-over-hint{margin:0 0 6px;padding:4px 8px;border:1px solid #e05a5a;background:rgba(224,90,90,.12);border-radius:5px;color:#ff9a9a;font-size:11px;line-height:1.4}
@@ -2729,7 +2730,7 @@ function mountLivePreview(el, seg, badgeText) {
     el.appendChild(wrap);
 }
 
-function mountVideoPreview(el, seg, running, fps, editor) {
+async function mountVideoPreview(el, seg, running, fps, editor, index) {
     stopPlayer(el);
     el.innerHTML = "";
     if (running) {
@@ -2744,6 +2745,23 @@ function mountVideoPreview(el, seg, running, fps, editor) {
         }
         el.textContent = t("batch.generating");
         return;
+    }
+    // 与分段导出 / 二次采样一致：非生成中时优先探测该素材组对应 segment 的
+    // 视频缓存，命中则直接播放已生成的 clip（"用于预览的视频缓存"），比
+    // base64 预览帧清晰得多。探测必须在 frames 之前，否则运行结束后残留的
+    // previewFrames 会让缓存探测永远进不到。
+    // 与分段导出 / 二次采样一致：非生成中时优先探测该素材组对应 segment 的
+    // 视频缓存，命中则直接播放已生成的 clip（"用于预览的视频缓存"），比
+    // base64 预览帧清晰得多。探测必须在 frames 之前，否则运行结束后残留的
+    // previewFrames 会让缓存探测永远进不到。
+    // 探测序号用卡片序号 index（与 mountR2vPreviewWithTabs 完全一致），回退 seg.index。
+    const probeIndex = (index != null) ? index : seg?.index;
+    if (editor && probeIndex != null) {
+        const hit = await probeSegmentClip(editor, probeIndex, "1st");
+        if (hit?.ok) {
+            mountCachedClip(el, hit.url);
+            return;
+        }
     }
     const frames = (seg.previewFrames?.length ? seg.previewFrames : null)
         || (seg.previewB64 ? [seg.previewB64] : null);
@@ -2853,8 +2871,8 @@ function renderImagePreview(el, seg, running, editor) {
     el.textContent = t("batch.previewAfterRun");
 }
 
-function renderPreview(el, seg, running, isVideo, fps, editor) {
-    if (isVideo) mountVideoPreview(el, seg, running, fps, editor);
+function renderPreview(el, seg, running, isVideo, fps, editor, index) {
+    if (isVideo) mountVideoPreview(el, seg, running, fps, editor, index);
     else renderImagePreview(el, seg, running, editor);
 }
 
@@ -3010,6 +3028,8 @@ function mountR2vPreviewWithTabs(el, seg, index, running, fps, editor) {
 export const R2V_ASSET_PAGE_SIZE = { image: 9, video: 6, audio: 6 };
 /** MiniMax 官方上限：超出仅展示不生效，前端以红色告警 */
 export const R2V_REF_LIMITS = { image: 9, video: 3, audio: 3 };
+/** 引用素材总数上限（图片+视频+音频合计），超出仅展示不生效，前端以红色告警 */
+export const R2V_REF_TOTAL_LIMIT = 9;
 /** 提示词 token 格式：<Picture 1> / <Video 1> / <Audio 1> */
 const R2V_TAG_RE = /<(picture|video|audio)\s+(\d+)\s*>/gi;
 const R2V_KIND_TAG = { image: "picture", video: "video", audio: "audio" };
@@ -3033,6 +3053,7 @@ function collectPromptTags(text, tag) {
 export function computePromptRefUsage(editor, seg) {
     const g = editor?.timeline?.global || {};
     const res = { over: false };
+    let totalUsed = 0;
     for (const kind of Object.keys(R2V_KIND_TAG)) {
         const tag = R2V_KIND_TAG[kind];
         const max = R2V_REF_LIMITS[kind];
@@ -3045,8 +3066,12 @@ export function computePromptRefUsage(editor, seg) {
         const maxTag = [...tags].reduce((acc, n) => (n > acc ? n : acc), 0);
         const over = used > max || maxTag > max;
         res[kind] = { used, max, over };
+        totalUsed += used;
         if (over) res.over = true;
     }
+    const totalOver = totalUsed > R2V_REF_TOTAL_LIMIT;
+    res.total = { used: totalUsed, max: R2V_REF_TOTAL_LIMIT, over: totalOver };
+    if (totalOver) res.over = true;
     return res;
 }
 
@@ -3054,6 +3079,7 @@ export function computePromptRefUsage(editor, seg) {
 export function computeCommonRefUsage(editor) {
     const g = editor?.timeline?.global || {};
     const res = { over: false };
+    let totalUsed = 0;
     for (const kind of Object.keys(R2V_KIND_TAG)) {
         const tag = R2V_KIND_TAG[kind];
         const max = R2V_REF_LIMITS[kind];
@@ -3062,8 +3088,12 @@ export function computeCommonRefUsage(editor) {
         const maxTag = [...tags].reduce((acc, n) => (n > acc ? n : acc), 0);
         const over = used > max || maxTag > max;
         res[kind] = { used, max, over };
+        totalUsed += used;
         if (over) res.over = true;
     }
+    const totalOver = totalUsed > R2V_REF_TOTAL_LIMIT;
+    res.total = { used: totalUsed, max: R2V_REF_TOTAL_LIMIT, over: totalOver };
+    if (totalOver) res.over = true;
     return res;
 }
 
@@ -3091,6 +3121,11 @@ export function renderRefStat(editor, seg, prompts) {
         s.textContent = `${t(`r2v.kind.${kind}`)} ${u[kind].used}/${u[kind].max}`;
         host.appendChild(s);
     }
+    const total = document.createElement("span");
+    total.className = "bd-ref-stat-item bd-ref-stat-total";
+    if (u.total?.over) total.classList.add("over");
+    total.textContent = `${t("r2v.kind.total") || "总"} ${u.total.used}/${u.total.max}`;
+    host.appendChild(total);
     prompts.classList.toggle("over", !!u.over);
     return u;
 }
@@ -3781,7 +3816,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
                 preview, seg, index, index === runningIdx, seg.previewFps || fps, editor,
             );
         } else {
-            renderPreview(preview, seg, index === runningIdx, isVideo, seg.previewFps || fps, editor);
+            renderPreview(preview, seg, index === runningIdx, isVideo, seg.previewFps || fps, editor, index);
         }
 
         if (isR2v && r2vMain) {

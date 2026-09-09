@@ -14,6 +14,7 @@ import gc
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -365,6 +366,81 @@ def _filter_ref_images_by_prompt(
     return filtered if filtered else None
 
 
+_REF_IMG_PREFIX = "ref_image_"
+_REF_VID_PREFIX = "ref_video_"
+_REF_AUD_PREFIX = "ref_audio_"
+_REF_VAUD_PREFIX = "ref_video_audio_"
+
+
+def _renumber_r2v_references(prompt, ref_images, ref_videos, ref_audios, ref_video_audios):
+    """Renumber the actually-passed R2V materials to gap-free 1..N and rewrite the
+    prompt tokens to match.
+
+    A material's identity is its absolute index: ``<Picture 5>`` means absolute
+    index 4. We sort the materials that are actually present, assign them
+    contiguous ranks 0,1,2..., and rewrite every prompt token so ``<Picture K>``
+    now points at the new rank of the material whose absolute index was ``K-1``.
+
+    This guarantees MiniMax receives ``ref_image_0, ref_image_1, ...`` plus a
+    prompt whose ``<Picture N>`` numbering is gap-free, regardless of which
+    absolute ids the user typed in the prompt. Materials referenced in the prompt
+    but absent from the payload are left untouched (so the model still surfaces
+    them as missing).
+    """
+    if not prompt:
+        return prompt, ref_images, ref_videos, ref_audios, ref_video_audios
+
+    def rank_map(d, prefix):
+        idxs = sorted(int(k[len(prefix):]) for k in (d or {}) if k.startswith(prefix))
+        return {old: new for new, old in enumerate(idxs)}
+
+    def renumber(d, prefix, rank):
+        if not d:
+            return d
+        nd = {}
+        for k, v in d.items():
+            if k.startswith(prefix):
+                old = int(k[len(prefix):])
+                nd[f"{prefix}{rank.get(old, old)}"] = v
+            else:
+                nd[k] = v
+        return nd
+
+    def rewrite(text, token, rank):
+        pat = re.compile(rf"<{token}\s+(\d+)\s*>", re.IGNORECASE)
+        def repl(m):
+            old = int(m.group(1))
+            new = rank.get(old - 1, old - 1) + 1
+            return f"<{token} {new}>"
+        return pat.sub(repl, text)
+
+    # images
+    img_rank = rank_map(ref_images, _REF_IMG_PREFIX)
+    if img_rank:
+        ref_images = renumber(ref_images, _REF_IMG_PREFIX, img_rank)
+        prompt = rewrite(prompt, "Picture", img_rank)
+    # videos (+ paired audios, keyed by video index)
+    vid_rank = rank_map(ref_videos, _REF_VID_PREFIX)
+    if vid_rank:
+        ref_videos = renumber(ref_videos, _REF_VID_PREFIX, vid_rank)
+        if ref_video_audios:
+            nd = {}
+            for k, v in ref_video_audios.items():
+                if k.startswith(_REF_VAUD_PREFIX):
+                    old = int(k[len(_REF_VAUD_PREFIX):])
+                    if old in vid_rank:
+                        nd[f"{_REF_VAUD_PREFIX}{vid_rank[old]}"] = v
+            ref_video_audios = nd
+        prompt = rewrite(prompt, "Video", vid_rank)
+    # audios
+    aud_rank = rank_map(ref_audios, _REF_AUD_PREFIX)
+    if aud_rank:
+        ref_audios = renumber(ref_audios, _REF_AUD_PREFIX, aud_rank)
+        prompt = rewrite(prompt, "Audio", aud_rank)
+
+    return prompt, ref_images, ref_videos, ref_audios, ref_video_audios
+
+
 def prepare_segment_materials(
     *, prompt, width, height, length, task_key,
     first_frame=None, last_frame=None, ref_images=None, ref_videos=None,
@@ -395,6 +471,18 @@ def prepare_segment_materials(
                 orig_count,
                 len(filtered),
             )
+
+    # Renumber the actually-passed materials to gap-free 1..N and rewrite the
+    # prompt tokens so MiniMax's <Picture N> numbering lines up with the payload,
+    # regardless of which absolute ids the user typed in the prompt.
+    if task_key in {"r2v", "v2v", "rv2v"} and (
+        ref_images or ref_videos or ref_audios or ref_video_audios
+    ):
+        prompt, ref_images, ref_videos, ref_audios, ref_video_audios = (
+            _renumber_r2v_references(
+                prompt, ref_images, ref_videos, ref_audios, ref_video_audios
+            )
+        )
 
     use_reference = (
         task_key in {"r2v", "v2v", "rv2v"}
@@ -958,6 +1046,9 @@ def execute_director_batch(
     clear_vram_between_segments: bool = True,
     workflow_name: str | None = None,
     progress_cb=None,
+    # Connected-frame (r2v/v2v/rv2v) taper noise — applied to the pinned
+    # reference frames before they are handed to H3 Motion Context. 0 disables.
+    conn_noise: bool = False,
 ) -> tuple:
     """Three-phase batch execution.
 
@@ -1542,6 +1633,8 @@ def execute_director_batch(
                 tail_context_latent=tail_context_latent,
                 tail_context_offset=tail_context_offset,
                 tail_context_length=tail_context_length,
+                conn_noise=conn_noise,
+                seed=int(seed),
             )
             if prev_export_trim > 0:
                 pending_prev_trim[seg.index] = int(prev_export_trim)

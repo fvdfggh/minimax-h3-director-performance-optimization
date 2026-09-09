@@ -86,6 +86,10 @@ ProgressCb = Callable[[int, int, int], None]
 # 海螺参考生视频二采：ManualSigmas 4 个数 = euler 3 步。
 DEFAULT_SECOND_SIGMAS = (0.85, 0.7250, 0.4219, 0.0)
 DEFAULT_SECOND_SIGMA_SAMPLER = "euler"
+#: 二采专属固定种子：不暴露给用户调整，始终用同一个全局噪声场。
+#: 取一个与一首采样种子（UI 的 seed 默认 0）不同的固定值，确保二采有自己独立的
+#: 全局噪声场，不会与一首采样完全重合。
+SECOND_SEED_FIXED = 20240
 
 #: Batch budget for the upscaled latents held in system RAM before a batch is
 #: flushed through sampling. Purely a RAM guard — VRAM is handled by parking the
@@ -220,7 +224,6 @@ def run_second_sampling(
     vae,
     audio_vae,
     upscale_model,
-    second_seed: int,
     second_cfg: float,
     second_steps: int,
     second_sampler: str,
@@ -229,11 +232,16 @@ def run_second_sampling(
     second_shift_audio: float,
     second_sigmas,
     second_denoise: float = 1.0,
+    second_seed: int = SECOND_SEED_FIXED,
     audio_mode: str = "movie",
     decode_audio: bool = True,
     memory_guard_bytes: int = DEFAULT_MEMORY_GUARD_BYTES,
     out_dir: str | None = None,
     on_progress: ProgressCb | None = None,
+    # Connected-frame (r2v/v2v/rv2v) taper noise — applied to the pinned
+    # reference frames via a tapered noise_mask so the second pass re-uses its
+    # own global noise. Off by default (matches first pass default).
+    conn_noise: bool = False,
 ) -> dict[str, Any]:
     """Run the second pass over ``selected_indices`` and cache each result.
 
@@ -651,6 +659,8 @@ def run_second_sampling(
                             tail_context_latent=tail_context_latent,
                             tail_context_length=tail_context_length,
                             tail_context_offset=tail_context_offset,
+                            conn_noise=conn_noise,
+                            seed=int(second_seed),
                         )
                     except Exception as exc:
                         # Do NOT swallow this and continue: without the pin the

@@ -10,6 +10,7 @@ from ..director.batch_executor import execute_director_batch
 from ..director.second_sampling import (
     DEFAULT_SECOND_SIGMA_SAMPLER,
     DEFAULT_SECOND_SIGMAS,
+    SECOND_SEED_FIXED,
 )
 from .director_common import (
     CLEAR_VRAM_BETWEEN_SEGMENTS,
@@ -251,6 +252,25 @@ class MiniMaxH3Director:
                         ),
                     },
                 ),
+                # ── 连接帧加噪（仅 r2v/v2v/rv2v 生效）──────────────────────────
+                # 复用 H3-Context-Noise 锥形加噪语义：对「上一段给下一段做参考的 n 帧」
+                # 连接帧（被 H3 Motion Context 钉死的参考帧 latent）施加锥形高斯噪声，
+                # 而非 100% 冻结。默认关闭（行为与之前完全一致）。开启后使用固定默认锥：
+                # alpha=0.2 / alpha_end=0.04 / ramp=2，噪声复用采样的全局种子。
+                "conn_noise": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "连接帧加噪：仅对 r2v/v2v/rv2v 的参考连接帧生效。"
+                            "关闭 = 连接帧完全冻结（行为与之前一致）；"
+                            "开启 = 通过 tapered noise_mask 让整段采样的【全局噪声】按固定锥权重流入这些帧"
+                            "（高噪区 α=0.45 覆盖除最后 3 帧外的全部连接帧，随后 3 帧线性衰减到接缝处 α=0.10），"
+                            "噪声直接复用采样的全局种子（一采用 seed、二采用固定的二采种子）。"
+                            "二采自动用二采的全局噪声重复此过程。"
+                        ),
+                    },
+                ),
                 # ── 二级采样（二采）──────────────────────────────────────────
                 # 刻意放在 optional 最末尾：新增 widget 会占用 widgets_values 下标，
                 # 插在既有控件之前会让旧工作流整体错位。
@@ -277,16 +297,6 @@ class MiniMaxH3Director:
                         ),
                     },
                 ),
-                "second_seed": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 0xFFFFFFFFFFFFFFFF,
-                        "control_after_generate": True,
-                        "tooltip": "二级采样（二采）随机数种子。",
-                    },
-                ),
                 "second_run_model": (
                     list(RUN_MODEL_CHOICES),
                     {
@@ -309,6 +319,19 @@ class MiniMaxH3Director:
                             "二采硬性走自定义 SIGMAS，故 denoise 通过缩放整条噪声调度生效："
                             "首 sigma 变为 denoise×sigma[0]，步数不变、起始噪声更小，"
                             "从而保留更多原 latent。1.0 = 完全重采样；越接近 0 越接近原图。"
+                        ),
+                    },
+                ),
+                "second_seed": (
+                    "INT",
+                    {
+                        "default": SECOND_SEED_FIXED,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "tooltip": (
+                            "二级采样（二采）固定种子：用户自选的固定值，二采用自己的全局噪声场"
+                            "（与一首采样的 seed 相互独立，不会联动定制）。"
+                            "默认使用内置的固定值。"
                         ),
                     },
                 ),
@@ -379,12 +402,14 @@ class MiniMaxH3Director:
         workflow_name=None,
         sigmas=None,
         use_sigmas=False,
+        # ── 连接帧加噪（仅 r2v/v2v/rv2v 生效）── BOOLEAN 开关，默认关闭 ──
+        conn_noise=False,
         # ── 二级采样（二采）—— 参数名与 INPUT_TYPES 末尾一致 ──
         upscale_model=None,
-        second_seed=0,
         second_run_model=RUN_MODEL_MAIN,
         second_sigmas=None,
         second_denoise=1.0,
+        second_seed=SECOND_SEED_FIXED,
         **kwargs,
     ):
         del kwargs  # dropped widgets (batch_mode / use_conditioning_cache / ...) land here
@@ -474,7 +499,6 @@ class MiniMaxH3Director:
                 vae=video_vae,
                 audio_vae=audio_vae,
                 upscale_model=upscale_model,
-                second_seed=second_seed,
                 second_cfg=cfg,
                 second_steps=steps,
                 second_sampler=_second_sampler_eff,
@@ -483,8 +507,10 @@ class MiniMaxH3Director:
                 second_shift_audio=shift_audio,
                 second_sigmas=_second_sigmas_eff,
                 second_denoise=second_denoise,
+                second_seed=second_seed,
                 audio_mode="movie",
                 decode_audio=True,
+                conn_noise=conn_noise,
             )
             if _sampled.get("error"):
                 _report = f"二次采样失败：{_sampled['error']}"
@@ -585,6 +611,7 @@ class MiniMaxH3Director:
                 use_conditioning_cache=USE_CONDITIONING_CACHE,
                 clear_vram_between_segments=CLEAR_VRAM_BETWEEN_SEGMENTS,
                 workflow_name=workflow_name,
+                conn_noise=conn_noise,
             )
         )
 

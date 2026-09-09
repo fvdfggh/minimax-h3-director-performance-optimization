@@ -1257,12 +1257,11 @@ function scheduleDirectorLayoutSettle(editor) {
         if (editor.isPlaying || editor._pauseSettling) return;
         bindDomWidgetContentComputeSize(editor);
         // On reload the node kept its old saved size; grow it to the (possibly larger)
-        // content min so the 素材组 list actually gets the taller slot. Only grows,
+        // content min so the batch list actually gets the taller slot. Only grows,
         // never shrinks a user-enlarged node — safe for workflow size preservation.
-        // 仅素材组(r2v)需要这个兜底：其它模式保持节点原尺寸，否则加载后会被撑高。
-        if (resolveTaskKey(editor?.getTaskKey?.() || editor?.taskTypeWidget?.value) === "r2v") {
-            ensureDirectorNodeFitsContent(editor?.node, editor);
-        }
+        // 所有模式通用：i2v/t2v 多组提示词/参考图也需要把节点撑高到内容高度，
+        // 否则列表被 .bd-wrap overflow:hidden 裁掉（之前只给 r2v 兜底，导致非 r2v 显示异常）。
+        ensureDirectorNodeFitsContent(editor?.node, editor);
         syncBatchPanelFillHeight(editor, { settle: true });
     };
     requestAnimationFrame(() => {

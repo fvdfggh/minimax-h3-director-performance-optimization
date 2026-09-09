@@ -424,8 +424,10 @@ function stopAllPlayers(root) {
 export const IMAGE_BATCH_STYLES = `
 .bd-btn.bd-disabled,.bd-btn:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
 .bd-mode button.bd-disabled,.bd-mode button:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
-.bd-batch{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px}
-/* 只有真的渲染了素材组(r2v)卡片时才用「不收缩」的高度方案；t2v/i2v 等保持默认。 */
+.bd-batch{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
+/* 所有模式（含 i2v/t2v）都保持「不收缩」(flex:0 0 auto)，否则父容器高度受限时
+   列表会被压缩到 640px 滚动框、把多组提示词/参考图裁掉。r2v 额外去掉 max-height 上限，
+   让 1080 高的素材框整块显示（内部素材框再滚动）。 */
 .bd-batch:has(.bd-batch-r2v),.bd-batch-list:has(.bd-batch-r2v){flex:0 0 auto}
 .bd-batch-i2v-notice{display:none;color:#ffb74d;background:#3a2a12;border:1px solid #a67c00;border-radius:6px;padding:8px 10px;font-size:11px;line-height:1.5}
 .bd-batch-i2v-notice.visible{display:block}
@@ -448,7 +450,7 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 /* Default cap; batch-fill mode overrides via .bd-wrap.bd-batch-fill + JS max-height.
    放宽上限, 避免素材组等较长的批处理列表被压在 640px 内滚动. */
-.bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px;min-height:0}
+.bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px;min-height:0;flex:0 0 auto}
 /* 素材组(r2v)列表不截断高度：具体高度由卡片内的素材框决定（见下） */
 .bd-batch-list:has(.bd-batch-r2v){max-height:none}
 .bd-batch-card{background:linear-gradient(165deg,#1a1a1a 0%,#141414 55%,#111 100%);border:1px solid #2c2c2c;border-radius:10px;padding:12px 14px;display:grid;gap:10px;align-items:stretch;box-shadow:inset 0 1px 0 rgba(255,255,255,.03);flex:0 0 auto}
@@ -996,18 +998,26 @@ function pickFile(accept, onFile) {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = accept;
-    input.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none";
+    // 注意：必须留在视口内（不可 off-screen 到 -9999px），否则部分嵌入式/远程
+    // 浏览器（webview）会因「元素未渲染」而静默不弹文件框。这里用 1px 透明 + z-index:-1。
+    input.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;z-index:-1";
     const cleanup = () => {
         input.remove();
     };
-    input.onchange = () => {
+    input.addEventListener("change", () => {
         const file = input.files?.[0];
         cleanup();
         if (file) onFile(file);
-    };
+    });
     input.addEventListener("cancel", cleanup);
     document.body.appendChild(input);
-    input.click();
+    try {
+        input.click();
+    } catch (err) {
+        console.error("[MiniMax H3Director] file dialog failed to open:", err);
+        cleanup();
+        alert(t("upload.alertFailed", { err: err?.message || err }));
+    }
 }
 
 function isBatchImageFile(file) {
@@ -3636,7 +3646,13 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             const src = document.createElement("div");
             src.className = "bd-batch-src";
             renderSourceSlot(src, seg.genImage?.imageFile);
-            src.onclick = () => uploadSegSource(editor, index);
+            // 远程/嵌入式浏览器会静默拦截 input.click() 弹出的原生文件框，
+            // 因此源图框点击改用 ComfyUI 自带 chooseImageInput 面板（与「选择已有」同源，
+            // 在远程环境稳定可用）；drag-drop 仍走直接上传。
+            src.onclick = (e) => {
+                e.stopPropagation();
+                void pickExistingSegSource(editor, index);
+            };
             bindOsFileDrop(src, (files) => {
                 const file = files.find(isBatchImageFile);
                 if (file) void assignSegSourceFromFile(editor, index, file);

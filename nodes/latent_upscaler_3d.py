@@ -29,7 +29,7 @@ from ..lib.latent_upscaler_3d import (
     MODE_MEGAPIXELS,
     MODE_SCALE,
     MODE_TARGET_DIMENSIONS,
-    MiniMaxH3LatentUpscaleModel,
+    MiniMaxH3LatentUpscaleModelOpt,
     scan_models,
 )
 
@@ -50,15 +50,15 @@ class UpscaleMode(str, Enum):
 
 if _HAS_V3_API:
 
-    class MiniMaxH3LatentUpscaleModelNode(io.ComfyNode):
+    class MiniMaxH3LatentUpscaleModelOptNode(io.ComfyNode):
         """Minimax H3 latent upscaler (3D), packaged as a reusable model object."""
 
         @classmethod
         def define_schema(cls):
             return io.Schema(
-                node_id="MiniMaxH3LatentUpscaleModel",
-                display_name="Minimax H3 Latent Upscaler (3D) [Model]",
-                category="MiniMaxH3",
+                node_id="MiniMaxH3LatentUpscaleModelOpt",
+                display_name="Minimax H3 Latent Upscaler Opt (3D) [Model]",
+                category="MiniMaxH3 Opt",
                 search_aliases=["minimax", "h3", "latent", "upscale", "3d", "model"],
                 description=(
                     "Minimax H3 latent upscaler (3D) with Temporal Chunking and pixel-space "
@@ -126,7 +126,7 @@ if _HAS_V3_API:
                 mode = {"mode": mode}
             selected = mode.get("mode") or UpscaleMode.SCALE_BY.value
 
-            model = MiniMaxH3LatentUpscaleModel(
+            model = MiniMaxH3LatentUpscaleModelOpt(
                 model_name,
                 device=device,
                 precision=precision,
@@ -142,11 +142,11 @@ if _HAS_V3_API:
             return io.NodeOutput(model)
 
 else:  # pragma: no cover - only on ComfyUI without comfy_api.latest
-    MiniMaxH3LatentUpscaleModelNode = None
+    MiniMaxH3LatentUpscaleModelOptNode = None
 
 
 __all__ = [
-    "MiniMaxH3LatentUpscaleModelNode",
+    "MiniMaxH3LatentUpscaleModelOptNode",
     "UpscaleMode",
     "MODE_SCALE",
     "MODE_TARGET_DIMENSIONS",

@@ -1,4 +1,4 @@
-"""Shared helpers for the MiniMax H3 Director timeline node."""
+"""Shared helpers for the MiniMax H3 Director Opt timeline node."""
 
 from __future__ import annotations
 
@@ -225,7 +225,7 @@ def prepare_director_plan(
         _attach_segment_export(plan, timeline_data)
         _attach_second_sample(plan, timeline_data)
         log.info(
-            "MiniMax H3 Director: external %s groups × %d (task=%s) | %s",
+            "MiniMax H3 Director Opt: external %s groups × %d (task=%s) | %s",
             family,
             len(ext_groups),
             task_key,
@@ -275,7 +275,7 @@ def _attach_segment_export(plan, timeline_data: str) -> None:
         plan.segment_export = _parse_segment_export(timeline, len(plan.segments))
         _seg_export = plan.segment_export
         log.info(
-            "MiniMax H3 Director 分段导出 parsed: enabled=%s mode=%s source=%s indices=%s nseg=%d",
+            "MiniMax H3 Director Opt 分段导出 parsed: enabled=%s mode=%s source=%s indices=%s nseg=%d",
             _seg_export.enabled if _seg_export else None,
             _seg_export.mode if _seg_export else None,
             _seg_export.normalized_source() if _seg_export else None,
@@ -283,7 +283,7 @@ def _attach_segment_export(plan, timeline_data: str) -> None:
             len(plan.segments),
         )
     except Exception as exc:  # pragma: no cover - defensive
-        log.warning("MiniMax H3 Director: 分段导出 config ignored (%s)", exc)
+        log.warning("MiniMax H3 Director Opt: 分段导出 config ignored (%s)", exc)
         plan.segment_export = None
 
 
@@ -305,13 +305,13 @@ def _attach_second_sample(plan, timeline_data: str) -> None:
         plan.second_sample = _parse_second_sample(timeline, len(plan.segments))
         _ss = plan.second_sample
         log.info(
-            "MiniMax H3 Director 二次采样 parsed: enabled=%s indices=%s nseg=%d",
+            "MiniMax H3 Director Opt 二次采样 parsed: enabled=%s indices=%s nseg=%d",
             _ss.enabled if _ss else None,
             _ss.indices if _ss else None,
             len(plan.segments),
         )
     except Exception as exc:  # pragma: no cover - defensive
-        log.warning("MiniMax H3 Director: 二次采样 config ignored (%s)", exc)
+        log.warning("MiniMax H3 Director Opt: 二次采样 config ignored (%s)", exc)
         plan.second_sample = None
 
 

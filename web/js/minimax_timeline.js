@@ -111,6 +111,7 @@ import {
     taskDisplayLabel,
     toggleLocale,
 } from "./minimax_i18n.js";
+import { bindPackActions } from "./minimax_pack.js";
 
 const RULER_H = 24;
 const SEG_LABEL_H = 20;
@@ -1079,7 +1080,7 @@ async function uploadVideoChunked(file, onProgress) {
         body.append("total_chunks", String(totalChunks));
         body.append("filename", filename);
         body.append("chunk", file.slice(start, end), `${filename}.part`);
-        const resp = await api.fetchApi("/minimax/director/upload_chunk", { method: "POST", body });
+        const resp = await api.fetchApi("/minimax/director_opt/upload_chunk", { method: "POST", body });
         if (!resp.ok) {
             const text = await resp.text();
             throw new Error(text || t("upload.chunkFailed", { status: resp.status }));
@@ -1383,7 +1384,7 @@ function bindDirectorDomWidgetSizing(node, widget, getEditor) {
 
 function initDirectorEditor(node) {
     // Must not share Bernini's `_directorDomWidget` — their loadedGraphNode mounts on that key.
-    if (!isMiniMaxH3DirectorNode(node)) return null;
+    if (!isMiniMaxH3DirectorOptNode(node)) return null;
     const widget = pruneDirectorDomWidgets(node);
     const container = widget?.element;
     if (!container) return null;
@@ -1407,7 +1408,7 @@ function initDirectorEditor(node) {
     try {
         for (const wrap of [...container.querySelectorAll(":scope > .bd-wrap")]) wrap.remove();
         hookTaskTypeWidget(node);
-        const editor = new MiniMaxH3DirectorEditor(node, container, widget);
+        const editor = new MiniMaxH3DirectorOptEditor(node, container, widget);
         node._minimaxEditor = editor;
         widget._minimaxEditor = editor;
         ensureDirectorDomWidgetWidth(node);
@@ -1715,7 +1716,7 @@ function parseTimeline(raw, totalFrames, fps) {
     }
 }
 
-class MiniMaxH3DirectorEditor {
+class MiniMaxH3DirectorOptEditor {
     constructor(node, container, domWidget) {
         this.node = node;
         this.container = container;
@@ -2426,6 +2427,8 @@ class MiniMaxH3DirectorEditor {
                         <button type="button" class="bd-btn bd-btn-zoom" data-a="zoom-toggle" data-i18n="toolbar.timelineZoom" data-i18n-title="toolbar.timelineZoomTitle">放大</button>
                         <input type="range" class="bd-tl-zoom-slider hidden" data-r="zoom" min="1" max="10" step="any" value="1" data-i18n-title="tooltip.timelineZoom">
                     </div>
+                    <button type="button" class="bd-btn" data-a="pack-import" data-i18n="toolbar.importPack" data-i18n-title="tooltip.importPack">导入导演包</button>
+                    <button type="button" class="bd-btn" data-a="pack-export" data-i18n="toolbar.exportPack" data-i18n-title="tooltip.exportPack">导出导演包</button>
                     <button type="button" class="bd-btn" data-a="lang-toggle" data-i18n="toolbar.langToggle" data-i18n-title="toolbar.langToggleTitle">EN</button>
                     <div class="bd-bounds" data-r="bounds">起点: 0.00 | 终点: -</div>
                     <div class="bd-timecode" data-r="timecode">0.00s</div>
@@ -2909,6 +2912,7 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));
         bind('[data-a="lang-toggle"]', () => toggleLocale());
         bind('[data-a="zoom-toggle"]', () => this.toggleTimelineZoom());
+        bindPackActions(this);
         bind('[data-a="play"]', () => this.togglePlay());
         bind('[data-a="loop"]', () => this.toggleLoop());
         bind('[data-a="live-tae-preview"]', () => this.toggleLiveTaePreview());
@@ -3315,6 +3319,70 @@ class MiniMaxH3DirectorEditor {
 
     widget(name) { return this.node.widgets?.find((w) => w.name === name); }
 
+    /** Replace the whole timeline with an imported director pack (Opt or upstream). */
+    applyImportedTimeline(timeline, widgets = {}) {
+        const data = timeline && typeof timeline === "object" ? timeline : {};
+        const opts = widgets && typeof widgets === "object" ? widgets : {};
+        // Replace, do not merge: drop in-memory drafts from the previous task so
+        // later t2v/r2v/v2v switches restore pack workspaces, not stale slots.
+        this._batchWsMem = {};
+        this._videoWsMem = {};
+        this._lastOutputWasBatchFixed = false;
+        this._legacyFrames = [];
+        this._clearPreviewVideos?.(true);
+        const taskType = opts.task_type || opts.taskType || data.global?.taskType || "";
+        if (this.taskTypeWidget && taskType) this.taskTypeWidget.value = taskType;
+        if (this.globalTask && taskType) this.globalTask.value = taskType;
+        for (const name of ["steps", "sampler", "scheduler", "cfg", "shift_video", "shift_audio", "seed"]) {
+            if (opts[name] == null || opts[name] === "") continue;
+            const w = this.widget(name);
+            if (w) w.value = opts[name];
+        }
+        const out = data.output && typeof data.output === "object" ? data.output : {};
+        if (this.widthWidget && out.width) this.widthWidget.value = out.width;
+        if (this.heightWidget && out.height) this.heightWidget.value = out.height;
+        if (this.frameRateWidget && (data.frameRate || out.frameRate)) {
+            this.frameRateWidget.value = data.frameRate || out.frameRate;
+        }
+        if (this.refMaxWidget && (data.refMaxSize || out.longEdge)) {
+            this.refMaxWidget.value = data.refMaxSize || out.longEdge;
+        }
+        if (this.globalPromptWidget && data.global?.prompt != null) {
+            this.globalPromptWidget.value = data.global.prompt;
+        }
+        if (this.timelineWidget) this.timelineWidget.value = JSON.stringify(data);
+        const initTotal = Math.max(0, parseInt(this.totalFramesWidget?.value || data.totalFrames || 124, 10));
+        const initFps = coerceTimelineFps(this.frameRateWidget?.value || data.frameRate || 24);
+        this.timeline = parseTimeline(this.timelineWidget?.value, initTotal, initFps);
+        this.syncFrameRateUI?.(this.timeline.frameRate);
+        const prevMode = this._directorMode;
+        const prevKey = this._taskKey;
+        const nextMode = getDirectorMode(this.taskTypeWidget?.value || taskType);
+        this._directorMode = nextMode;
+        this._taskKey = resolveTaskKey(this.taskTypeWidget?.value || taskType);
+        if (nextMode === "video") {
+            this.restoreVideoFromTimeline();
+        } else if (nextMode === "prompt_batch" || nextMode === "image_batch") {
+            ensureImageBatchTimeline(this);
+        } else if (nextMode === "fl2v") {
+            ensureFl2vTimeline(this);
+        } else {
+            this.ensureGenTimeline();
+        }
+        this.applyTaskLayout(prevMode, prevKey);
+        this.populateTaskSelect(this.globalTask, this.taskTypeWidget?.value);
+        this.setEditMode(this.timeline.editMode || "global");
+        this.selectedIndex = 0;
+        this.updateModeUI?.();
+        this.updateSelectionUI();
+        this.applyZoomWidth?.();
+        this.commit(true, { syncTimeline: true });
+        this._externalGroupsSyncSig = null;
+        this.syncExternalGroupsTimeline?.();
+        this.scheduleSettleRender?.();
+        this.updateDomWidgetHeight?.();
+    }
+
     _videoIdentityFromParts(video, clips) {
         const list = Array.isArray(clips) && clips.length ? clips : [];
         if (list.length) {
@@ -3589,7 +3657,7 @@ class MiniMaxH3DirectorEditor {
     dropSegmentSlotCache(index) {
         const nodeId = String(this.node?.id ?? "");
         if (!nodeId) return;
-        api.fetchApi("/minimax/director/remove_segment_slot", {
+        api.fetchApi("/minimax/director_opt/remove_segment_slot", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -3598,7 +3666,7 @@ class MiniMaxH3DirectorEditor {
                 index: parseInt(index, 10) || 0,
             }),
         }).catch((err) => {
-            console.warn("[MiniMax H3 Director] segment cache drop failed:", err);
+            console.warn("[MiniMax H3 Director Opt] segment cache drop failed:", err);
         });
     }
 
@@ -3647,7 +3715,7 @@ class MiniMaxH3DirectorEditor {
             workflow_name: getStableWorkflowId(),
         };
         try {
-            const resp = await api.fetchApi("/minimax/director/align_to_next_status", {
+            const resp = await api.fetchApi("/minimax/director_opt/align_to_next_status", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
@@ -3666,7 +3734,7 @@ class MiniMaxH3DirectorEditor {
         } catch (e) {
             // Keep the last-known align-to-next state instead of wiping it; a
             // transient failure shouldn't grey every「对齐下段」control.
-            console.warn("[MiniMax H3 Director] align-to-next status refresh failed:", e);
+            console.warn("[MiniMax H3 Director Opt] align-to-next status refresh failed:", e);
         }
         if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.scheduleRender();
@@ -3843,7 +3911,7 @@ class MiniMaxH3DirectorEditor {
             source: source === "2nd" ? "2nd" : "1st",
         };
         try {
-            const resp = await api.fetchApi("/minimax/director/segment_export_status", {
+            const resp = await api.fetchApi("/minimax/director_opt/segment_export_status", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
@@ -4078,7 +4146,7 @@ class MiniMaxH3DirectorEditor {
             workflow_name: getStableWorkflowId(),
         };
         try {
-            const resp = await api.fetchApi("/minimax/director/second_sample_status", {
+            const resp = await api.fetchApi("/minimax/director_opt/second_sample_status", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(payload),
@@ -7777,7 +7845,7 @@ class MiniMaxH3DirectorEditor {
         // for something they generated earlier.
         const params = new URLSearchParams({ kind });
         if (includeCache) params.set("includeCache", "1");
-        const resp = await api.fetchApi(`/minimax/director/list_input_media?${params.toString()}`);
+        const resp = await api.fetchApi(`/minimax/director_opt/list_input_media?${params.toString()}`);
         if (!resp.ok) {
             const text = (await resp.text()).trim();
             if (resp.status === 404) throw new Error(t("mediaPicker.needRestart"));
@@ -8467,7 +8535,7 @@ class MiniMaxH3DirectorEditor {
     }
 
     async probeVideoFile(relPath, subfolder = "", type = "input") {
-        const resp = await api.fetchApi("/minimax/director/probe_video", {
+        const resp = await api.fetchApi("/minimax/director_opt/probe_video", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ videoFile: relPath, subfolder, type: type || "input" }),
@@ -9692,7 +9760,7 @@ class MiniMaxH3DirectorEditor {
                 logicalEnd: r.end,
                 nativeFps: r.clip.nativeFps || r.clip.native_fps || null,
             }));
-            const resp = await api.fetchApi("/minimax/director/detect_shots", {
+            const resp = await api.fetchApi("/minimax/director_opt/detect_shots", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -9734,7 +9802,7 @@ class MiniMaxH3DirectorEditor {
                 { ok: !warn },
             );
         } catch (err) {
-            console.error("[MiniMax H3 Director] smartSplit failed", err);
+            console.error("[MiniMax H3 Director Opt] smartSplit failed", err);
             this.setSmartSplitMessage(t("smartSplit.failed", { err: err?.message || err }));
         } finally {
             if (btn) {
@@ -11866,7 +11934,7 @@ class MiniMaxH3DirectorEditor {
         this.runPhaseEl.style.width = `${phasePct}%`;
         // Do NOT syncDirectorNodeSize / full batch rebuild every tick — that was the
         // cross-mode (t2v/i2v/r2v/…) infinite-height feedback loop. Status has a fixed
-        // min-height; live previews patch in place via minimax_director_preview.
+        // min-height; live previews patch in place via minimax_director_opt_preview.
         const segKey = `${timelineSeg}|${detail.phase}|${runSeg}`;
         const segChanged = this._runProgressSegKey !== segKey;
         this._runProgressSegKey = segKey;
@@ -12135,10 +12203,10 @@ function getStableWorkflowId() {
             return _fallbackWorkflowId;
         }
         if (!graph.extra) graph.extra = {};
-        let id = graph.extra.minimax_director_workflow_id;
+        let id = graph.extra.minimax_director_opt_workflow_id;
         if (!id) {
             id = (crypto?.randomUUID?.() || ("wf-" + Date.now() + "-" + Math.random().toString(36).slice(2)));
-            graph.extra.minimax_director_workflow_id = id;
+            graph.extra.minimax_director_opt_workflow_id = id;
             try { app.graph?.setDirty?.(); } catch (_) { /* ignore */ }
         }
         return String(id);
@@ -12159,10 +12227,10 @@ function findDirectorNode(nodeId) {
 }
 
 const EXTERNAL_GROUP_NODE_TYPES = new Set([
-    "MiniMaxH3DirectorGroupImageToVideo",
-    "MiniMaxH3DirectorGroupReferenceToVideo",
+    "MiniMaxH3DirectorOptGroupImageToVideo",
+    "MiniMaxH3DirectorOptGroupReferenceToVideo",
 ]);
-const EXTERNAL_COMBINE_NODE_TYPE = "MiniMaxH3DirectorGroupsCombine";
+const EXTERNAL_COMBINE_NODE_TYPE = "MiniMaxH3DirectorOptGroupsCombine";
 
 function graphLinkRecord(graph, linkId) {
     if (linkId == null || !graph) return null;
@@ -12485,7 +12553,7 @@ function readExternalGroupSpec(node, graph = null) {
     let refImages = [];
     let refVideos = [];
     let refAudios = [];
-    if (cls === "MiniMaxH3DirectorGroupReferenceToVideo") {
+    if (cls === "MiniMaxH3DirectorOptGroupReferenceToVideo") {
         // Autogrow: ref_images.ref_image_0 / ref_videos.ref_video_0 / …
         refImages = collectAutogrowSlotRefs(
             g, node, "ref_image", resolveLinkedImageFile,
@@ -12649,7 +12717,7 @@ function collectExternalGroupNodes(editor) {
 function notifyDirectorsSyncExternalGroups() {
     const graph = app.graph ?? app.canvas?.graph;
     for (const node of graph?._nodes ?? graph?.nodes ?? []) {
-        if (!isMiniMaxH3DirectorNode(node)) continue;
+        if (!isMiniMaxH3DirectorOptNode(node)) continue;
         node._minimaxEditor?.syncExternalGroupsTimeline?.();
     }
 }
@@ -12733,18 +12801,18 @@ function sanitizeAllWidgetValues() {
 }
 
 /** Old workflows may still list removed output slots (e.g. segment_images). */
-function isMiniMaxH3DirectorNode(node) {
+function isMiniMaxH3DirectorOptNode(node) {
     const cls = node?.comfyClass || node?.type || "";
-    return cls === "MiniMaxH3Director" || cls === "ComfyMiniMaxH3Director";
+    return cls === "MiniMaxH3DirectorOpt" || cls === "ComfyMiniMaxH3DirectorOpt";
 }
 
 function isDirectorNodeDef(nodeType, nodeData) {
     const cls = nodeType?.comfyClass || nodeData?.name || "";
-    return cls === "MiniMaxH3Director" || cls === "ComfyMiniMaxH3Director";
+    return cls === "MiniMaxH3DirectorOpt" || cls === "ComfyMiniMaxH3DirectorOpt";
 }
 
 function stripDeprecatedDirectorOutputs(node) {
-    if (!isMiniMaxH3DirectorNode(node) || !node.outputs?.length) return;
+    if (!isMiniMaxH3DirectorOptNode(node) || !node.outputs?.length) return;
     const stale = new Set(["segment_images"]);
     for (let i = node.outputs.length - 1; i >= 0; i--) {
         if (stale.has(node.outputs[i]?.name)) {
@@ -12755,7 +12823,7 @@ function stripDeprecatedDirectorOutputs(node) {
 
 /** Reorder legacy output links after slot layout changes. */
 function migrateDirectorOutputLinks(node) {
-    if (!isMiniMaxH3DirectorNode(node)) return;
+    if (!isMiniMaxH3DirectorOptNode(node)) return;
     const graph = app.graph ?? app.canvas?.graph;
     const links = graph?.links;
     if (!links?.length) return;
@@ -12793,7 +12861,7 @@ function normalizeDirectorOutputs(node) {
 }
 
 app.registerExtension({
-    name: "ComfyUI.MiniMaxH3DirectorPlugin",
+    name: "ComfyUI.MiniMaxH3DirectorOptPlugin",
     async setup() {
         installDirectorClipboardGuard();
         try {
@@ -12833,11 +12901,11 @@ app.registerExtension({
             app.queuePrompt._minimaxPatched = true;
         }
 
-        api.addEventListener("minimax_director_progress", ({ detail }) => {
+        api.addEventListener("minimax_director_opt_progress", ({ detail }) => {
             findDirectorNode(detail?.node_id)?._minimaxEditor?.setRunProgress?.(detail);
         });
 
-        api.addEventListener("minimax_director_preview", ({ detail }) => {
+        api.addEventListener("minimax_director_opt_preview", ({ detail }) => {
             const editor = findDirectorNode(detail?.node_id)?._minimaxEditor;
             if (!editor) return;
             if (editor.isImageBatch?.()) {
@@ -12905,7 +12973,7 @@ app.registerExtension({
         setTimeout(patchDirectorDomWidgetLayout, 500);
     },
     async loadedGraphNode(node) {
-        if (!isMiniMaxH3DirectorNode(node)) return;
+        if (!isMiniMaxH3DirectorOptNode(node)) return;
         normalizeDirectorOutputs(node);
         pruneDirectorDomWidgets(node);
         if (!node._minimaxDomWidget) return;
@@ -12994,7 +13062,7 @@ app.registerExtension({
             //                          any legacy *_frames_ht.pt seam window (superseded by
             //                          *_frames_ht.mp4; never touches the durable segment files).
             //   · 清空节点所有缓存   → additionally wipes every durable seg_* file in the
-            //                          unified minimax_director_cache dir, forcing a full
+            //                          unified minimax_director_opt_cache dir, forcing a full
             //                          re-render of every segment.
             const runClearCache = (clearAll) => {
                 const nodeId = String(this.id ?? "");
@@ -13023,7 +13091,7 @@ app.registerExtension({
                 }
                 (async () => {
                     try {
-                        const resp = await api.fetchApi("/minimax/director/clear_cache", {
+                        const resp = await api.fetchApi("/minimax/director_opt/clear_cache", {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
                             body: JSON.stringify({ node_id: nodeId, workflow_name: wfName, clear_all: clearAll }),

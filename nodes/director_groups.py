@@ -12,7 +12,7 @@ from ..lib.ref_audios import MAX_REFERENCE_AUDIOS
 from ..lib.ref_images import MAX_REFERENCE_IMAGES
 from ..lib.ref_videos import MAX_REFERENCE_VIDEOS
 
-_CATEGORY = "MiniMaxH3/Director Groups"
+_CATEGORY = "MiniMaxH3 Opt/Director Groups"
 
 
 def _i2v_inputs() -> dict:
@@ -112,7 +112,7 @@ def _pack_r2v_kwargs(
     )
 
 
-class MiniMaxH3DirectorGroupImageToVideo:
+class MiniMaxH3DirectorOptGroupImageToVideo:
     """Pack one Image-to-Video group (t2v / i2v / fl2v) for the Director."""
 
     @classmethod
@@ -187,14 +187,14 @@ def _combine_groups(groups_map) -> list:
 if comfy_io is not None:
     _MMXDirGroup = comfy_io.Custom(MMX_DIR_GROUP)
 
-    class MiniMaxH3DirectorGroupReferenceToVideo(comfy_io.ComfyNode):
+    class MiniMaxH3DirectorOptGroupReferenceToVideo(comfy_io.ComfyNode):
         """Pack one R2V group — Autogrow refs (same UX as official MiniMaxH3ReferenceToVideo)."""
 
         @classmethod
         def define_schema(cls):
             return comfy_io.Schema(
-                node_id="MiniMaxH3DirectorGroupReferenceToVideo",
-                display_name="MiniMax H3 Director Group (Reference to Video)",
+                node_id="MiniMaxH3DirectorOptGroupReferenceToVideo",
+                display_name="MiniMax H3 Director Opt Group (Reference to Video)",
                 category=_CATEGORY,
                 description=(
                     "Pack one MiniMax H3 Reference to Video group for Director.r2v_groups. "
@@ -300,14 +300,14 @@ if comfy_io is not None:
             )
             return comfy_io.NodeOutput(group)
 
-    class MiniMaxH3DirectorGroupsCombine(comfy_io.ComfyNode):
+    class MiniMaxH3DirectorOptGroupsCombine(comfy_io.ComfyNode):
         """Fan-in Director groups via Autogrow slots (same UX as official R2V refs)."""
 
         @classmethod
         def define_schema(cls):
             return comfy_io.Schema(
-                node_id="MiniMaxH3DirectorGroupsCombine",
-                display_name="MiniMax H3 Director Groups Combine",
+                node_id="MiniMaxH3DirectorOptGroupsCombine",
+                display_name="MiniMax H3 Director Opt Groups Combine",
                 category=_CATEGORY,
                 description=(
                     "Combine multiple Director Group outputs into one list for the Director. "
@@ -344,7 +344,7 @@ if comfy_io is not None:
 
 else:
     # Fallback for tooling / very old hosts without comfy_api Autogrow.
-    class MiniMaxH3DirectorGroupReferenceToVideo:
+    class MiniMaxH3DirectorOptGroupReferenceToVideo:
         """Pack one R2V group (static slots when Autogrow API is unavailable)."""
 
         @classmethod
@@ -403,7 +403,7 @@ else:
         def pack(self, prompt="", duration_sec=DEFAULT_FL2V_DURATION_SEC, **kwargs):
             return (_pack_r2v_kwargs(prompt=prompt, duration_sec=duration_sec, **kwargs),)
 
-    class MiniMaxH3DirectorGroupsCombine:
+    class MiniMaxH3DirectorOptGroupsCombine:
         """Fan-in groups (static slots when Autogrow API is unavailable)."""
 
         _MAX_SLOTS = 16

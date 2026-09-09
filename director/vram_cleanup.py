@@ -1,4 +1,4 @@
-"""Release GPU memory between MiniMax H3 Director segment runs."""
+"""Release GPU memory between MiniMax H3 Director Opt segment runs."""
 
 from __future__ import annotations
 
@@ -25,6 +25,6 @@ def cleanup_segment_vram(*, enabled: bool = True, unload_models: bool = True) ->
         log.warning("Segment VRAM cleanup failed: %s", exc)
         return
     if unload_models:
-        log.debug("MiniMax H3 Director: segment VRAM cleanup (models unloaded, cache cleared)")
+        log.debug("MiniMax H3 Director Opt: segment VRAM cleanup (models unloaded, cache cleared)")
     else:
-        log.debug("MiniMax H3 Director: segment VRAM cleanup (cache cleared, models kept loaded)")
+        log.debug("MiniMax H3 Director Opt: segment VRAM cleanup (cache cleared, models kept loaded)")

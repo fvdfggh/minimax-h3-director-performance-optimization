@@ -1,4 +1,4 @@
-"""HTTP routes for MiniMax H3 Director LLM prompt enhancement."""
+"""HTTP routes for MiniMax H3 Director Opt LLM prompt enhancement."""
 
 from __future__ import annotations
 
@@ -237,11 +237,11 @@ async def director_unload_ollama(request):
 
 
 def register_prompt_enhance_routes(routes, register_route) -> None:
-    register_route(routes, "POST", "/minimax/director/enhance_models", director_enhance_models)
-    register_route(routes, "POST", "/minimax/director/get_template", director_get_template)
-    register_route(routes, "POST", "/minimax/director/enhance", director_enhance_prompt)
-    register_route(routes, "POST", "/minimax/director/extract_frames", director_extract_frames)
-    register_route(routes, "POST", "/minimax/director/image_b64", director_image_b64)
-    register_route(routes, "POST", "/minimax/director/unload_model", director_unload_model)
-    register_route(routes, "POST", "/minimax/director/unload_ollama", director_unload_ollama)
-    log.info("MiniMax H3 Director prompt-enhance HTTP routes registered")
+    register_route(routes, "POST", "/minimax/director_opt/enhance_models", director_enhance_models)
+    register_route(routes, "POST", "/minimax/director_opt/get_template", director_get_template)
+    register_route(routes, "POST", "/minimax/director_opt/enhance", director_enhance_prompt)
+    register_route(routes, "POST", "/minimax/director_opt/extract_frames", director_extract_frames)
+    register_route(routes, "POST", "/minimax/director_opt/image_b64", director_image_b64)
+    register_route(routes, "POST", "/minimax/director_opt/unload_model", director_unload_model)
+    register_route(routes, "POST", "/minimax/director_opt/unload_ollama", director_unload_ollama)
+    log.info("MiniMax H3 Director Opt prompt-enhance HTTP routes registered")

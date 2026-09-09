@@ -1,4 +1,4 @@
-"""Second-sample (二采) executor for MiniMax H3 Director.
+"""Second-sample (二采) executor for MiniMax H3 Director Opt.
 
 Pipeline, per selected segment:
 
@@ -81,7 +81,7 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.second_sampling")
 #: (seg_index, done, total) progress callback.
 ProgressCb = Callable[[int, int, int], None]
 
-# 二采默认噪声调度：取自已删除的 MiniMaxH3DirectorRefine 模块
+# 二采默认噪声调度：取自已删除的 MiniMaxH3DirectorOptRefine 模块
 # （原 director/refine_pack.py: HAILUO_REFINE_SIGMAS + DEFAULT_REFINE_SIGMA_SAMPLER）。
 # 海螺参考生视频二采：ManualSigmas 4 个数 = euler 3 步。
 DEFAULT_SECOND_SIGMAS = (0.85, 0.7250, 0.4219, 0.0)
@@ -359,7 +359,7 @@ def run_second_sampling(
 
     if second_sigmas is None:
         # 二采硬性要求 sigmas：未接线时回退到默认海螺二采调度
-        # （原 MiniMaxH3DirectorRefine / refine_pack.py 的 HAILUO_REFINE_SIGMAS）。
+        # （原 MiniMaxH3DirectorOptRefine / refine_pack.py 的 HAILUO_REFINE_SIGMAS）。
         second_sigmas = DEFAULT_SECOND_SIGMAS
         log.info(
             "二采: 未提供 SIGMAS，使用默认海螺二采调度 %s（%s %d 步）。",

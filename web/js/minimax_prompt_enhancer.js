@@ -1,4 +1,4 @@
-/** LLM prompt enhancer panel for MiniMax H3 Director (Ollama / Zhipu). */
+/** LLM prompt enhancer panel for MiniMax H3 Director Opt (Ollama / Zhipu). */
 
 import { api } from "../../scripts/api.js";
 import { resolveTaskKey, taskUsesReferenceImages, taskUsesReferenceVideo } from "./minimax_gen_timeline.js";
@@ -111,7 +111,7 @@ function swallowKeys(input) {
 }
 
 async function fetchImageB64(imageFile) {
-    const resp = await api.fetchApi("/minimax/director/image_b64", {
+    const resp = await api.fetchApi("/minimax/director_opt/image_b64", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageFile }),
@@ -513,7 +513,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             pe.apiSelect.value = inferApiFormat(llmUrl, pe.apiSelect.value);
             pe.updateApiFormatUI();
             if (!silent) pe.setStatus("正在获取模型列表…", "loading");
-            const resp = await api.fetchApi("/minimax/director/enhance_models", {
+            const resp = await api.fetchApi("/minimax/director_opt/enhance_models", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -545,7 +545,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         const task = resolveTaskKey(editor.getTaskKey?.() || "rv2v");
         const outputLanguage = resolveOutputLanguage(pe);
         try {
-            const resp = await api.fetchApi("/minimax/director/get_template", {
+            const resp = await api.fetchApi("/minimax/director_opt/get_template", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ task_type: task, output_language: outputLanguage }),
@@ -638,7 +638,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         const isOllama = pe.apiSelect?.value === API_OLLAMA;
         const sourceFrameCount = isOllama ? 2 : 3;
         if (videoFile && editor.getDirectorMode?.() === "video") {
-            const resp = await api.fetchApi("/minimax/director/extract_frames", {
+            const resp = await api.fetchApi("/minimax/director_opt/extract_frames", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -673,7 +673,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             const rv = refsBlock?.referenceVideo || global.referenceVideo || {};
             const refVid = rv.videoFile || rv.fileName;
             if (refVid) {
-                const resp = await api.fetchApi("/minimax/director/extract_frames", {
+                const resp = await api.fetchApi("/minimax/director_opt/extract_frames", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -701,7 +701,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         } catch (e) {
             console.warn("[MiniMax H3 PE] vision collect failed:", e);
         }
-        const resp = await api.fetchApi("/minimax/director/enhance", {
+        const resp = await api.fetchApi("/minimax/director_opt/enhance", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -852,7 +852,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         }
         pe.setStatus("正在卸载模型…", "loading");
         try {
-            const resp = await api.fetchApi("/minimax/director/unload_model", {
+            const resp = await api.fetchApi("/minimax/director_opt/unload_model", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -900,7 +900,7 @@ export function getPromptEnhancerPanelHeight(editor) {
 }
 
 export function registerDirectorPromptEnhancerEvents(findDirectorNode) {
-    api.addEventListener("minimax_director_enhanced", ({ detail }) => {
+    api.addEventListener("minimax_director_opt_enhanced", ({ detail }) => {
         findDirectorNode(detail?.node)?._minimaxEditor?._promptEnhancer?.handleServerEnhanced?.(detail);
     });
 }

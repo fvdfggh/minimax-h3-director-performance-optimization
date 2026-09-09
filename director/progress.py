@@ -1,4 +1,4 @@
-"""WebSocket progress updates for MiniMax H3 Director multi-segment runs."""
+"""WebSocket progress updates for MiniMax H3 Director Opt multi-segment runs."""
 
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def report_director_progress(
 
         srv = PromptServer.instance
         if srv:
-            srv.send_sync("minimax_director_progress", payload, srv.client_id)
+            srv.send_sync("minimax_director_opt_progress", payload, srv.client_id)
             srv.send_progress_text("", str(node_id))
     except Exception as exc:
         log.debug("Director progress send skipped: %s", exc)
@@ -141,7 +141,7 @@ def report_director_segment_preview(
 
         srv = PromptServer.instance
         if srv:
-            srv.send_sync("minimax_director_preview", payload, srv.client_id)
+            srv.send_sync("minimax_director_opt_preview", payload, srv.client_id)
     except Exception as exc:
         log.debug("Director preview send skipped: %s", exc)
 

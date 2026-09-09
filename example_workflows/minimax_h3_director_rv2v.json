@@ -221,7 +221,7 @@
     },
     {
       "id": 5,
-      "type": "MiniMaxH3Director",
+      "type": "MiniMaxH3DirectorOpt",
       "pos": [
         -280,
         80
@@ -462,7 +462,7 @@
         }
       ],
       "properties": {
-        "Node name for S&R": "MiniMaxH3Director"
+        "Node name for S&R": "MiniMaxH3DirectorOpt"
       },
       "widgets_values": [
         "rv2v — 参考素材改视频(Reference Video Edit)",

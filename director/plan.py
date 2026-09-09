@@ -1,4 +1,4 @@
-"""Parse MiniMax H3 Director timeline JSON and prepare per-segment edit plans."""
+"""Parse MiniMax H3 Director Opt timeline JSON and prepare per-segment edit plans."""
 
 from __future__ import annotations
 
@@ -359,7 +359,7 @@ def load_source_video_from_timeline(timeline: dict) -> torch.Tensor:
     if total <= 0:
         video = timeline.get("video") or {}
         if not (video.get("frames") or []):
-            raise ValueError("No frames in MiniMax H3 Director timeline.")
+            raise ValueError("No frames in MiniMax H3 Director Opt timeline.")
     return load_timeline_segment(timeline, 0, max(1, total))
 
 
@@ -711,7 +711,7 @@ def _parse_run_selection(timeline: dict, segment_count: int) -> frozenset[int] |
     indices = {int(i) for i in raw if 0 <= int(i) < segment_count}
     if not indices:
         raise ValueError(
-            "MiniMax H3 Director: 「选择运行」已开启但未勾选任何片段/提示词组。请至少勾选一组再执行。"
+            "MiniMax H3 Director Opt: 「选择运行」已开启但未勾选任何片段/提示词组。请至少勾选一组再执行。"
         )
     if len(indices) >= segment_count:
         return None
@@ -829,7 +829,7 @@ def build_director_plan(
     clips = video_clips_from_timeline(load_timeline)
     if not clips and not (load_timeline.get("video") or {}).get("frames"):
         raise ValueError(
-            "No source video in MiniMax H3 Director. Upload a video inside the node timeline UI before running."
+            "No source video in MiniMax H3 Director Opt. Upload a video inside the node timeline UI before running."
         )
 
     try:
@@ -1057,7 +1057,7 @@ def plan_summary(plan: DirectorPlan) -> str:
         else:
             mode_label = "空白画布" if mode == "gen_blank" else "图片生成"
         lines = [
-            f"MiniMax H3 Director [{mode_label}] ({plan.edit_mode}): "
+            f"MiniMax H3 Director Opt [{mode_label}] ({plan.edit_mode}): "
             f"{plan.segment_count} segment(s), {plan.total_frames} frames @ {plan.frame_rate:.2f} fps",
             f"Output: {plan.width}×{plan.height} ({plan.output_mode})",
             f"Global task: {get_task_prompt_spec(plan.global_task_type).label}",
@@ -1104,7 +1104,7 @@ def plan_summary(plan: DirectorPlan) -> str:
         else "源视频时间轴"
     )
     lines = [
-        f"MiniMax H3 Director [{mode_label}] ({plan.edit_mode}): {plan.segment_count} segment(s), "
+        f"MiniMax H3 Director Opt [{mode_label}] ({plan.edit_mode}): {plan.segment_count} segment(s), "
         f"{plan.total_frames} frames @ {plan.frame_rate:.2f} fps",
     ]
     if plan.export_max_frames > 0 and plan.source_total_frames > plan.total_frames:

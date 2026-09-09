@@ -1,9 +1,9 @@
-"""Single source of truth for MiniMax H3 Director on-disk cache layout.
+"""Single source of truth for MiniMax H3 Director Opt on-disk cache layout.
 
 All Director caches live under one root so a workflow's state can be inspected,
 backed up or deleted as a single folder::
 
-    output/minimax_director_cache/<workflow slug>/node_<id>/
+    output/minimax_director_opt_cache/<workflow slug>/node_<id>/
 
 Every artefact type shares that one directory and is told apart by file-name
 prefix, so the six kinds stay recognisable in Explorer without nesting:
@@ -55,7 +55,7 @@ from typing import Any
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache_layout")
 
 #: Unified cache root under ComfyUI's output directory.
-CACHE_ROOT = "minimax_director_cache"
+CACHE_ROOT = "minimax_director_opt_cache"
 
 #: Legacy roots, kept only so diagnostics and one-off cleanups can find them.
 LEGACY_ROOTS = (

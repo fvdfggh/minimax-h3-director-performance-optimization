@@ -30,7 +30,7 @@ def _require_av():
         return av
     except ImportError as exc:  # pragma: no cover - packaging guard
         raise ImportError(
-            "PyAV is required for MiniMax H3 Director video loading. "
+            "PyAV is required for MiniMax H3 Director Opt video loading. "
             "Install: pip install av"
         ) from exc
 
@@ -69,7 +69,7 @@ def resolve_video_path(video: dict) -> str:
     it pinned *all* candidates under ComfyUI's input directory, so any clip
     living elsewhere was reported missing even though the caller had told us
     exactly where it was. That kept Director's own renders unreachable: they are
-    written under ``output/minimax_director_cache/…``.
+    written under ``output/minimax_director_opt_cache/…``.
 
     Resolution order, mirroring how ComfyUI's own ``/api/view`` reads files:
 
@@ -82,7 +82,7 @@ def resolve_video_path(video: dict) -> str:
     """
     video_file = (video.get("videoFile") or video.get("fileName") or "").strip()
     if not video_file:
-        raise ValueError("No video file in MiniMax H3 Director timeline.")
+        raise ValueError("No video file in MiniMax H3 Director Opt timeline.")
 
     subfolder = (video.get("subfolder") or "").strip().replace("\\", "/")
     # Basename only, with any traversal attempt stripped before it reaches join.
@@ -779,7 +779,7 @@ def _decode_timeline_entries(
 ) -> torch.Tensor:
     clips = video_clips_from_timeline(timeline)
     if not clips:
-        raise ValueError("No video clips in MiniMax H3 Director timeline.")
+        raise ValueError("No video clips in MiniMax H3 Director Opt timeline.")
 
     by_clip: dict[int, set[int]] = defaultdict(set)
     for clip_idx, frame_idx in entries:

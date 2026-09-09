@@ -188,7 +188,7 @@ def h3_fast_decode_model(model, z, tile_batch_size):
     # mapping, so the downstream VAEDecode / director consumers expect [0, 1].
     # We must NOT apply the standard ComfyUI ``*2 - 1`` transform here; doing so
     # produced output that looked like a color-inverted / negative image when
-    # this fast wrapper was plugged into MiniMaxH3Director.
+    # this fast wrapper was plugged into MiniMaxH3DirectorOpt.
     dec = dec.float()
     dec.mul_(model.pixel_std.to(dec)).add_(model.pixel_mean.to(dec)).clamp_(0.0, 1.0)
     return dec
@@ -289,7 +289,7 @@ class _FastMiniMaxH3VideoVAE(comfy.sd.VAE):
         return getattr(self._inner_vae, name)
 
 
-class MiniMaxH3FastVideoVAE:
+class MiniMaxH3FastVideoVAEOpt:
     """Fast Video VAE loader/wrapper.
 
     Wraps a MiniMax H3 video VAE so that decoding uses the same batched-tile
@@ -322,7 +322,7 @@ class MiniMaxH3FastVideoVAE:
     OUTPUT_TOOLTIPS = ("The wrapped MiniMax H3 video VAE that decodes via the fast tiled path.",)
     FUNCTION = "wrap"
 
-    CATEGORY = "MiniMaxH3"
+    CATEGORY = "MiniMaxH3 Opt"
     DESCRIPTION = (
         "Wraps a MiniMax H3 video VAE so its decode uses the same batched-tile decoder "
         "as the official MiniMax H3 Fast VAE Decode node. "

@@ -51,7 +51,7 @@ def new_segment_mp4_run_dir(plan: DirectorPlan, *, for_selection: bool = False) 
                     root = candidate
                     break
         root.mkdir(parents=True, exist_ok=False)
-        log.info("MiniMax H3 Director segment mp4 run dir: %s", root)
+        log.info("MiniMax H3 Director Opt segment mp4 run dir: %s", root)
         return root
     except OSError as exc:
         log.warning("Segment mp4 export dir unavailable (%s); skipped.", exc)
@@ -110,7 +110,7 @@ def maybe_export_segment_mp4(
             audio=audio,
         )
         log.info(
-            "MiniMax H3 Director segment #%d %smp4 saved: %s",
+            "MiniMax H3 Director Opt segment #%d %smp4 saved: %s",
             int(seg.index) + 1,
             "first-pass " if suffix == "pre" else "",
             path,
@@ -175,7 +175,7 @@ def export_run_mp4(
             audio=audio_dict,
         )
         log.info(
-            "MiniMax H3 Director run mp4 saved (#%d–#%d, %d frames): %s",
+            "MiniMax H3 Director Opt run mp4 saved (#%d–#%d, %d frames): %s",
             first_index + 1, last_index + 1, int(frames.shape[0]), path,
         )
         return str(path)

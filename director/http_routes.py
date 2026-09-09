@@ -1,4 +1,4 @@
-"""HTTP routes for MiniMax H3 Director (chunked video upload)."""
+"""HTTP routes for MiniMax H3 Director Opt (chunked video upload)."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def _list_director_clips(exclude_rel: set[str] | None = None) -> list[dict]:
         out_root = Path(output_root())
         cache_root = out_root / CACHE_ROOT
     except Exception as exc:  # pragma: no cover - import guard
-        log.warning("MiniMax H3 Director cache root unavailable: %s", exc)
+        log.warning("MiniMax H3 Director Opt cache root unavailable: %s", exc)
         return []
     if not cache_root.is_dir():
         return []
@@ -293,7 +293,7 @@ async def minimax_upload_video_chunk(request):
                 shutil.copyfileobj(src, out)
 
     shutil.rmtree(session_dir, ignore_errors=True)
-    log.info("MiniMax H3 Director uploaded video to input/: %s", filename)
+    log.info("MiniMax H3 Director Opt uploaded video to input/: %s", filename)
     return web.json_response({"name": filename, "subfolder": "", "type": "input"})
 
 
@@ -422,7 +422,7 @@ async def minimax_extract_reference_audio(request):
         )
         return web.json_response(result)
     except Exception as exc:
-        log.warning("MiniMax H3 Director reference audio extraction failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt reference audio extraction failed: %s", exc)
         return web.Response(status=400, text=str(exc))
 
 
@@ -480,7 +480,7 @@ async def minimax_prepare_reference_audio_chunk(request):
             result = await asyncio.to_thread(_prepare_reference_audio, source_path, filename)
         return web.json_response(result)
     except Exception as exc:
-        log.warning("MiniMax H3 Director local reference audio preparation failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt local reference audio preparation failed: %s", exc)
         return web.Response(status=400, text=str(exc))
     finally:
         if session_dir:
@@ -511,7 +511,7 @@ async def minimax_probe_video(request):
     try:
         info = probe_video_clip(clip)
     except Exception as exc:
-        log.warning("MiniMax H3 Director video probe failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt video probe failed: %s", exc)
         return web.Response(status=400, text=str(exc))
     return web.json_response(info)
 
@@ -531,7 +531,7 @@ async def minimax_list_input_media(request):
     except ValueError as exc:
         return web.Response(status=400, text=str(exc))
     except Exception as exc:
-        log.warning("MiniMax H3 Director list input media failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt list input media failed: %s", exc)
         return web.Response(status=500, text=str(exc))
     return web.json_response({"items": items})
 
@@ -624,7 +624,7 @@ async def minimax_detect_shots(request):
     except ImportError as exc:
         return web.Response(status=400, text=str(exc))
     except Exception as exc:
-        log.warning("MiniMax H3 Director shot detect failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt shot detect failed: %s", exc)
         return web.Response(status=400, text=str(exc))
 
     return web.json_response(result)
@@ -635,7 +635,7 @@ async def minimax_clear_cache(request):
 
     The Director now stores every cache kind (text/image/video conditioning,
     batch scratch intermediates, and durable segment frames / latents / audio /
-    clips) in ONE flat directory: ``minimax_director_cache/<workflow_slug>/node_<id>/``.
+    clips) in ONE flat directory: ``minimax_director_opt_cache/<workflow_slug>/node_<id>/``.
 
     Default clears only the transient data in that dir: text/image/video
     conditioning files and the per-run batch scratch intermediates
@@ -676,7 +676,7 @@ async def minimax_clear_cache(request):
             workflow_name=workflow_name,
         )
     except Exception as exc:
-        log.warning("MiniMax H3 Director clear conditioning cache failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt clear conditioning cache failed: %s", exc)
 
     # 2) per-run batch scratch intermediates (always cleared via _scratch_ marker)
     if cache_dir.is_dir():
@@ -685,7 +685,7 @@ async def minimax_clear_cache(request):
                 path.unlink()
                 cleared["batch"] += 1
             except OSError as exc:
-                log.warning("MiniMax H3 Director clear scratch %s failed: %s", path, exc)
+                log.warning("MiniMax H3 Director Opt clear scratch %s failed: %s", path, exc)
 
     # 3) Legacy head/tail tensors (``*_frames_ht.pt``), on *every* clear.
     #    The seam window is a clip now; these are the pre-mp4 copies, tens of MB
@@ -700,7 +700,7 @@ async def minimax_clear_cache(request):
                 cleared["headtail"] += 1
             except OSError as exc:
                 log.warning(
-                    "MiniMax H3 Director clear legacy head/tail %s failed: %s", path, exc
+                    "MiniMax H3 Director Opt clear legacy head/tail %s failed: %s", path, exc
                 )
 
     # 4) clear_all → also wipe durable segment files (both passes) so the next
@@ -714,14 +714,14 @@ async def minimax_clear_cache(request):
                     path.unlink()
                     cleared["segments"] += 1
                 except OSError as exc:
-                    log.warning("MiniMax H3 Director clear segment %s failed: %s", path, exc)
+                    log.warning("MiniMax H3 Director Opt clear segment %s failed: %s", path, exc)
         # The slot maps name those files; drop them too so the next run rebuilds
         # the position → files mapping from scratch.
         segment_slots.clear_slots(cache_dir)
         segment_slots.clear_slots(cache_dir, variant=segment_slots.VARIANT_SECOND)
 
     log.info(
-        "MiniMax H3 Director cleared caches for node %s (workflow '%s', clear_all=%s): %s",
+        "MiniMax H3 Director Opt cleared caches for node %s (workflow '%s', clear_all=%s): %s",
         node_id, workflow_name or "", clear_all, cleared,
     )
     return web.json_response({"cleared": cleared})
@@ -770,7 +770,7 @@ async def minimax_segment_export_status(request):
             inspect_segment_export_status(node_id, plan, workflow_name=workflow_name, variant=variant)
         )
     except Exception as exc:
-        log.warning("MiniMax H3 Director segment-export status failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt segment-export status failed: %s", exc)
         return web.json_response({"segments": [], "error": str(exc)}, status=400)
 
 
@@ -821,7 +821,7 @@ async def minimax_second_sample_status(request):
             inspect_second_sample_status(node_id, plan, workflow_name=workflow_name)
         )
     except Exception as exc:
-        log.warning("MiniMax H3 Director second-sample status failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt second-sample status failed: %s", exc)
         return web.json_response({"segments": [], "error": str(exc)}, status=400)
 
 
@@ -897,7 +897,7 @@ async def minimax_align_to_next_status(request):
             )
         return web.json_response({"node_id": node_id, "segments": rows})
     except Exception as exc:
-        log.warning("MiniMax H3 Director align-to-next status failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt align-to-next status failed: %s", exc)
         return web.json_response({"segments": [], "error": str(exc)}, status=400)
 
 
@@ -931,7 +931,7 @@ async def minimax_remove_segment_slot(request):
         )
         return web.json_response({"removed": bool(removed)})
     except Exception as exc:
-        log.warning("MiniMax H3 Director segment cache drop failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt segment cache drop failed: %s", exc)
         return web.json_response({"removed": False, "error": str(exc)}, status=400)
 
 
@@ -1003,7 +1003,7 @@ async def minimax_segment_export(request):
         )
         return web.json_response(result)
     except Exception as exc:
-        log.warning("MiniMax H3 Director segment-export failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt segment-export failed: %s", exc)
         return web.json_response({"error": str(exc)}, status=500)
 
 
@@ -1031,7 +1031,7 @@ async def minimax_segment_clip(request):
         from .segment_cache import clip_cache_path
         from .segment_slots import VARIANT_FIRST, VARIANT_SECOND
     except Exception as exc:  # pragma: no cover - import guard
-        log.warning("MiniMax H3 Director segment-clip import failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt segment-clip import failed: %s", exc)
         return web.Response(status=500, text="Segment cache unavailable.")
 
     variant_key = VARIANT_SECOND if variant in ("2nd", "second", "2") else VARIANT_FIRST
@@ -1041,7 +1041,7 @@ async def minimax_segment_clip(request):
             allow_prev=True, variant=variant_key,
         )
     except Exception as exc:
-        log.warning("MiniMax H3 Director segment-clip failed: %s", exc)
+        log.warning("MiniMax H3 Director Opt segment-clip failed: %s", exc)
         return web.Response(status=404, text="Segment clip not cached.")
     if path is None:
         return web.Response(status=404, text="Segment clip not cached.")
@@ -1070,69 +1070,74 @@ def _register_route(routes, method: str, path: str, handler) -> None:
 
 
 def register_routes() -> bool:
-    """Register MiniMax H3 Director HTTP routes on the ComfyUI PromptServer."""
+    """Register MiniMax H3 Director Opt HTTP routes on the ComfyUI PromptServer."""
     global _ROUTES_REGISTERED
     if _ROUTES_REGISTERED:
         return True
 
     server = PromptServer.instance
     if server is None:
-        log.warning("MiniMax H3 Director: PromptServer not ready, HTTP routes not registered")
+        log.warning("MiniMax H3 Director Opt: PromptServer not ready, HTTP routes not registered")
         return False
 
     routes = server.routes
-    _register_route(routes, "POST", "/minimax/director/upload_chunk", minimax_upload_video_chunk)
+    _register_route(routes, "POST", "/minimax/director_opt/upload_chunk", minimax_upload_video_chunk)
     _register_route(
         routes,
         "POST",
-        "/minimax/director/extract_reference_audio",
+        "/minimax/director_opt/extract_reference_audio",
         minimax_extract_reference_audio,
     )
     _register_route(
         routes,
         "POST",
-        "/minimax/director/prepare_reference_audio_chunk",
+        "/minimax/director_opt/prepare_reference_audio_chunk",
         minimax_prepare_reference_audio_chunk,
     )
-    _register_route(routes, "POST", "/minimax/director/probe_video", minimax_probe_video)
-    _register_route(routes, "GET", "/minimax/director/probe_video", minimax_probe_video)
-    _register_route(routes, "GET", "/minimax/director/list_input_media", minimax_list_input_media)
-    _register_route(routes, "POST", "/minimax/director/clear_cache", minimax_clear_cache)
-    _register_route(routes, "POST", "/minimax/director/detect_shots", minimax_detect_shots)
+    _register_route(routes, "POST", "/minimax/director_opt/probe_video", minimax_probe_video)
+    _register_route(routes, "GET", "/minimax/director_opt/probe_video", minimax_probe_video)
+    _register_route(routes, "GET", "/minimax/director_opt/list_input_media", minimax_list_input_media)
+    _register_route(routes, "POST", "/minimax/director_opt/clear_cache", minimax_clear_cache)
+    _register_route(routes, "POST", "/minimax/director_opt/detect_shots", minimax_detect_shots)
     _register_route(
         routes,
         "POST",
-        "/minimax/director/segment_export_status",
+        "/minimax/director_opt/segment_export_status",
         minimax_segment_export_status,
     )
     _register_route(
         routes,
         "POST",
-        "/minimax/director/second_sample_status",
+        "/minimax/director_opt/second_sample_status",
         minimax_second_sample_status,
     )
     _register_route(
         routes,
         "POST",
-        "/minimax/director/align_to_next_status",
+        "/minimax/director_opt/align_to_next_status",
         minimax_align_to_next_status,
     )
     # HEAD 无需注册：RouteTableDef.get() 走 UrlDispatcher.add_get()，默认
     # allow_head=True 会自动挂上 HEAD；再显式注册一次会直接 RuntimeError
     # （"Added route will never be executed, method HEAD is already registered"）。
-    _register_route(routes, "GET", "/minimax/director/segment_clip", minimax_segment_clip)
+    _register_route(routes, "GET", "/minimax/director_opt/segment_clip", minimax_segment_clip)
     _register_route(
         routes,
         "POST",
-        "/minimax/director/segment_export",
+        "/minimax/director_opt/segment_export",
         minimax_segment_export,
     )
     _register_route(
         routes,
         "POST",
-        "/minimax/director/remove_segment_slot",
+        "/minimax/director_opt/remove_segment_slot",
         minimax_remove_segment_slot,
     )
+    from .pack import minimax_download_pack, minimax_export_pack, minimax_import_pack
+
+    _register_route(routes, "POST", "/minimax/director_opt/export_pack", minimax_export_pack)
+    _register_route(routes, "GET", "/minimax/director_opt/download_pack", minimax_download_pack)
+    _register_route(routes, "POST", "/minimax/director_opt/import_pack", minimax_import_pack)
     _ROUTES_REGISTERED = True
-    log.info("MiniMax H3 Director HTTP routes registered")
+    log.info("MiniMax H3 Director Opt HTTP routes registered")
     return True

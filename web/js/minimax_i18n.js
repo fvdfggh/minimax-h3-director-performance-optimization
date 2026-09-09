@@ -1,4 +1,4 @@
-/** MiniMax H3 Director UI i18n (zh / en) with localStorage persistence. */
+/** MiniMax H3 Director Opt UI i18n (zh / en) with localStorage persistence. */
 
 export const LOCALE_STORAGE_KEY = "mmx_director_ui_locale";
 
@@ -490,6 +490,18 @@ const ZH = {
     "player.frameOf": "帧 {cur}/{total}{clip}",
     "executing.parseTimeline": "解析时间轴 / 加载视频",
     "executing.error": "执行出错",
+
+    "toolbar.exportPack": "导出导演包",
+    "toolbar.importPack": "导入导演包",
+    "tooltip.exportPack": "导出当前时间轴与参考素材为 zip（英文目录名，可换机器再导入）",
+    "tooltip.importPack": "导入导演包，覆盖当前时间轴与素材槽（也支持原版 Director 导出的包）",
+    "pack.largeConfirm": "导演包约 {mb} MB（含参考视频时可能很大）。",
+    "pack.exportFailed": "导出导演包失败",
+    "pack.importFailed": "导入导演包失败",
+    "pack.exportDoneMissing": "已导出，但以下素材文件未找到，包内对应槽位为空：",
+    "pack.importDoneMissing": "已导入，但以下素材缺失：",
+    "pack.alertFailed": "导演包操作失败：{err}",
+    "pack.failedTitle": "导演包操作失败",
 };
 
 const EN = {
@@ -980,6 +992,18 @@ const EN = {
     "player.frameOf": "Frame {cur}/{total}{clip}",
     "executing.parseTimeline": "Parse timeline / load video",
     "executing.error": "Execution error",
+
+    "toolbar.exportPack": "Export pack",
+    "toolbar.importPack": "Import pack",
+    "tooltip.exportPack": "Export the current timeline and reference media as a zip (ASCII folders; portable)",
+    "tooltip.importPack": "Import a director pack, replacing the current timeline and media slots (upstream packs too)",
+    "pack.largeConfirm": "This pack is about {mb} MB (reference videos can be large).",
+    "pack.exportFailed": "Failed to export director pack",
+    "pack.importFailed": "Failed to import director pack",
+    "pack.exportDoneMissing": "Exported, but these media files were missing so their slots are empty:",
+    "pack.importDoneMissing": "Imported, but these media files were missing:",
+    "pack.alertFailed": "Director pack failed: {err}",
+    "pack.failedTitle": "Director pack failed",
 };
 
 const DICTS = { zh: ZH, en: EN };

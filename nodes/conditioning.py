@@ -46,7 +46,7 @@ def _load_minimax_nodes():
         )
     except ImportError as exc:
         raise RuntimeError(
-            "MiniMaxH3Director requires ComfyUI official MiniMax H3 nodes "
+            "MiniMaxH3DirectorOpt requires ComfyUI official MiniMax H3 nodes "
             "(comfy_extras.nodes_minimax_h3). Upgrade to ComfyUI with PR #15224 merged."
         ) from exc
     return MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo
@@ -173,7 +173,7 @@ def run_minimax_conditioning(
     return positive, [], latent, hint
 
 
-class MiniMaxH3DirectorConditioning:
+class MiniMaxH3DirectorOptConditioning:
     """Thin wrapper around official MiniMax H3 conditioning (positive + latent)."""
 
     @classmethod
@@ -196,7 +196,7 @@ class MiniMaxH3DirectorConditioning:
     RETURN_TYPES = ("CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "latent")
     FUNCTION = "apply"
-    CATEGORY = "MiniMaxH3"
+    CATEGORY = "MiniMaxH3 Opt"
 
     def apply(self, clip, vae, prompt, width, height, length, audio_vae=None, **kwargs):
         positive, _, latent, _ = run_minimax_conditioning(
@@ -215,18 +215,18 @@ class MiniMaxH3DirectorConditioning:
         return positive, latent
 
 
-class MiniMaxH3DirectorPlannerConditioning:
+class MiniMaxH3DirectorOptPlannerConditioning:
     """Official MiniMax H3 conditioning plus task_mode string for planning UIs."""
 
     @classmethod
     def INPUT_TYPES(cls):
-        base = MiniMaxH3DirectorConditioning.INPUT_TYPES()
+        base = MiniMaxH3DirectorOptConditioning.INPUT_TYPES()
         return base
 
     RETURN_TYPES = ("CONDITIONING", "LATENT", "STRING")
     RETURN_NAMES = ("positive", "latent", "task_mode")
     FUNCTION = "apply"
-    CATEGORY = "MiniMaxH3"
+    CATEGORY = "MiniMaxH3 Opt"
 
     def apply(self, clip, vae, prompt, width, height, length, audio_vae=None, **kwargs):
         positive, _, latent, hint = run_minimax_conditioning(

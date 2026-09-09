@@ -1,4 +1,4 @@
-"""Disk cache for MiniMax H3 Director segment decode outputs (partial re-run + merge).
+"""Disk cache for MiniMax H3 Director Opt segment decode outputs (partial re-run + merge).
 
 Cache is best-effort: write failures (cloud RO mounts, same-name overwrite
 blocks, full disks) must never abort the main generation run.
@@ -1161,7 +1161,7 @@ def clip_cache_path(
     allow_prev: bool = False,
     variant: str = segment_slots.VARIANT_FIRST,
 ) -> Path | None:
-    """``.../minimax_director_cache/<slug>/node_<id>/seg_<hash>_clip.mp4``.
+    """``.../minimax_director_opt_cache/<slug>/node_<id>/seg_<hash>_clip.mp4``.
 
     Resolved through the slot map, so it follows the segment living at
     ``seg_index`` rather than the index itself. Does not create dirs — callers

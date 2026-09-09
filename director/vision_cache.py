@@ -32,7 +32,7 @@ every re-loaded duplicate and can collide after GC reuse.
 
 Layout
 ------
-``output/minimax_director_cache/_vit/vit_<hash>.pt`` — global rather than
+``output/minimax_director_opt_cache/_vit/vit_<hash>.pt`` — global rather than
 per-workflow, because the output depends on the media and model only, so the
 same file is reusable across segments *and* workflows.
 """

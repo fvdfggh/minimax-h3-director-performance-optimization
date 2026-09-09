@@ -725,7 +725,7 @@ async function uploadChunked(file) {
         body.append("total_chunks", String(totalChunks));
         body.append("filename", filename);
         body.append("chunk", file.slice(start, end), `${filename}.part`);
-        const resp = await api.fetchApi("/minimax/director/upload_chunk", { method: "POST", body });
+        const resp = await api.fetchApi("/minimax/director_opt/upload_chunk", { method: "POST", body });
         if (!resp.ok) throw new Error(await resp.text() || t("upload.chunkFailed", { status: resp.status }));
         const data = await resp.json();
         if (data.name) return data;
@@ -2924,7 +2924,7 @@ export function segmentClipUrl(editor, index, variant) {
         `variant=${variant === "2nd" ? "2nd" : "1st"}`,
     ];
     if (wf) q.push(`workflow_name=${encodeURIComponent(wf)}`);
-    return `/minimax/director/segment_clip?${q.join("&")}`;
+    return `/minimax/director_opt/segment_clip?${q.join("&")}`;
 }
 
 /** HEAD 一下只读路由，判断该片段是否已有对应 pass 的视频缓存。 */

@@ -1,4 +1,4 @@
-"""MiniMax H3 Director 鈥?generation timeline (t2i / t2v / i2i / i2v) plan building."""
+"""MiniMax H3 Director Opt 鈥?generation timeline (t2i / t2v / i2i / i2v) plan building."""
 
 from __future__ import annotations
 

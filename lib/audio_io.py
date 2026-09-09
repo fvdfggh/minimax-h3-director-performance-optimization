@@ -1,4 +1,4 @@
-"""Extract source audio aligned with MiniMax H3 Director timeline (v2v / rv2v).
+"""Extract source audio aligned with MiniMax H3 Director Opt timeline (v2v / rv2v).
 
 Independent of video tensors (does not touch decode / 娈甸棿寮曞). Same frame
 selection as ``load_video_resampled``, with PCM-safe clocks:

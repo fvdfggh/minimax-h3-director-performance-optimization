@@ -1,4 +1,4 @@
-"""Build ComfyUI AUDIO outputs for MiniMax H3 Director runs.
+"""Build ComfyUI AUDIO outputs for MiniMax H3 Director Opt runs.
 
 Prefers model-generated audio from AV latent decode; falls back to source-video extract.
 """

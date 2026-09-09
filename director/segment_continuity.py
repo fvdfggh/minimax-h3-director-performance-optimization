@@ -1,4 +1,4 @@
-"""Cross-segment continuity helpers for MiniMax H3 Director.
+"""Cross-segment continuity helpers for MiniMax H3 Director Opt.
 
 Active path (opt-in「段间引导」): motion-context pin via
 ``director.h3_motion_context`` — previous segment AV tail → next segment

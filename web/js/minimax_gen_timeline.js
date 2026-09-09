@@ -1,4 +1,4 @@
-﻿/** Shared helpers for MiniMax H3 Director generation tasks. */
+/** Shared helpers for MiniMax H3 Director Opt generation tasks. */
 
 import { t } from "./minimax_i18n.js";
 

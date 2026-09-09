@@ -117,7 +117,7 @@ def resolve_output_dimensions(
     fixed_height: int = 480,
     stride: int = 32,
 ) -> tuple[int, int, int, str]:
-    """Return (width, height, ref_max_size, mode) for MiniMax H3 Director output.
+    """Return (width, height, ref_max_size, mode) for MiniMax H3 Director Opt output.
 
     ``stride`` defaults to 32 (H3 patch grid). Using 16 can yield e.g. 496×864
     which encodes to an odd latent width and crashes ``patchify_video``.

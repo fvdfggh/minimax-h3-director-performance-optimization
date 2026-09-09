@@ -579,7 +579,7 @@ def build_fl2v_director_plan(
     if run_sel is not None:
         if not any(int(s["source_index"]) in run_sel for s in shots):
             raise ValueError(
-                "MiniMax H3 Director: 「选择运行」已开启，但未勾选任何首尾帧组。"
+                "MiniMax H3 Director Opt: 「选择运行」已开启，但未勾选任何首尾帧组。"
                 "请勾选至少一组再执行。"
             )
 
@@ -723,7 +723,7 @@ def build_fl2v_director_plan(
         )
     if run_sel is not None and not selected_plan_indices:
         raise ValueError(
-            "MiniMax H3 Director: 「选择运行」已开启，但未勾选任何首尾帧组。"
+            "MiniMax H3 Director Opt: 「选择运行」已开启，但未勾选任何首尾帧组。"
             "请勾选至少一组再执行。"
         )
 

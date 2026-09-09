@@ -1,4 +1,4 @@
-"""MiniMax H3 Director — timeline UI + official MiniMax H3 AV execution."""
+"""MiniMax H3 Director Opt — timeline UI + official MiniMax H3 AV execution."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from .director_common import (
     director_perf_inputs,
 )
 
-_CATEGORY = "MiniMaxH3"
+_CATEGORY = "MiniMaxH3 Opt"
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.nodes")
 
@@ -84,7 +84,7 @@ def _sanitize_timeline(width, height, total_frames):
         changed.append("total_frames")
     if changed:
         log.warning(
-            "MiniMax H3 Director: 检测到异常 timeline 参数（疑似旧版控件错位），"
+            "MiniMax H3 Director Opt: 检测到异常 timeline 参数（疑似旧版控件错位），"
             "已回退到安全默认值: %s。请重新保存工作流以固化正确参数。",
             ", ".join(changed),
         )
@@ -118,7 +118,7 @@ def director_timeline_required_inputs() -> dict:
     }
 
 
-class MiniMaxH3Director:
+class MiniMaxH3DirectorOpt:
     """In-node timeline Director using ComfyUI official MiniMax H3 pipeline."""
 
     @classmethod
@@ -362,7 +362,7 @@ class MiniMaxH3Director:
     FUNCTION = "execute"
     CATEGORY = _CATEGORY
     DESCRIPTION = (
-        "MiniMax H3 Director: MiniMaxH3ImageToVideo / ReferenceToVideo conditioning, "
+        "MiniMax H3 Director Opt: MiniMaxH3ImageToVideo / ReferenceToVideo conditioning, "
         "single-stage KSampler + MiniMaxH3SigmaShift, LTXVSeparateAVLatent decode. "
         "Supports t2v / i2v / fl2v / r2v / v2v / rv2v. "
         "Optional i2v_groups / r2v_groups accept multi-group packs from Director Group nodes "
@@ -422,7 +422,7 @@ class MiniMaxH3Director:
         if use_sigmas:
             if sigmas is None:
                 log.warning(
-                    "MiniMax H3 Director: 已开启「使用 sigmas」但 sigmas 口未接线，"
+                    "MiniMax H3 Director Opt: 已开启「使用 sigmas」但 sigmas 口未接线，"
                     "本次回退到默认采样。"
                 )
             else:
@@ -431,7 +431,7 @@ class MiniMaxH3Director:
                 sigma_override = normalize_sigmas(sigmas)
                 if sigma_override is not None:
                     log.info(
-                        "MiniMax H3 Director: 使用自定义 SIGMAS 调度 —— %d 个 sigma = %d 步"
+                        "MiniMax H3 Director Opt: 使用自定义 SIGMAS 调度 —— %d 个 sigma = %d 步"
                         "（steps / scheduler 不再参与调度）。",
                         int(sigma_override.numel()),
                         int(sigma_override.numel()) - 1,
@@ -463,7 +463,7 @@ class MiniMaxH3Director:
             _second_model, _second_note = resolve_run_model(
                 second_run_model, model=model, model_b=model_b, model_c=model_c
             )
-            log.info("MiniMax H3 Director: 二次采样使用模型 %s", _second_note)
+            log.info("MiniMax H3 Director Opt: 二次采样使用模型 %s", _second_note)
 
             # 二采硬性要求放大模型：未连接直接报错，不再静默回退到原分辨率。
             if upscale_model is None:
@@ -482,7 +482,7 @@ class MiniMaxH3Director:
                 )
 
             # 二采 sigmas：未接线 → 默认海螺二采调度（euler 3 步，与已删除的
-            # MiniMaxH3DirectorRefine 默认一致）；自行接线则沿用高级采样里的 sampler。
+            # MiniMaxH3DirectorOptRefine 默认一致）；自行接线则沿用高级采样里的 sampler。
             _second_sigmas_eff = (
                 second_sigmas if second_sigmas is not None else DEFAULT_SECOND_SIGMAS
             )
@@ -590,7 +590,7 @@ class MiniMaxH3Director:
         model, model_note = resolve_run_model(
             run_model, model=model, model_b=model_b, model_c=model_c
         )
-        log.info("MiniMax H3 Director: 运行模型 %s", model_note)
+        log.info("MiniMax H3 Director Opt: 运行模型 %s", model_note)
 
         combined, segment_outputs, segment_audios, report, export_frame_counts = (
             execute_director_batch(

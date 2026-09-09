@@ -1,1 +1,1 @@
-"""ComfyUI node classes for MiniMax H3 Director."""
+"""ComfyUI node classes for MiniMax H3 Director Opt."""

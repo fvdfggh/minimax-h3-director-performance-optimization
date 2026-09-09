@@ -1,4 +1,4 @@
-"""Runtime prompt enhancement hooks for MiniMax H3 Director executors."""
+"""Runtime prompt enhancement hooks for MiniMax H3 Director Opt executors."""
 
 from __future__ import annotations
 
@@ -158,7 +158,7 @@ def notify_prompt_enhanced(
         from server import PromptServer
 
         PromptServer.instance.send_sync(
-            "minimax_director_enhanced",
+            "minimax_director_opt_enhanced",
             {
                 "node": node_id,
                 "text": text,

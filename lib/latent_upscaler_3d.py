@@ -4,7 +4,7 @@ This module is a self-contained port of the ``Minimax H3 Latent Upscaler (3D)``
 inference node (``Comfyui_Minimax_h3_latent_Upscaler``), refactored so the
 upscaler behaves like a *model* instead of a one-shot node:
 
-* :class:`MiniMaxH3LatentUpscaleModel` is a plain Python object that can be
+* :class:`MiniMaxH3LatentUpscaleModelOpt` is a plain Python object that can be
   passed around, stored, and **called from anywhere** (other nodes, the
   Director pipeline, scripts) via ``model.upscale(latent, ...)`` /
   ``model(latent)``.
@@ -455,7 +455,7 @@ def _normalize_mode(mode):
     return mode, {}
 
 
-class MiniMaxH3LatentUpscaleModel:
+class MiniMaxH3LatentUpscaleModelOpt:
     """A *model* wrapper around the MiniMax H3 3D latent upscaler.
 
     Instances are produced by the ``MiniMax H3 Latent Upscale Model Loader``
@@ -464,7 +464,7 @@ class MiniMaxH3LatentUpscaleModel:
     any other Python code:
 
     ````python
-    model = MiniMaxH3LatentUpscaleModel("my_upscaler.safetensors",
+    model = MiniMaxH3LatentUpscaleModelOpt("my_upscaler.safetensors",
                                         device="cuda", precision="fp16")
     upscaled = model(latent, mode="megapixels", megapixels=1.0)
     ````
@@ -660,12 +660,12 @@ class MiniMaxH3LatentUpscaleModel:
         return self.upscale(samples, **kwargs)
 
     def __repr__(self):
-        return (f"MiniMaxH3LatentUpscaleModel(name={self.model_name!r}, device={self.device!r}, "
+        return (f"MiniMaxH3LatentUpscaleModelOpt(name={self.model_name!r}, device={self.device!r}, "
                 f"precision={self.precision!r})")
 
 
 __all__ = [
-    "MiniMaxH3LatentUpscaleModel",
+    "MiniMaxH3LatentUpscaleModelOpt",
     "LatentResizer3D",
     "load_model",
     "scan_models",

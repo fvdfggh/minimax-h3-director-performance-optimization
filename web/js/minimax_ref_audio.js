@@ -69,7 +69,7 @@ export async function prepareLocalReferenceAudio(file, onProgress) {
         body.append("total_chunks", String(totalChunks));
         body.append("filename", file.name || "reference_audio.bin");
         body.append("chunk", file.slice(start, end), `${file.name || "reference_audio"}.part`);
-        const response = await api.fetchApi("/minimax/director/prepare_reference_audio_chunk", {
+        const response = await api.fetchApi("/minimax/director_opt/prepare_reference_audio_chunk", {
             method: "POST",
             body,
         });
@@ -85,7 +85,7 @@ export async function prepareLocalReferenceAudio(file, onProgress) {
 }
 
 export async function extractReferenceAudioFromExistingVideo(item) {
-    const response = await api.fetchApi("/minimax/director/extract_reference_audio", {
+    const response = await api.fetchApi("/minimax/director_opt/extract_reference_audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

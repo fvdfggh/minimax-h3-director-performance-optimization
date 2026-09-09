@@ -103,7 +103,9 @@ def maybe_export_segment_mp4(
         )
         path = write_frames_to_mp4(
             dest,
-            frames.detach().cpu().float(),
+            # Both domains are fine for the encoder; ``.float()`` would not be,
+            # since it maps uint8 [0,255] onto float [0,255] instead of [0,1].
+            frames.detach().cpu(),
             fps=float(getattr(plan, "frame_rate", 24) or 24),
             audio=audio,
         )
@@ -168,7 +170,7 @@ def export_run_mp4(
 
         path = write_frames_to_mp4(
             dest,
-            frames.detach().cpu().float(),
+            frames.detach().cpu(),
             fps=float(getattr(plan, "frame_rate", 24) or 24),
             audio=audio_dict,
         )

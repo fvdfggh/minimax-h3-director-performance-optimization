@@ -330,26 +330,50 @@ def av_video_meta(path: str) -> dict:
         }
 
 
-def decode_video_frames(path) -> torch.Tensor | None:
-    """Decode a whole video file to a float32 [0,1] RGB frame tensor.
+def decode_video_frames(path, *, dtype=torch.float32) -> torch.Tensor | None:
+    """Decode a whole video file to an RGB frame tensor.
+
+    ``dtype`` picks the pixel domain: ``torch.float32`` yields [0,1] (the
+    ComfyUI IMAGE convention, still the default for every existing caller),
+    ``torch.uint8`` yields [0,255].
+
+    The uint8 path is what long timelines should use for pure transport: the
+    decoder already produces uint8, so asking for it skips both a 4x expansion
+    and a per-element divide. Quantisation is not being traded away — the
+    source is an 8-bit H.264 render, so [0,255] is the pixel-exact round trip
+    and converting afterwards is lossless. Lift to float32 only around work
+    that genuinely needs the headroom (the continuity seam pipeline).
 
     ``None`` when nothing could be decoded (empty / unreadable container).
     """
     if not path or not os.path.isfile(path):
         return None
+    out = torch.uint8 if dtype is torch.uint8 else torch.float32
     container = _require_av().open(str(path))
     try:
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
-        frames = [
-            torch.from_numpy(frame.to_ndarray(format="rgb24")).to(torch.float32).div(255.0)
-            for frame in container.decode(stream)
-        ]
+        if out is torch.uint8:
+            frames = [
+                torch.from_numpy(frame.to_ndarray(format="rgb24"))
+                for frame in container.decode(stream)
+            ]
+        else:
+            frames = [
+                torch.from_numpy(frame.to_ndarray(format="rgb24")).to(torch.float32).div(255.0)
+                for frame in container.decode(stream)
+            ]
     finally:
         container.close()
     if not frames:
         return None
-    return torch.stack(frames, dim=0).contiguous()
+    # Stack uint8 first and convert once: per-frame promotion would materialise
+    # a second full-size float copy of the whole clip.
+    stacked = torch.stack(frames, dim=0).contiguous()
+    del frames
+    if out is not torch.uint8 and stacked.dtype != out:
+        stacked = stacked.to(out)
+    return stacked
 
 
 def probe_video_file(path: str) -> dict:

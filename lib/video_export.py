@@ -34,12 +34,19 @@ def _even(n: int) -> int:
 def _frames_to_rgb_u8(frames: torch.Tensor) -> np.ndarray:
     if not isinstance(frames, torch.Tensor) or frames.ndim != 4:
         raise ValueError(f"Expected NHWC frames tensor, got {type(frames)} shape={getattr(frames, 'shape', None)}")
-    arr = frames.detach().cpu().float().clamp(0.0, 1.0).numpy()
+    if frames.dtype == torch.uint8:
+        # Already display-range: only a ceiling is needed. Sending this down the
+        # float path below would multiply by 255 again and blow every pixel past
+        # white, so the two domains must stay separate here.
+        arr = frames.detach().cpu().clamp(0, 255).numpy()
+    else:
+        arr = frames.detach().cpu().float().clamp(0.0, 1.0).numpy()
+        arr = arr * 255.0
     if arr.shape[-1] >= 3:
         arr = arr[..., :3]
     else:
         raise ValueError(f"Expected at least 3 channels, got shape {arr.shape}")
-    return (arr * 255.0).astype(np.uint8)
+    return arr.astype(np.uint8)
 
 
 def _pad_even_hw(rgb: np.ndarray) -> np.ndarray:
@@ -89,7 +96,11 @@ def write_frames_to_mp4(
     pix_fmt: str = "yuv420p",
     preset: str = "veryfast",
 ) -> Path:
-    """Write NHWC float frames to ``path`` as H.264 MP4. Raises on failure.
+    """Write NHWC frames to ``path`` as H.264 MP4. Raises on failure.
+
+    Accepts either pixel domain: float32 [0,1] or uint8 [0,255]. Both encode to
+    the same 8-bit output, so callers holding already-decoded uint8 can hand it
+    straight over instead of paying for a 4x float expansion first.
 
     ``crf`` / ``pix_fmt`` / ``preset`` are exposed because the head+tail seam
     window wants a different quality point than a rendered clip; the defaults

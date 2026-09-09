@@ -414,6 +414,30 @@ def _frames_to_float(x: torch.Tensor) -> torch.Tensor:
     return x.float().div(255.0) if x.dtype == torch.uint8 else x.float()
 
 
+def _frames_as(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Convert frames to ``dtype`` across the uint8 ↔ float32 boundary.
+
+    The single entry point every cross-dtype assignment must route through. The
+    two domains use *different ranges* for the same pixels — uint8 is [0,255],
+    float32 is [0,1] — so a plain ``.to(dtype)`` is wrong in one direction and
+    catastrophic in the other: casting float32 [0,1] straight to uint8
+    truncates every value to 0 or 1, turning a seam window nearly black. Every
+    existing caller used ``.to(target.dtype)`` and was therefore only correct
+    while everything happened to be float32.
+
+    Keeps ``torch.float32`` semantics for the seam pipeline, whose weighted
+    blends need the headroom, and uint8 semantics for storage/transport.
+    """
+    x = x.detach()
+    if dtype == torch.uint8:
+        if x.dtype == torch.uint8:
+            return x
+        return x.float().clamp(0, 1).mul(255).round().clamp(0, 255).to(torch.uint8)
+    if x.dtype == torch.uint8:
+        return x.float().div(255.0)
+    return x.to(dtype)
+
+
 def _frames_to_headtail(tensor: torch.Tensor) -> dict[str, Any]:
     """Head/tail window of a render, as a self-describing payload.
 
@@ -675,40 +699,54 @@ def _splice_headtail(
         # Short segment: the window already holds every frame.
         if int(head.shape[0]) < n_full:
             return full
-        return _frames_to_float(head[:n_full]).to(full.dtype)
+        return _frames_as(_frames_to_float(head[:n_full]), full.dtype)
     hn = min(int(head.shape[0]), int(tail.shape[0]), n_full)
     if hn <= 0:
         return full
-    full[:hn] = _frames_to_float(head[:hn]).to(full.dtype)
-    full[n_full - hn:] = _frames_to_float(tail[int(tail.shape[0]) - hn:]).to(full.dtype)
+    # Route through :func:`_frames_as`: these tensors straddle the uint8/float
+    # range boundary, and a bare ``.to(full.dtype)`` turned a float [0,1] window
+    # into 0/1 pixels the moment ``full`` became uint8.
+    full[:hn] = _frames_as(_frames_to_float(head[:hn]), full.dtype)
+    full[n_full - hn:] = _frames_as(_frames_to_float(tail[int(tail.shape[0]) - hn:]), full.dtype)
     return full
 
 
-def _decode_clip_frames(clip_path: Path) -> torch.Tensor | None:
-    """Decode a clip to float32 [0,1] RGB frames with PyAV (no OpenCV).
+def _decode_clip_frames(
+    clip_path: Path, *, dtype: torch.dtype = torch.float32
+) -> torch.Tensor | None:
+    """Decode a clip to RGB frames with PyAV (no OpenCV).
 
+    ``dtype`` follows :func:`decode_video_frames`: float32 [0,1] by default,
+    uint8 [0,255] for callers that only move pixels around.
     The portable build launches ComfyUI with ``python -s``, which hides the
     user-level site-packages where ``cv2`` would live, so all video I/O goes
     through the bundled PyAV. ``None`` on any failure.
     """
     from ..lib.video_io import decode_video_frames
 
-    return decode_video_frames(clip_path)
+    return decode_video_frames(clip_path, dtype=dtype)
 
 
-def _load_full_segment_via_clip(clip_path: Path) -> torch.Tensor | None:
-    """Decode a rendered ``clip.mp4`` back into a float32 [0,1] frame tensor.
+def _load_full_segment_via_clip(
+    clip_path: Path, *, dtype: torch.dtype = torch.float32
+) -> torch.Tensor | None:
+    """Decode a rendered ``clip.mp4`` back into a full frame tensor.
 
     Used when the full ``frames.pt`` was dropped to save space; the seam
     pipeline only ever needs the head/tail (see :func:`load_segment_tail`), but
     export/merge still needs the whole segment and ``clip.mp4`` is already on
     disk. Falls back to ``None`` on any decode failure (caller keeps the run
     alive) — including an unreadable container or a missing decoder backend.
+
+    ``dtype`` selects the pixel domain. The source is an 8-bit render, so
+    ``torch.uint8`` is the pixel-exact, 4x smaller form; use it for transport
+    that performs no arithmetic, and lift to float32 (the default) for anything
+    that blends.
     """
     if not clip_path or not Path(clip_path).is_file():
         return None
     try:
-        return _decode_clip_frames(Path(clip_path))
+        return _decode_clip_frames(Path(clip_path), dtype=dtype)
     except Exception as exc:
         log.warning("Segment clip decode failed for %s: %s", clip_path.name, exc)
         return None
@@ -1213,7 +1251,9 @@ def save_segment_clip(
         try:
             write_frames_to_mp4(
                 tmp,
-                frames.detach().cpu().float(),
+                # The encoder accepts both domains; a bare ``.float()`` would
+                # silently reinterpret uint8 [0,255] as float [0,255].
+                frames.detach().cpu(),
                 fps=float(getattr(plan, "frame_rate", 24) or 24),
                 audio=wave,
             )
@@ -1633,30 +1673,41 @@ def _load_segment_export_source(
     vae: Any = None,
     workflow_name: str | None = None,
     variant: str = segment_slots.VARIANT_FIRST,
+    dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, dict[str, Any] | None] | None:
     """Frames + audio for one segment's export, or None if no frame source exists.
 
     Sources, in order:
-      1. raw frame cache (``seg_XXXX.pt``) — lossless, no extra dependency.
+      1. the rendered video cache (``clip.mp4``, with the legacy ``frames.pt``
+         taking precedence when it exists) — no VAE needed.
       2. latent cache (``seg_XXXX.av.pt``) decoded with the loaded VAE — the
-        「仅有 latent 缓存」case; only works when ``vae`` is supplied.
+         「仅有 latent 缓存」case; only works when ``vae`` is supplied.
 
-    The encoded clip cache (``seg_XXXX.clip.mp4``) is deliberately **not** read
-    back here — that would need a video decoder. It is only used by the piecewise
-    exporter as a copy-on-disk source (see ``_export_piecewise``), so a segment
-    with only a clip is still exportable without any ffmpeg/cv2 read.
+    Note ``clip.mp4`` *is* read back here. The old note claiming otherwise was
+    stale: :func:`load_segment_cache` rebuilds the segment from the clip through
+    PyAV, which is exactly how every other consumer gets frames.
+
+    ``dtype`` selects the pixel domain. Requests uint8 [0,255] from the cache so
+    nothing is expanded before its fate is decided; pass float32 (the default)
+    when the frames go anywhere that blends them. See :func:`load_segment_cache`.
+
+    Two destinations impose different domains, so the caller must choose:
+    re-encoding straight to disk can stay uint8 end-to-end, while a ComfyUI
+    IMAGE output is float32 [0,1] by contract and would render as near-white
+    noise if uint8 were put on it.
     """
-    # 1) raw frame cache (fastest, lossless)
+    # 1) rendered frames already on disk (clip.mp4 / legacy frames.pt)
     frames = load_segment_cache(
         node_id, seg, plan, allow_stale=True,
         workflow_name=workflow_name, variant=variant,
+        dtype=dtype,
     )
     if frames is not None:
         audio = load_segment_audio(
             node_id, seg, plan, allow_stale=True,
             workflow_name=workflow_name, variant=variant,
         )
-        return frames.float(), (audio if isinstance(audio, dict) else None)
+        return frames, (audio if isinstance(audio, dict) else None)
 
     # 2) latent → decode (requires a VAE; supplied by the caller)
     if vae is not None:
@@ -1801,6 +1852,81 @@ def _expected_export_frames(plan, seg, fallback_n=0):
         ctx = snap_context_frames(overlap) if use_mc else 0
         return int(ctx), int(visible - 5)
     return 0, int(visible)
+
+
+#: How far a container-derived frame count may sit from the expected export
+#: length and still count as a match. ``av_video_meta`` falls back to
+#: ``round(duration * fps)`` when the stream lacks a frame count, which lands one
+#: frame off at non-integer rates; a render that is off by *more* than this is
+#: genuinely untrimmed rather than mis-measured.
+CLIP_FRAME_COUNT_TOLERANCE = 2
+
+
+def _render_export_authoritative(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    *,
+    workflow_name: str | None = None,
+    variant: str = segment_slots.VARIANT_FIRST,
+) -> tuple[bool, int, int, str]:
+    """Whether a rendered export can be reused instead of paying for a VAE decode.
+
+    Returns ``(ok, cached_n, expected_export, reason)``.
+
+    ``expected_export`` prefers the ``handoff.json`` written by the run that
+    produced the render — that is the same number the seam pin was placed
+    against, so it is ground truth. :func:`_expected_export_frames` instead
+    re-derives a continuity *role* from the widgets, and the two disagree
+    whenever ``context_n`` differed at sample time: an unran predecessor leaves
+    it 0, so the real run was ``role="none"`` exporting ``17k+5`` while the
+    re-derivation says ``"prev"`` and expects ``17k``. That permanent off-by-5
+    made every later export look untrimmed and re-decoded the latent even though
+    a perfectly good ``clip.mp4`` was sitting on disk.
+
+    A clip is authoritative on its own: it *is* the last render of this segment,
+    so a mismatch only means "repositioned measurement", not "wrong pixels".
+    """
+    _nominal_trim, expected_export = _expected_export_frames(plan, seg)
+    handoff = load_segment_handoff_meta(
+        node_id, seg, plan, allow_stale=True,
+        workflow_name=workflow_name, variant=variant,
+    ) or {}
+    hf_export = int(handoff.get("export_frames") or 0)
+    if hf_export > 0:
+        expected_export = hf_export
+
+    paths = _slot_paths(node_id, workflow_name, int(seg.index), variant=variant)
+    if paths is None:
+        return False, 0, expected_export, "no cache slot"
+
+    cached_n = 0
+    if paths["frames"].is_file():
+        shape = probe_segment_cache_shape(
+            node_id, seg, plan, allow_stale=True,
+            workflow_name=workflow_name, variant=variant,
+        )
+        cached_n = int(shape[0]) if shape else 0
+    else:
+        # Clip first in the owning group, then the superseded one: a plan edit
+        # hands the position a fresh, still-empty stem, so the only render left
+        # is one generation back.
+        shape = _probe_clip_shape(
+            node_id, seg, workflow_name=workflow_name,
+            allow_prev=True, variant=variant,
+        )
+        cached_n = int(shape[0]) if shape else 0
+
+    if cached_n <= 0:
+        return False, 0, expected_export, "no render on disk"
+    if expected_export <= 0:
+        # Nothing to compare against — trust whatever was rendered.
+        return True, cached_n, expected_export, "no expected length"
+    if cached_n == expected_export:
+        return True, cached_n, expected_export, "exact"
+    if abs(cached_n - expected_export) <= CLIP_FRAME_COUNT_TOLERANCE:
+        return True, cached_n, expected_export, "within tolerance"
+    return False, cached_n, expected_export, "frame count mismatch"
 
 
 def _trim_decoded_for_export(
@@ -1951,35 +2077,34 @@ def predecode_latent_segments(
         seg = segments.get(idx)
         if seg is None:
             continue
-        # A correctly-trimmed render is authoritative — reuse it, never re-decode.
-        # Only latent-only leftovers (no clip / no legacy frames) need the VAE; a
-        # leftover *untrimmed* render (wrong frame count) is re-decoded.
+        # A rendered clip is authoritative — reuse it, never re-decode. Only a
+        # latent-only leftover (no clip in either file group) reaches the VAE.
         #
         # The check probes cheap sources only (legacy .pt header, or the mp4
         # container) instead of load_segment_cache: that would decode the whole
         # mp4 just to count its frames, which is the very cost this predecode
         # exists to avoid.
-        expected_trim, expected_export = _expected_export_frames(plan, seg)
-        paths = _slot_paths(node_id, workflow_name, int(seg.index), variant=variant)
-        if paths is not None:
-            cached_n = 0
-            if paths["frames"].is_file():
-                shape = probe_segment_cache_shape(
-                    node_id, seg, plan, allow_stale=True,
-                    workflow_name=workflow_name, variant=variant,
-                )
-                cached_n = int(shape[0]) if shape else 0
-            elif paths["clip"].is_file():
-                shape = _probe_clip_shape(node_id, seg, workflow_name=workflow_name, variant=variant)
-                cached_n = int(shape[0]) if shape else 0
-            if cached_n > 0:
-                if cached_n == expected_export:
-                    continue  # authoritative, correctly trimmed
-                log.warning(
-                    "分段导出 predecode: seg #%d render has %d frames (expected %d) — "
-                    "leftover untrimmed frames, re-decoding from latent.",
-                    idx + 1, cached_n, expected_export,
-                )
+        ok, cached_n, expected_export, reason = _render_export_authoritative(
+            node_id, seg, plan,
+            workflow_name=workflow_name, variant=variant,
+        )
+        if ok:
+            log.info(
+                "分段导出 predecode: seg #%d reuse render (%df, %s) — no VAE decode.",
+                idx + 1, cached_n, reason,
+            )
+            continue
+        if cached_n > 0:
+            log.warning(
+                "分段导出 predecode: seg #%d render has %d frames (expected %d) — "
+                "leftover untrimmed frames, re-decoding from latent.",
+                idx + 1, cached_n, expected_export,
+            )
+        else:
+            log.info(
+                "分段导出 predecode: seg #%d has no render (%s); decoding from latent.",
+                idx + 1, reason,
+            )
         # Only decode when a latent actually exists.
         latent = load_segment_av_latent(
             node_id, seg, plan, allow_stale=True,
@@ -1994,11 +2119,12 @@ def predecode_latent_segments(
             failed.append((idx, "latent decode failed"))
             continue
         frames, audio = result
-        # We got here because the persisted render was *not* the correctly trimmed
-        # export (frame count mismatch / no cache). Drop the stale full tensor now:
+        paths = _slot_paths(node_id, workflow_name, idx, variant=variant)
+        # We got here because the persisted render was *not* a usable export
+        # (frame count mismatch / nothing rendered). Drop the stale full tensor:
         # ``load_segment_cache`` prefers ``frames.pt`` over ``clip.mp4``, so leaving
         # it behind makes every later consumer (node output, merge, mp4) read the
-        # old untrimmed frames instead of the frames just decoded.
+        # old frames instead of the ones just decoded.
         try:
             if paths is not None and paths["frames"].is_file():
                 _safe_unlink(paths["frames"])
@@ -2439,6 +2565,8 @@ def run_segment_export(
         source = _load_segment_export_source(
             node_id, segments[idx], plan, vae=vae,
             workflow_name=workflow_name, variant=variant,
+            # Straight to an encoder that accepts uint8 — no expansion needed.
+            dtype=torch.uint8,
         )
         if source is None:
             skipped.append({"index": idx, "reason": "no exportable cache"})
@@ -2546,9 +2674,12 @@ def _write_export_mp4(
     path = os.path.join(export_dir, base)
     tmp = path + ".tmp"
     try:
+        # No ``.float()``: that turns uint8 [0,255] into float [0,255] rather
+        # than [0,1], and the encoder then clips nearly every pixel to white.
+        # The writer handles both domains.
         write_frames_to_mp4(
             tmp,
-            frames.detach().cpu().float(),
+            frames.detach().cpu(),
             fps=fps,
             audio=audio,
         )
@@ -2642,32 +2773,43 @@ def _probe_clip_shape(
     seg: SegmentPlan,
     workflow_name: str | None = None,
     *,
+    allow_prev: bool = False,
     variant: str = segment_slots.VARIANT_FIRST,
 ) -> tuple[int, int, int, int] | None:
     """``(F, H, W, C)`` of ``seg_XXXX_clip.mp4`` from container metadata alone.
 
     Mirrors what :func:`load_segment_cache` would rebuild, so callers measuring
     a merge get the same numbers without decoding a single pixel.
+
+    ``allow_prev=True`` also probes the superseded file group, mirroring
+    :func:`clip_cache_path`. Without it a plan edit is indistinguishable from an
+    absent render: the edit re-hashes the position onto a fresh, still-empty
+    stem, so the owning group holds no clip while every rendered frame sits one
+    generation back — and every caller concluded "nothing cached".
     """
-    paths = _slot_paths(node_id, workflow_name, int(seg.index), variant=variant)
-    if paths is None:
-        return None
-    clip_path = paths["clip"]
-    if not clip_path.is_file():
-        return None
+    idx = int(seg.index)
+    groups = [_slot_paths(node_id, workflow_name, idx, variant=variant)]
+    if allow_prev:
+        groups.append(_slot_paths(node_id, workflow_name, idx, stale=True, variant=variant))
     # PyAV only — the portable build runs ``python -s``, which hides the
     # user-level site-packages where cv2 would live.
-    try:
-        from ..lib.video_io import av_video_meta
+    for paths in groups:
+        if paths is None:
+            continue
+        clip_path = paths["clip"]
+        if not clip_path.is_file():
+            continue
+        try:
+            from ..lib.video_io import av_video_meta
 
-        meta = av_video_meta(str(clip_path))
-        w = int(meta.get("width") or 0)
-        h = int(meta.get("height") or 0)
-        f = int(meta.get("frame_count") or 0)
-        if f > 0 and w > 0 and h > 0:
-            return (f, h, w, 3)
-    except Exception as exc:
-        log.debug("Segment %d clip shape probe failed: %s", seg.index + 1, exc)
+            meta = av_video_meta(str(clip_path))
+            w = int(meta.get("width") or 0)
+            h = int(meta.get("height") or 0)
+            f = int(meta.get("frame_count") or 0)
+            if f > 0 and w > 0 and h > 0:
+                return (f, h, w, 3)
+        except Exception as exc:
+            log.debug("Segment %d clip shape probe failed: %s", idx + 1, exc)
     return None
 
 
@@ -2695,7 +2837,12 @@ def probe_segment_cache_shape(
         workflow_name=workflow_name, variant=variant,
     )
     if path is None:
-        return _probe_clip_shape(node_id, seg, workflow_name=workflow_name, variant=variant)
+        # Only reached when no usable frames.pt resolved; the durable cache is a
+        # clip, and it too may live one generation back.
+        return _probe_clip_shape(
+            node_id, seg, workflow_name=workflow_name,
+            allow_prev=allow_stale, variant=variant,
+        )
     try:
         loaded = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
         if not torch.is_tensor(loaded) or loaded.ndim != 4:
@@ -2729,8 +2876,16 @@ def load_segment_cache(
     return_fp: bool = False,
     workflow_name: str | None = None,
     variant: str = segment_slots.VARIANT_FIRST,
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor | tuple[torch.Tensor | None, dict[str, Any] | None]:
     """Load cached segment frames (the FULL segment tensor).
+
+    ``dtype`` selects the pixel domain of the returned tensor.
+    ``torch.float32`` (default) is the ComfyUI IMAGE convention and what every
+    existing caller gets. ``torch.uint8`` returns pixel-exact [0,255] at a
+    quarter of the memory — the right choice for pure transport such as「分段导出」,
+    whose frames are copied straight to a node output or re-encoded. Anything
+    that blends pixels (the continuity seam pipeline) must stay float32.
 
     ``allow_stale=True``: used for「选择运行」+「全部导出」fill of unselected
     segments. Prefer the last render on disk over blank/gray source placeholders
@@ -2769,8 +2924,11 @@ def load_segment_cache(
         # 1) Legacy full tensor (older runs) — still valid, used as-is.
         if group["frames"].is_file():
             try:
-                return _frames_from_disk(
-                    torch.load(group["frames"], map_location="cpu", weights_only=True)
+                return _frames_as(
+                    _frames_from_disk(
+                        torch.load(group["frames"], map_location="cpu", weights_only=True)
+                    ),
+                    dtype,
                 )
             except Exception as exc:
                 log.warning("Failed to load legacy segment %d frames: %s", idx + 1, exc)
@@ -2780,7 +2938,11 @@ def load_segment_cache(
         #    when their frame counts disagree, because that means they belong to
         #    different renders.
         clip_path = group["clip"]
-        full = _load_full_segment_via_clip(clip_path) if clip_path.is_file() else None
+        full = (
+            _load_full_segment_via_clip(clip_path, dtype=dtype)
+            if clip_path.is_file()
+            else None
+        )
         if full is not None:
             head, tail, total = _load_headtail_paths(group)
             if head is not None:

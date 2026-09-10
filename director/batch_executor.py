@@ -1283,9 +1283,14 @@ def execute_director_batch(
         # interchangeable encodings, so the expensive Qwen prefill runs once per
         # distinct key rather than once per segment.
         ref_image_size = resolve_ref_image_size(seg, plan)
+        # The canvas only enters the key when this segment actually feeds pixels to
+        # the text encoder (refs / videos / first-last frames); the sample length
+        # never does, so a duration tweak reuses the encoding instead of paying for
+        # another Qwen prefill.
         text_key = text_cache_key(
             positive_prompt, ctx_w, ctx_h, sample_len, seg.task_key,
             ref_image_size, ref_images,
+            ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
         )
         used_text_keys.add(text_key)
         # Remember this segment's first-pass text/context identity on disk so a
@@ -1318,6 +1323,7 @@ def execute_director_batch(
                 width=ctx_w, height=ctx_h, length=sample_len, task_key=seg.task_key,
                 ref_image_size=ref_image_size, ref_images=ref_images,
                 workflow_name=workflow_name,
+                ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
             )
 
         # Ref data feeds Phase 2; write it before any cache short-circuit.
@@ -1366,6 +1372,7 @@ def execute_director_batch(
             "seg": seg, "positive_prompt": positive_prompt,
             "ctx_w": ctx_w, "ctx_h": ctx_h, "sample_len": sample_len,
             "ref_images": ref_images, "ref_image_size": ref_image_size,
+            "ref_videos": ref_videos, "first_frame": first_frame, "last_frame": last_frame,
             "text_key": text_key,
         })
 
@@ -1418,6 +1425,9 @@ def execute_director_batch(
                     length=meta["sample_len"], task_key=seg.task_key,
                     ref_image_size=meta["ref_image_size"], ref_images=meta["ref_images"],
                     workflow_name=workflow_name,
+                    ref_videos=meta.get("ref_videos"),
+                    first_frame=meta.get("first_frame"), last_frame=meta.get("last_frame"),
+                    frame_count=prepared.get("frame_count"),
                 )
             reports.append(f"  Seg #{seg.index + 1}: conditioning encoded → disk")
             del positive, negative, latent

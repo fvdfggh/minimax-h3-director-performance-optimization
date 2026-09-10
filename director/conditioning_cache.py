@@ -107,24 +107,148 @@ def text_cache_key(
     task_key: str,
     ref_image_size: str = "match",
     ref_images: Any = None,
+    *,
+    ref_videos: Any = None,
+    first_frame: Any = None,
+    last_frame: Any = None,
 ) -> str:
     """Public cache key for a text encoding, shared by save/load/dedupe.
 
     Exposed so the batch path can group segments that would produce byte-identical
     text encodings and encode each distinct key exactly once.
+
+    ``length`` deliberately takes no part in the key (see :func:`_prompt_hash`).
     """
-    return _prompt_hash(prompt, width, height, length, task_key, ref_image_size, ref_images)
+    return _prompt_hash(
+        prompt, width, height, length, task_key, ref_image_size, ref_images,
+        ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
+    )
 
 
-def _prompt_hash(prompt: str, width: int, height: int, length: int, task_key: str, 
-                 ref_image_size: str = "match", ref_images: Any = None) -> str:
-    """Generate a hash key for the prompt + dimensions + reference images.
-    
+def _has_visual_inputs(
+    ref_images: Any = None,
+    ref_videos: Any = None,
+    first_frame: Any = None,
+    last_frame: Any = None,
+) -> bool:
+    """True when this encoding actually consumed *pixels*.
+
+    Those pixels are downscaled against the canvas, so only then can the canvas
+    size change the encoding. Pure-prompt batches (t2v, or reference **audio**
+    only) never look at a pixel and therefore carry no canvas dependency.
+    """
+    if first_frame is not None or last_frame is not None:
+        return True
+    return bool(ref_images) or bool(ref_videos)
+
+
+def _prompt_hash(
+    prompt: str,
+    width: int,
+    height: int,
+    length: int,
+    task_key: str,
+    ref_image_size: str = "match",
+    ref_images: Any = None,
+    *,
+    ref_videos: Any = None,
+    first_frame: Any = None,
+    last_frame: Any = None,
+) -> str:
+    """Hash key for a text encoding.
+
     Including ref_images hash ensures cache invalidation when reference images change.
+
+    Two invariants the rest of this module relies on:
+
+    * **``length`` is NOT part of the key.** The sample length only reaches the
+      *extras* that ride along in the payload (``minimax_frame_count`` and the
+      keyframe anchors), never the token stream: changing a segment's duration
+      therefore reuses the encoding instead of paying for another Qwen prefill.
+      :func:`retime_conditioning_for_frames` re-maps those extras on load.
+    * **The canvas only counts when pixels are involved.** Reference images /
+      videos and the i2v/fl2v first/last frames are resized against the canvas
+      before Qwen sees them, so their token stream (and the matching reference
+      VAE latents) genuinely change with the resolution; a batch with no visual
+      input is keyed canvas-free and survives a resolution change.
+
+    Keeping both correct is what lets one file serve every duration of a prompt
+    instead of one file per (prompt, resolution, duration) triple.
     """
     ref_hash = _hash_ref_images(ref_images)
-    content = f"{prompt}|{width}|{height}|{length}|{task_key}|{ref_image_size}|{ref_hash}"
+    if _has_visual_inputs(ref_images, ref_videos, first_frame, last_frame):
+        canvas = f"{int(width)}|{int(height)}"
+    else:
+        canvas = "canvas-free"
+    content = f"{prompt}|{canvas}|{task_key}|{ref_image_size}|{ref_hash}"
     return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+def av_frame_count(width: int, height: int, length: int) -> int | None:
+    """Aligned frame count a canvas of ``(width, height, length)`` samples to.
+
+    Same value ``prepare_segment_materials`` bakes into ``minimax_frame_count``.
+    """
+    try:
+        from comfy_extras.nodes_minimax_h3 import _empty_av_latent as _official
+    except Exception as exc:  # pragma: no cover - ComfyUI always ships this
+        log.warning("Cannot resolve frame count (%s).", exc)
+        return None
+    try:
+        latent, frame_count = _official(int(width), int(height), int(length))
+        del latent
+        return int(frame_count)
+    except Exception as exc:
+        log.warning("Frame count lookup failed for %sx%sx%s (%s).", width, height, length, exc)
+        return None
+
+
+def retime_conditioning_for_frames(positive: Any, old_frames: int | None, new_frames: int | None) -> Any:
+    """Move a cached encoding's length-dependent extras onto another length.
+
+    Only two things in the payload know about the sample length:
+    ``minimax_frame_count`` and the **last** keyframe anchor
+    (``resolved_frame_index == old_frames - 1``). Anything anchored at 0 (the
+    customary first frame) is already correct. Without this, reusing an encoding
+    across durations would leave the DiT anchoring the tail keyframe to a frame
+    count the sample no longer has.
+    """
+    try:
+        old_n = int(old_frames or 0)
+        new_n = int(new_frames or 0)
+    except (TypeError, ValueError):
+        return positive
+    if old_n <= 0 or new_n <= 0 or old_n == new_n or not positive:
+        return positive
+
+    def _move(obj):
+        if isinstance(obj, (list, tuple)) and len(obj) >= 2 and isinstance(obj[1], dict):
+            cfg = dict(obj[1])
+            kfs = cfg.get("minimax_keyframes")
+            if isinstance(kfs, (list, tuple)) and kfs:
+                moved = []
+                for kf in kfs:
+                    if isinstance(kf, dict):
+                        kf = dict(kf)
+                        try:
+                            rfi = int(kf.get("resolved_frame_index", -1))
+                        except (TypeError, ValueError):
+                            rfi = -1
+                        if rfi == old_n - 1:
+                            kf["resolved_frame_index"] = new_n - 1
+                    moved.append(kf)
+                cfg["minimax_keyframes"] = moved
+            if "minimax_frame_count" in cfg:
+                cfg["minimax_frame_count"] = new_n
+            return [obj[0], cfg]
+        return obj
+
+    rows = [_move(row) for row in positive]
+    log.info(
+        "Conditioning cache re-timed for %d → %d frames (keyframe anchors moved).",
+        old_n, new_n,
+    )
+    return rows
 
 
 def _empty_av_latent(width: int, height: int, length: int) -> Any:
@@ -165,6 +289,11 @@ def save_conditioning_cache(
     ref_image_size: str = "match",
     ref_images: Any = None,
     workflow_name: str | None = None,
+    *,
+    ref_videos: Any = None,
+    first_frame: Any = None,
+    last_frame: Any = None,
+    frame_count: int | None = None,
 ) -> Path | None:
     """Save conditioning tensors to disk cache.
 
@@ -174,11 +303,18 @@ def save_conditioning_cache(
     :func:`load_conditioning_cache` rebuilds it. Dropping it saves roughly
     6 MB per file and the corresponding save/load time.
 
+    ``frame_count`` is the aligned frame count the encoding was assembled for;
+    it is recorded only so a later run at another duration can re-map the
+    length-dependent extras (see :func:`retime_conditioning_for_frames`).
+
     Returns the cache file path, or None if saving failed.
     """
     try:
         cache_dir = _get_cache_dir(node_id, workflow_name)
-        prompt_key = _prompt_hash(prompt, width, height, length, task_key, ref_image_size, ref_images)
+        prompt_key = _prompt_hash(
+            prompt, width, height, length, task_key, ref_image_size, ref_images,
+            ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
+        )
         cache_file = cache_dir / f"{_TEXT_PREFIX}_{prompt_key}.pt"
         
         # Prepare conditioning for serialization
@@ -213,6 +349,10 @@ def save_conditioning_cache(
                 "width": width,
                 "height": height,
                 "length": length,
+                "frame_count": int(frame_count) if frame_count else None,
+                # False ⇒ nothing in this payload was derived from the canvas,
+                # so the same file may serve any resolution.
+                "canvas_bound": _has_visual_inputs(ref_images, ref_videos, first_frame, last_frame),
                 "task_key": task_key,
                 "ref_image_size": ref_image_size,
                 "prompt_preview": prompt[:200] + "..." if len(prompt) > 200 else prompt,
@@ -239,6 +379,10 @@ def load_conditioning_cache(
     ref_image_size: str = "match",
     ref_images: Any = None,
     workflow_name: str | None = None,
+    *,
+    ref_videos: Any = None,
+    first_frame: Any = None,
+    last_frame: Any = None,
 ) -> dict | None:
     """Load cached conditioning tensors from disk.
 
@@ -252,10 +396,17 @@ def load_conditioning_cache(
     ``latent`` is the initial AV canvas. Files written before it was dropped from
     the payload still carry it and are used as-is; newer files store ``None`` and
     it is rebuilt from the metadata here, so no existing cache needs clearing.
+
+    A **different sample length is not a miss**: the key ignores ``length``, and
+    whatever the payload remembers about it is re-timed to the caller's length
+    before it leaves this function.
     """
     try:
         cache_dir = _get_cache_dir(node_id, workflow_name)
-        prompt_key = _prompt_hash(prompt, width, height, length, task_key, ref_image_size, ref_images)
+        prompt_key = _prompt_hash(
+            prompt, width, height, length, task_key, ref_image_size, ref_images,
+            ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
+        )
         cache_file = cache_dir / f"{_TEXT_PREFIX}_{prompt_key}.pt"
 
         if not cache_file.exists():
@@ -264,15 +415,21 @@ def load_conditioning_cache(
         
         cache_data = torch.load(cache_file, map_location="cpu", weights_only=False)
         
-        # Validate cache metadata
+        # Validate cache metadata. The canvas only has to match when the encoding
+        # actually looked at pixels (reference media / keyframe images); a canvas
+        # -free file is valid at any resolution. The length never has to match.
         meta = cache_data.get("metadata", {})
-        if (meta.get("width") != width or 
-            meta.get("height") != height or 
-            meta.get("length") != length or
-            meta.get("task_key") != task_key):
+        canvas_bound = bool(meta.get("canvas_bound", True))
+        if canvas_bound and (
+            meta.get("width") != width or
+            meta.get("height") != height
+        ):
             log.info("Cache invalidated for seg #%d (dimensions changed)", segment_index + 1)
             return None
-        
+        if meta.get("task_key") != task_key:
+            log.info("Cache invalidated for seg #%d (task key changed)", segment_index + 1)
+            return None
+
         # Move tensors to CUDA (GPU) for model use
         def move_to_device(cond):
             """Recursively move all tensors in conditioning to CUDA."""
@@ -285,10 +442,32 @@ def load_conditioning_cache(
             if isinstance(cond, dict):
                 return {k: move_to_device(v) for k, v in cond.items()}
             return cond
-        
+
         positive = move_to_device(cache_data["positive"])
         negative = move_to_device(cache_data["negative"])
         latent = cache_data.get("latent")
+        if latent is not None and meta.get("length") and int(meta.get("length")) != int(length):
+            # Legacy file that still carries its own zero canvas — built for another
+            # length, so it must not be reused. New-style files store None here.
+            latent = None
+        # Same text, another duration: move the anchors that encode the old length.
+        # Only payloads with keyframes carry them, and resolving the frame count
+        # costs an extra canvas allocation, so check before paying for it.
+        if any(
+            isinstance(row, (list, tuple)) and len(row) >= 2 and isinstance(row[1], dict)
+            and "minimax_frame_count" in row[1]
+            for row in (positive or [])
+        ):
+            stored_frames = meta.get("frame_count")
+            if not stored_frames and meta.get("length"):
+                stored_frames = av_frame_count(
+                    int(meta.get("width") or width),
+                    int(meta.get("height") or height),
+                    int(meta.get("length")),
+                )
+            positive = retime_conditioning_for_frames(
+                positive, stored_frames, av_frame_count(int(width), int(height), int(length)),
+            )
         if latent is None:
             # New-style file: the zero canvas was never written — rebuild it.
             latent = _empty_av_latent(width, height, length)

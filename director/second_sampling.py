@@ -51,13 +51,18 @@ from typing import Any, Callable
 import torch
 
 from . import segment_slots
-from .conditioning_cache import load_conditioning_by_key, load_segment_second_params
+from .conditioning_cache import (
+    load_conditioning_by_key, load_segment_second_params,
+    retime_conditioning_for_frames,
+)
 from .core_sampling import normalize_sigmas, sample_single_stage
 from .frame_align import minimax_align_frame_count
 from .h3_motion_context import (
     apply_motion_context,
+    pixel_frames_for_latent_t,
     snap_context_frames,
     handoff_end_frame,
+    video_from_latent,
     resolve_tail_context_length,
     DEFAULT_AUDIO_CONTEXT_FRAMES,
 )
@@ -543,6 +548,19 @@ def run_second_sampling(
             _fail(idx, "text", f"文本编码缓存缺失 (text_key={text_key})")
             return
         positive, negative = cond["positive"], cond.get("negative")
+
+        # The text key ignores the sample length, so the cached anchors may have
+        # been timed against the first pass's duration — re-map them onto this
+        # pass's latent before anything reads them.
+        try:
+            _want = pixel_frames_for_latent_t(int(video_from_latent(new_av).shape[2]))
+        except Exception:  # pragma: no cover - defensive
+            _want = 0
+        positive = retime_conditioning_for_frames(
+            positive,
+            int((cond.get("metadata") or {}).get("frame_count") or 0),
+            _want,
+        )
 
         # 与一采一致：被参照段导出 17k（相位由参照帧承载），无参照段导出 17k+5。
         _, expected_export = _expected_export_frames(plan, seg, fallback_n=0)

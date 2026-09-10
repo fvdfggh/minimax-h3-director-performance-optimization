@@ -370,6 +370,12 @@ export function flushBatchPromptInputs(editor) {
         live.seg.prompt = el.value || "";
         live.seg.negativePrompt = live.seg.negativePrompt ?? "";
     });
+    // 公共素材页的提示词没有 data-batch-prompt-index：先 sync token 编辑器（草稿最多
+    // 有 80ms 防抖），再写回 timeline.global，否则切页会丢掉最后几个字符。
+    list.querySelectorAll("textarea[data-common-prompt]").forEach((el) => {
+        el.__bdTokenApi?.sync?.();
+        writeCommonPrompt(editor, el.value || "");
+    });
 }
 
 /** Flush visible 秒数 inputs into segments before a full card re-render. */
@@ -1632,6 +1638,25 @@ function r2vEnsureGlobal(editor) {
         if (!Array.isArray(g[k])) g[k] = [];
     }
     return g;
+}
+
+/**
+ * 写公共提示词：timeline.global.prompt + 面板 textarea + global_prompt widget 一起更新。
+ * r2v 下面板的公共提示词随 bd-split 一起隐藏，但 syncFromWidgets() 仍会拿它的值
+ * 覆盖 timeline.global.prompt；不同步这三处，公共素材页的输入会在 commit /
+ * 时间线同步时被回滚成旧值。
+ */
+export function writeCommonPrompt(editor, value) {
+    const g = r2vEnsureGlobal(editor);
+    if (!g) return;
+    const text = value == null ? "" : String(value);
+    g.prompt = text;
+    if (editor.globalPrompt && editor.globalPrompt.value !== text) {
+        editor.globalPrompt.value = text;
+    }
+    if (editor.globalPromptWidget && editor.globalPromptWidget.value !== text) {
+        editor.globalPromptWidget.value = text;
+    }
 }
 
 /** 当前模块 + scope 对应的容器、列表、起始绝对编号 */
@@ -3503,7 +3528,11 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         if (runSelectOn && runEnabled) card.classList.add("run-on");
         if (runSelectOn && !runEnabled) card.classList.add("run-skipped");
         card.onclick = (e) => {
-            if (e.target.closest?.("button, input, textarea, select, .bd-batch-ref, .bd-batch-audio, .bd-batch-video, .bd-batch-src, .bd-r2v-section, .bd-r2v-play, .x, video, audio")) {
+            // 公共素材页不属于任何片段：点卡内任意位置都不该切回素材组页。
+            if (commonPage) return;
+            // 提示词实际是 contenteditable 的 token 编辑器（不是 textarea，也不在 textarea 内部），
+            // 必须一并排除，否则点提示词会冒泡成「选中该素材组」。
+            if (e.target.closest?.("button, input, textarea, select, .bd-batch-ref, .bd-batch-audio, .bd-batch-video, .bd-batch-src, .bd-r2v-section, .bd-r2v-play, .x, video, audio, [contenteditable], .bd-token-wrap")) {
                 return;
             }
             selectBatchGroup(editor, index);
@@ -3765,8 +3794,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         if (isR2v) refreshRefStat();
         promptEl.oninput = (e) => {
             if (commonPage) {
-                const g = r2vEnsureGlobal(editor);
-                if (g) g.prompt = e.target.value;
+                writeCommonPrompt(editor, e.target.value);
                 editor.scheduleTimelineSync();
                 refreshRefStat();
                 return;
@@ -3818,22 +3846,28 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             });
         }
 
-        const preview = document.createElement("div");
-        preview.className = "bd-batch-preview";
-        if (isR2v && isVideo && !commonPage) {
-            mountR2vPreviewWithTabs(
-                preview, seg, index, index === runningIdx, seg.previewFps || fps, editor,
-            );
-        } else {
-            renderPreview(preview, seg, index === runningIdx, isVideo, seg.previewFps || fps, editor, index);
-        }
-
         if (isR2v && r2vMain) {
             r2vMain.appendChild(prompts);
-            r2vMain.appendChild(preview);
         } else {
             card.appendChild(prompts);
-            card.appendChild(preview);
+        }
+        // 公共素材页不是可运行片段，没有产物预览：不挂载 preview，
+        // 否则会按 index 探测到某个素材组的视频缓存 / 回退成公共参考图静帧。
+        if (!commonPage) {
+            const preview = document.createElement("div");
+            preview.className = "bd-batch-preview";
+            if (isR2v && isVideo) {
+                mountR2vPreviewWithTabs(
+                    preview, seg, index, index === runningIdx, seg.previewFps || fps, editor,
+                );
+            } else {
+                renderPreview(preview, seg, index === runningIdx, isVideo, seg.previewFps || fps, editor, index);
+            }
+            if (isR2v && r2vMain) {
+                r2vMain.appendChild(preview);
+            } else {
+                card.appendChild(preview);
+            }
         }
 
         list.appendChild(card);

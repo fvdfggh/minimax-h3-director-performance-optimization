@@ -6900,7 +6900,11 @@ class MiniMaxH3DirectorOptEditor {
     syncFromWidgets() {
         this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {}, continuousReference: false };
         this.timeline.global.taskType = this.globalTask?.value || this.taskTypeWidget?.value || "";
-        this.timeline.global.prompt = this.globalPrompt?.value ?? this.globalPromptWidget?.value ?? "";
+        // r2v：公共提示词在素材组「公共素材页」里编辑，面板那个 textarea 已随
+        // bd-split 隐藏（值永远是旧的）。这里再读它会把公共页的输入回滚掉。
+        if (!this.usesR2vCommonPanel?.()) {
+            this.timeline.global.prompt = this.globalPrompt?.value ?? this.globalPromptWidget?.value ?? "";
+        }
         if (this.continuousRefCb) {
             this.timeline.global.continuousReference = !!this.continuousRefCb.checked;
         }

@@ -431,27 +431,11 @@ def _existing_keyframes(positive) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
-# Connected-frame (tail/r2v) taper noise
+# Connected-frame (tail/r2v) taper noise — DEPRECATED / removed
 # --------------------------------------------------------------------------
-# Inlined from ComfyUI-H3-Context-Noise ``MiniMaxH3ContextLatentTaperNoise`` so
-# Director does not need to import a package whose folder name contains a dash.
-# The semantics match: inject tapered gaussian noise into the pinned reference
-# frames (the "n frames from the previous segment used as a reference for the
-# next segment") instead of leaving them 100% frozen. ``position`` 0 is the
-# OLDEST pinned frame (furthest from the seam); position ``total-1`` touches the
-# seam with the new body, so it gets the smallest alpha.
-
-def _conn_alpha_for(position: int, total: int, alpha: float, alpha_end: float,
-                    ramp: int) -> float:
-    if not 0 <= position < total:
-        raise ValueError("position must be inside the pinned tail")
-    from_end = total - 1 - position
-    if from_end >= ramp:
-        return float(alpha)
-    return float(alpha) + (float(alpha_end) - float(alpha)) * (
-        ramp - from_end
-    ) / ramp
-
+# 锥形加噪（往参考帧 latent 注噪）已被「段间锥形重绘」(h3_latent_continue.py +
+# continuityRedraw) 取代：重绘直接作用在 body 前缀上，更可控且不产生花屏。
+# ``conn_noise`` 参数保留仅为兼容节点接线，现为 no-op。
 
 def apply_motion_context(
     positive,
@@ -470,13 +454,8 @@ def apply_motion_context(
     tail_context_latent: dict | None = None,
     tail_context_length: int | None = None,
     tail_context_offset: int = 0,
-    # Connected-frame (r2v/v2v/rv2v) taper noise — applied to the pinned
-    # reference frames' *latent content* before they are handed to H3 Motion
-    # Context as guidance. Off by default; when on, a fixed cone
-    # (alpha=0.45 / alpha_end=0.10 / ramp=3) injects the segment's own global
-    # sampling noise (same seed as this pass) into the connected reference
-    # frames. The reference frames are consumed by the guiding context and
-    # trimmed out of the final export, so the noise never reaches the output.
+    # DEPRECATED / no-op: 锥形加噪已移除，请改用段间「重绘幅度」(continuityRedraw)
+    # 的 body 前缀锥形重绘（见 h3_latent_continue.py）。保留参数仅为兼容节点接线。
     conn_noise: bool = False,
     seed: int = 0,
 ) -> tuple[Any, int, int]:
@@ -506,6 +485,12 @@ def apply_motion_context(
 
     ``audio_context_length``: official example uses 24 with video context 22.
     """
+    # conn_noise / seed 保留为兼容节点接线；锥形加噪已废弃（见 h3_latent_continue.py
+    # 的 body 前缀「锥形重绘」+ continuityRedraw）。conn_noise 开关现已由 batch_executor /
+    # second_sampling 在 plan.continuity_redraw 上落实（开=启用重绘，关=仅参考帧引导）。
+    if conn_noise:
+        log.debug("Director continuity: conn_noise 开启 = 启用段间锥形重绘（幅度见 continuityRedraw）。")
+    _ = seed  # retained for call-site compatibility
     import node_helpers
 
     ensure_layout_patch()
@@ -608,47 +593,17 @@ def apply_motion_context(
         pin_end_px = available
         prev_export_trim_tail = 0
 
-    # Connected-frame taper noise: the pinned reference frames ("the n frames
-    # from the previous segment used as a reference for the next segment") are
-    # normally replayed 100% frozen. When ``conn_noise`` is True we first
-    # *generate the previous segment's frames to completion* (they are supplied
-    # here as ``blocks``), then inject the *segment's own global sampling noise*
-    # (same seed as this pass — and on the second pass the second-pass seed)
-    # directly into each connected frame's latent content, with a tapered
-    # strength: the oldest connected frame gets the largest alpha (most noise),
-    # the one touching the seam gets the smallest (closest to a clean pin). The
-    # noise is burned into the reference latent *before* it is handed to H3
-    # Motion Context as guidance; the reference frames are consumed by the
-    # guiding context and trimmed out of the final export, so the noise never
-    # reaches the output. This mirrors H3-Context-Noise's cone, but driven by the
-    # segment's own global noise so it is reproducible and the second pass
-    # re-applies it with its own global noise automatically.
-    # Fixed default cone (validated in h3-context-noise, scales with segment
-    # length): high-noise flat alpha=0.45 over all but the last 3 frames, then a
-    # 3-frame linear ramp down to alpha_end=0.10 at the seam. e.g. 22 frames ->
-    # frames 0-18 = 0.45, 19-20 ramp, 21 = 0.10.
+    # Connected-frame taper noise (锥形加噪) 已废弃：参考帧保持 100% 冻结，
+    # 段间连续性改由 body 前缀「锥形重绘」(h3_latent_continue.py + continuityRedraw) 负责。
     total_conn = len(blocks)
-
-    def _noise_conn_blk(blk, pos_i):
-        # blk is a video latent Tensor (1, C, 1, H, W); H3 Motion Context
-        # replays it directly (no "samples" wrapper). Inject the segment's
-        # global noise onto the tensor content itself.
-        if not conn_noise:
-            return blk
-        from comfy.sample import prepare_noise
-        alpha = _conn_alpha_for(pos_i, total_conn, 0.45, 0.10, 3)
-        if alpha <= 0.0:
-            return blk
-        noise = prepare_noise(blk, seed).to(device=blk.device, dtype=blk.dtype)
-        return blk + noise * float(alpha)
 
     ctx_keyframes = [
         {
             "resolved_frame_index": 0,
             CTX_FRAME_KEY: int(p),
-            "latent": _noise_conn_blk(blk, pos_i),
+            "latent": blk,
         }
-        for pos_i, (p, blk) in enumerate(zip(offsets, blocks))
+        for p, blk in zip(offsets, blocks)
     ]
 
     # --- align-to-next: pin the next segment's opening into this tail ---
@@ -720,13 +675,6 @@ def apply_motion_context(
                     )
         except Exception as exc:  # never break a run for an optional alignment
             log.warning("Director continuity: align-to-next unavailable (%s).", exc)
-
-    if conn_noise and total_conn:
-        log.info(
-            "Director continuity: tapered global-noise injected into %d connected "
-            "reference frames (alpha=0.45, alpha_end=0.10, ramp=3, seed=%d).",
-            total_conn, int(seed),
-        )
 
     merged = list(ctx_keyframes)
     if keep_existing_keyframes:

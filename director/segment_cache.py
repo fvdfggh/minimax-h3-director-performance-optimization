@@ -894,6 +894,22 @@ def _fingerprint_defaults() -> dict[str, Any]:
 #: forcing a full re-render purely because the feature disappeared.
 _RETIRED_FINGERPRINT_KEYS = ("refine",)
 
+#: Keys the *writer* stamps into ``meta.json`` for the reader's benefit. They
+#: describe how the artefacts were stored, not what was rendered, so they are
+#: not part of the content identity and must not take part in the comparison.
+#:
+#: ``save_segment_cache`` appends ``ht_n`` (the ``frames_ht`` window length) to
+#: every meta it writes. ``_segment_identity_fingerprint`` never produces that
+#: key, so keeping it in ``stored`` made ``_normalize_stored_fingerprint(stored)
+#: == expected`` false for **every** cache on disk — every strict read
+#: (``allow_stale=False``) degraded to a miss and「分段导出」flagged each
+#: segment「stale」even immediately after a render. ``_fingerprint_diff_keys``
+#: reported it as the lone diff (``diff=['ht_n']``).
+#:
+#: Unlike :data:`_fingerprint_defaults` these keys cannot be fixed by filling in
+#: a default: the extra key is *present* in ``stored``, so it has to be dropped.
+_STORAGE_ONLY_FINGERPRINT_KEYS = ("ht_n",)
+
 
 def _normalize_stored_fingerprint(stored: dict) -> dict:
     patched = dict(stored)
@@ -901,11 +917,18 @@ def _normalize_stored_fingerprint(stored: dict) -> dict:
         patched.setdefault(key, default)
     for key in _RETIRED_FINGERPRINT_KEYS:
         patched.pop(key, None)
+    for key in _STORAGE_ONLY_FINGERPRINT_KEYS:
+        patched.pop(key, None)
     return patched
 
 
 def _fingerprint_compatible(stored: Any, expected: dict[str, Any]) -> bool:
-    """Compare fingerprints, treating keys added later as their default."""
+    """Compare fingerprints, treating keys added later as their default.
+
+    Storage-only keys (:data:`_STORAGE_ONLY_FINGERPRINT_KEYS`) are dropped from
+    ``stored`` first — both sides then describe content identity only, which is
+    what the fingerprint is for.
+    """
     if not isinstance(stored, dict):
         return stored == expected
     return _normalize_stored_fingerprint(stored) == expected

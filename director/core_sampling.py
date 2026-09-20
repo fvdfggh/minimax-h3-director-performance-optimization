@@ -9,6 +9,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from .h3_latent_continue import (
+    PREFIX_STEPS_KEY,
+    install_continue_prefix_remask,
+    uninstall_continue_prefix_remask,
+)
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core_sampling")
 
 PhaseCallback = Callable[[str, float], None]
@@ -146,8 +152,17 @@ def sample_single_stage(
     # Manual sigmas still go through KSampler.sample (same path as first pass /
     # schedule=steps). sample_custom skips SigmaShift wiring and can yield
     # undecodable AV latents on H3.
+    # 段间锥形重绘：在克隆模型上装逐步前缀 remask（仅当 latent 带 continue 前缀）。
+    # 静/动态 mask 协同：latent["noise_mask"] 是静态锥形，remask 按采样 sigma 自适应微调。
+    _remask_model = model_use
+    if latent.get(PREFIX_STEPS_KEY):
+        try:
+            _remask_model = install_continue_prefix_remask(model_use, latent, sigmas)
+        except Exception as exc:
+            log.warning("Director: 前缀 remask 安装失败 (%s)；使用静态 mask。", exc)
+
     samples = comfy.sample.sample(
-        model_use,
+        _remask_model,
         noise,
         steps,
         float(cfg),
@@ -163,6 +178,8 @@ def sample_single_stage(
         seed=int(seed),
         sigmas=sigma_list,
     )
+    if _remask_model is not model_use:
+        uninstall_continue_prefix_remask(_remask_model)
     out = latent.copy()
     out.pop("downscale_ratio_spacial", None)
     out.pop("downscale_ratio_temporal", None)

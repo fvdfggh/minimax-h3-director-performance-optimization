@@ -276,6 +276,7 @@ class DirectorPlan:
     second_sample: SegmentSecondSampleRequest | None = None
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
+    continuity_redraw: float = 0.10  # 段间锥形重绘幅度（seam_min_mask），0..0.95
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
     # Sampling knobs stamped at execute time (cache fingerprint).
     sample_seed: int = 0
@@ -920,12 +921,14 @@ def build_director_plan(
 
     from .segment_continuity import (
         resolve_continuity_settings,
+        resolve_continuity_redraw,
         resolve_segment_continuity_from_prev,
     )
 
     continuity_enabled, continuity_overlap = resolve_continuity_settings(
         timeline, segment_count=len(segments)
     )
+    continuity_redraw = resolve_continuity_redraw(timeline)
     for seg, (_start, _end, seg_data) in zip(segments, segment_ranges):
         seg.continuity_from_prev = resolve_segment_continuity_from_prev(
             seg_data if isinstance(seg_data, dict) else {},
@@ -959,6 +962,7 @@ def build_director_plan(
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
+        continuity_redraw=continuity_redraw,
         global_ref_audios=global_ref_audios,
     )
 

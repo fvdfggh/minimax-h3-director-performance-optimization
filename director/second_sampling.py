@@ -67,6 +67,7 @@ from .h3_motion_context import (
     DEFAULT_AUDIO_CONTEXT_FRAMES,
 )
 from .segment_continuity import is_continuity_active
+from .h3_latent_continue import apply_latent_continue
 from .segment_cache import (
     _expected_export_frames,
     load_segment_av_latent,
@@ -262,6 +263,9 @@ def run_second_sampling(
                        最后统一顺序解码、裁剪、落盘缓存，再做连续导出。
     VAE 解码放到最后一起做，避免每采样一段就解一次码、解码与采样交错占用 VRAM。
     """
+    # conn_noise 开关：开启 = 启用段间锥形重绘(continue 模式)，关闭 = 仅参考帧引导(guide)。
+    if not conn_noise:
+        plan.continuity_redraw = 0.0
     if not node_id:
         return {"error": "node_id required"}
 
@@ -657,35 +661,78 @@ def run_second_sampling(
                                     )
                                     if _next_ho:
                                         tail_context_offset = int(_next_ho.get("trim_frames", 0) or 0)
-                    try:
-                        positive_seam, trim_frames, _ = apply_motion_context(
-                            positive,
-                            new_av,
-                            vae=vae,
-                            context_length=int(context_n),
-                            context_latent=context_latent,
-                            context_frames=context_frames,
-                            context_audio=prev_audio,
-                            audio_vae=audio_vae,
-                            continue_audio=(
-                                str(audio_mode).lower() != "mute"
-                                and (context_latent is not None or prev_audio is not None)
-                            ),
-                            keep_existing_keyframes=(str(getattr(seg, "task_key", "")) == "fl2v"),
-                            context_end_frame=prev_end_frame,
-                            audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
-                            tail_context_latent=tail_context_latent,
-                            tail_context_length=tail_context_length,
-                            tail_context_offset=tail_context_offset,
-                            conn_noise=conn_noise,
-                            seed=int(second_seed),
-                        )
-                    except Exception as exc:
-                        # Do NOT swallow this and continue: without the pin the
-                        # sample's head is unguided noise that survives the later
-                        # trim and lands in the export.
-                        _fail(idx, "seam", str(exc))
-                        return
+                    positive_seam = positive
+                    trim_frames = 0
+                    if getattr(plan, "continuity_redraw", 0.0) > 0:
+                        # 锥形重绘 (continue 模式)：body 前缀被重绘，不钉参考帧；解码后同样
+                        # 要裁掉该前缀（= 上一段尾巴的重放），否则接缝重复 + 时长错位。
+                        try:
+                            # 第二个返回值是写入的前缀帧数 = trim_frames（guide 路径同义）。
+                            new_av, trim_frames, _c_trim2 = apply_latent_continue(
+                                new_av, prev_av=context_latent, prev_tail=context_frames,
+                                vae=vae, context_length=int(context_n),
+                                context_end_frame=prev_end_frame,
+                                pin_audio=(
+                                    str(audio_mode).lower() != "mute"
+                                    and (context_latent is not None or prev_audio is not None)
+                                ),
+                                context_audio=prev_audio, audio_vae=audio_vae,
+                                audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
+                                seam_min_mask=float(getattr(plan, "continuity_redraw", 0.10)),
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "Director 二采: seg #%d 锥形重绘失败，回退为参考帧引导 (%s)。",
+                                int(seg.index) + 1, exc,
+                            )
+                            try:
+                                positive_seam, trim_frames, _ = apply_motion_context(
+                                    positive, new_av, vae=vae,
+                                    context_length=int(context_n),
+                                    context_latent=context_latent,
+                                    context_frames=context_frames,
+                                    context_audio=prev_audio, audio_vae=audio_vae,
+                                    continue_audio=(
+                                        str(audio_mode).lower() != "mute"
+                                        and (context_latent is not None or prev_audio is not None)
+                                    ),
+                                    keep_existing_keyframes=(str(getattr(seg, "task_key", "")) == "fl2v"),
+                                    context_end_frame=prev_end_frame,
+                                    audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
+                                    tail_context_latent=tail_context_latent,
+                                    tail_context_length=tail_context_length,
+                                    tail_context_offset=tail_context_offset,
+                                    conn_noise=conn_noise, seed=int(second_seed),
+                                )
+                            except Exception as exc2:
+                                _fail(idx, "seam", str(exc2))
+                                return
+                    else:
+                        try:
+                            positive_seam, trim_frames, _ = apply_motion_context(
+                                positive, new_av, vae=vae,
+                                context_length=int(context_n),
+                                context_latent=context_latent,
+                                context_frames=context_frames,
+                                context_audio=prev_audio, audio_vae=audio_vae,
+                                continue_audio=(
+                                    str(audio_mode).lower() != "mute"
+                                    and (context_latent is not None or prev_audio is not None)
+                                ),
+                                keep_existing_keyframes=(str(getattr(seg, "task_key", "")) == "fl2v"),
+                                context_end_frame=prev_end_frame,
+                                audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
+                                tail_context_latent=tail_context_latent,
+                                tail_context_length=tail_context_length,
+                                tail_context_offset=tail_context_offset,
+                                conn_noise=conn_noise, seed=int(second_seed),
+                            )
+                        except Exception as exc:
+                            # Do NOT swallow this and continue: without the pin the
+                            # sample's head is unguided noise that survives the later
+                            # trim and lands in the export.
+                            _fail(idx, "seam", str(exc))
+                            return
 
         try:
             sampled = sample_single_stage(

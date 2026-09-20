@@ -54,6 +54,7 @@ from .h3_motion_context import (
     video_from_latent,
     TAIL_CONTEXT_FRAMES,
 )
+from .h3_latent_continue import apply_latent_continue
 from .segment_cache import (
     build_run_selection_clips, continuous_export_runs,
     load_next_segment_av_latent,
@@ -1055,6 +1056,9 @@ def execute_director_batch(
     This is the only execution path. Returns
     ``(combined, segment_outputs, segment_audios, report, export_frame_counts)``.
     """
+    # conn_noise 开关：开启 = 启用段间锥形重绘(continue 模式)，关闭 = 仅参考帧引导(guide)。
+    if not conn_noise:
+        plan.continuity_redraw = 0.0
     all_segments = plan.segments
     # Reconcile cache files with the current timeline first: a group deleted in
     # the middle takes its own files, everyone else keeps their own render.
@@ -1629,23 +1633,69 @@ def execute_director_batch(
                             tail_n,
                             tail_context_offset,
                         )
-            positive, trim_frames, prev_export_trim = apply_motion_context(
-                positive, latent, vae=vae,
-                context_length=context_n,
-                context_latent=prev_av,
-                context_frames=prev_tail,
-                context_audio=prev_audio,
-                audio_vae=audio_vae,
-                continue_audio=pin_audio,
-                keep_existing_keyframes=(seg.task_key == "fl2v"),
-                context_end_frame=prev_end_frame,
-                audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
-                tail_context_latent=tail_context_latent,
-                tail_context_offset=tail_context_offset,
-                tail_context_length=tail_context_length,
-                conn_noise=conn_noise,
-                seed=int(seed),
-            )
+            # 段间连续性：重绘幅度 > 0 时走「锥形重绘」(continue 模式)——body 前缀被重绘，
+            # 解码后同样要裁掉（前缀 = 上一段尾巴的重放，不是本段内容）；否则保留原参考帧
+            # 引导 (guide)。二者不叠加（上游语义）。
+            trim_frames = 0
+            prev_export_trim = 0
+            if plan.continuity_redraw > 0:
+                try:
+                    latent, _c_span, _c_trim = apply_latent_continue(
+                        latent, prev_av=prev_av, prev_tail=prev_tail, vae=vae,
+                        context_length=context_n or int(plan.continuity_overlap_frames),
+                        context_end_frame=prev_end_frame,
+                        pin_audio=pin_audio, context_audio=prev_audio, audio_vae=audio_vae,
+                        audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
+                        seam_min_mask=float(plan.continuity_redraw),
+                    )
+                    # 第二个返回值就是「写入的前缀帧数」，与 guide 路径 apply_motion_context
+                    # 的 trim_frames 同义：it 是解码后要丢掉的头部。写 0 会让上一段尾巴
+                    # （重绘后仍近似保留）留在成片开头 → 接缝画面重复 + 时长/相位错位，
+                    # 下一段的 prev_end_frame 也会短 span 帧。
+                    trim_frames = int(_c_span)
+                    prev_export_trim = int(_c_trim)
+                    reports.append(
+                        f"  Seg #{seg.index + 1}: 锥形重绘 ON — 前缀 {_c_span}f "
+                        f"(重绘幅度 {plan.continuity_redraw:.2f})"
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Director batch: seg #%d 锥形重绘失败，回退为参考帧引导 (%s)。",
+                        seg.index + 1, exc,
+                    )
+                    positive, trim_frames, prev_export_trim = apply_motion_context(
+                        positive, latent, vae=vae,
+                        context_length=context_n,
+                        context_latent=prev_av,
+                        context_frames=prev_tail,
+                        context_audio=prev_audio,
+                        audio_vae=audio_vae,
+                        continue_audio=pin_audio,
+                        keep_existing_keyframes=(seg.task_key == "fl2v"),
+                        context_end_frame=prev_end_frame,
+                        audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
+                        tail_context_latent=tail_context_latent,
+                        tail_context_offset=tail_context_offset,
+                        tail_context_length=tail_context_length,
+                        seed=int(seed),
+                    )
+            else:
+                positive, trim_frames, prev_export_trim = apply_motion_context(
+                    positive, latent, vae=vae,
+                    context_length=context_n,
+                    context_latent=prev_av,
+                    context_frames=prev_tail,
+                    context_audio=prev_audio,
+                    audio_vae=audio_vae,
+                    continue_audio=pin_audio,
+                    keep_existing_keyframes=(seg.task_key == "fl2v"),
+                    context_end_frame=prev_end_frame,
+                    audio_context_length=DEFAULT_AUDIO_CONTEXT_FRAMES,
+                    tail_context_latent=tail_context_latent,
+                    tail_context_offset=tail_context_offset,
+                    tail_context_length=tail_context_length,
+                    seed=int(seed),
+                )
             if prev_export_trim > 0:
                 pending_prev_trim[seg.index] = int(prev_export_trim)
             reports.append(

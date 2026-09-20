@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import Any
 
 import torch
@@ -80,6 +81,11 @@ CONTINUITY_OPENING_LUMA_EPSILON = 0.015
 # Concat: additive luma ONLY — body0/hold→pop RGB caused 拖影+一顿一顿 (00035).
 CONTINUITY_SEAM_ADD_LUMA_FRAMES = 12
 CONTINUITY_SEAM_ADD_LUMA_MAX = 0.10
+# Concat opening grade: low-freq appearance pull replaces the additive mean-luma
+# nudge in the seam pipeline (no 重影; pulls luma+chroma low-freq field instead).
+CONTINUITY_EXPORT_GRADE_FRAMES = 12
+CONTINUITY_EXPORT_GRADE_WEIGHT = 0.70
+CONTINUITY_EXPORT_GRADE_BLUR = 64
 CONTINUITY_BODY0_SEAM_WEIGHT = 0.0
 CONTINUITY_BODY1_SEAM_WEIGHT = 0.0
 CONTINUITY_MICRO_SEAM_MAD = 99.0
@@ -135,6 +141,30 @@ def resolve_continuity_settings(timeline: dict, *, segment_count: int) -> tuple[
         or DEFAULT_CONTINUITY_OVERLAP
     )
     return True, snap_context_frames(raw)
+
+
+# 段间「锥形重绘」幅度（=上游 seam_min_mask）。0 = 接缝硬锁（前缀几乎全重绘、仅
+# 接缝保留旧尾）；0.95 = 几乎不重绘。沿用上游成熟默认 0.10。
+DEFAULT_CONTINUITY_REDRAW = 0.10
+CONTINUITY_REDRAW_MIN = 0.0
+CONTINUITY_REDRAW_MAX = 0.95
+
+
+def resolve_continuity_redraw(timeline: dict) -> float:
+    """Read「重绘幅度」from timeline JSON (output.continuityRedraw). Default 0.10."""
+    output = (timeline or {}).get("output") or {}
+    raw = (
+        output.get("continuityRedraw")
+        or output.get("continuity_redraw")
+        or output.get("continueSeam")
+    )
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        n = DEFAULT_CONTINUITY_REDRAW
+    if not math.isfinite(n):
+        n = DEFAULT_CONTINUITY_REDRAW
+    return max(CONTINUITY_REDRAW_MIN, min(CONTINUITY_REDRAW_MAX, n))
 
 
 def resolve_segment_continuity_from_prev(
@@ -692,6 +722,135 @@ def _lowfreq_appearance_pull(
     return out.clamp(0.0, 1.0).to(dtype=src.dtype)
 
 
+def _grade_device() -> torch.device:
+    """Device for the bridge opening grade.
+
+    The grade is a per-pixel box blur plus an elementwise lerp. Neither couples
+    a pixel to any other frame or to its neighbours' ordering, so the GPU
+    reproduces the CPU numbers to float32 rounding while turning a multi-frame
+    pass from CPU into a single batched call. ``H3_DIRECTOR_GRADE_DEVICE=cpu``
+    forces the original CPU path (useful for A/B or when VRAM is tight).
+    """
+    forced = os.environ.get("H3_DIRECTOR_GRADE_DEVICE", "").strip().lower()
+    if forced in {"cpu", "off", "0"}:
+        return torch.device("cpu")
+    try:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+    except Exception:
+        pass
+    return torch.device("cpu")
+
+
+def _box_blur_bhwc(
+    frames: torch.Tensor, kernel: int, device: torch.device
+) -> torch.Tensor:
+    """Batch form of :func:`_blur_hwc` — same reflect pad, same box kernel.
+
+    ``avg_pool2d`` is independent per sample, so blurring N frames in one call
+    on one device is identical to blurring them one at a time.
+    """
+    k = int(kernel)
+    if k < 3:
+        return frames.detach().to(device=device, dtype=torch.float32)
+    if k % 2 == 0:
+        k += 1
+    x = frames.detach().to(device=device, dtype=torch.float32)
+    if x.dim() == 3:
+        x = x.unsqueeze(0)
+    t = x.permute(0, 3, 1, 2)
+    pad = k // 2
+    t = torch.nn.functional.pad(t, (pad, pad, pad, pad), mode="reflect")
+    t = torch.nn.functional.avg_pool2d(t, kernel_size=k, stride=1)
+    return t.permute(0, 2, 3, 1)
+
+
+def _lowfreq_appearance_pull_batched(
+    body: torch.Tensor,
+    guide: torch.Tensor,
+    weights: list,
+    blur: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Batched GPU form of the per-frame :func:`_lowfreq_appearance_pull`.
+
+    ``guide`` is constant across frames, so its blur is hoisted out of the loop
+    and the per-frame box blurs become one batched ``avg_pool2d``. Arithmetic-
+    neutral vs the frame-at-a-time version: same low-frequency residual, same
+    per-frame weight, same clamp.
+    """
+    cnt = len(weights)
+    src = body[:cnt]
+    g = guide
+    if g.dim() == 4:
+        g = g[0]
+    if tuple(g.shape[:2]) != tuple(src.shape[1:3]):
+        g = fit_canvas(g.unsqueeze(0), int(src.shape[2]), int(src.shape[1]))[0]
+    b_guide = _box_blur_bhwc(g.unsqueeze(0), blur, device)[0]
+    b_src = _box_blur_bhwc(src, blur, device)
+    w = torch.tensor(weights, device=device, dtype=torch.float32).view(-1, 1, 1, 1)
+    s = src.detach().to(device=device, dtype=torch.float32)
+    res = (s + w * (b_guide.unsqueeze(0) - b_src)).clamp_(0.0, 1.0)
+    out = body.clone()
+    out[:cnt] = res.to(device=body.device, dtype=body.dtype)
+    return out
+
+
+def match_export_opening_grade(
+    body: torch.Tensor,
+    guide: torch.Tensor,
+    *,
+    frames: int = CONTINUITY_EXPORT_GRADE_FRAMES,
+    weight0: float = CONTINUITY_EXPORT_GRADE_WEIGHT,
+    blur: int = CONTINUITY_EXPORT_GRADE_BLUR,
+) -> torch.Tensor:
+    """Match opening lighting/grade of a concatenated clip to the previous tail.
+
+    Low-frequency residual only (box blur) so pose edges are not copied (no 重影).
+    Replaces the additive mean-luma nudge in the concat seam pipeline: pulls the
+    blurred lighting+chroma field toward ``guide[-1]`` over the opening ``frames``,
+    weight decaying to 0 — stronger and frequency-faithful, no ghosting.
+    """
+    if (
+        body is None
+        or guide is None
+        or int(body.shape[0]) < 1
+        or int(guide.shape[0]) < 1
+        or int(frames) < 1
+        or float(weight0) <= 0
+        or int(blur) < 3
+    ):
+        return body
+    n = min(int(frames), int(body.shape[0]))
+    last = guide[-1]
+    weights: list = []
+    for i in range(n):
+        w = float(weight0) * (1.0 - float(i) / float(n))
+        if w <= 1e-4:
+            break
+        weights.append(w)
+    if not weights:
+        return body
+    out = body.clone()
+    try:
+        out = _lowfreq_appearance_pull_batched(out, last, weights, int(blur), _grade_device())
+    except Exception as exc:  # no CUDA / OOM / driver surprise
+        log.warning(
+            "Segment continuity: concat opening grade fell back to CPU (%s: %s)",
+            type(exc).__name__,
+            exc,
+        )
+        for i, w in enumerate(weights):
+            out[i] = _lowfreq_appearance_pull(out[i], last, weight=w, blur=int(blur))
+    log.info(
+        "Segment continuity: concat opening grade %df weight=%.2f blur=%d",
+        n,
+        float(weight0),
+        int(blur),
+    )
+    return out
+
+
 def _soften_body0_toward_prev(
     body: torch.Tensor,
     guide: torch.Tensor,
@@ -1229,12 +1388,31 @@ def prepend_continuity_source(
         # Bridge from end of settling (or prefix) so body opening is soft.
         guide = settling[-1] if settling is not None else prefix[-1]
         guide = guide.to(device=body.device, dtype=body.dtype)
-        for i in range(n_bridge):
-            u = float(i) / float(max(1, n_bridge - 1)) if n_bridge > 1 else 0.0
-            w = w0 * 0.5 * (1.0 + math.cos(math.pi * u))
-            if blur >= 3:
-                body[i] = _lowfreq_appearance_pull(body[i], guide, weight=w, blur=blur)
-            else:
+        if blur >= 3:
+            # Batched GPU grade: hoist the constant guide blur out of the loop
+            # and blur all bridge frames in one avg_pool2d call. Arithmetic-
+            # neutral vs the frame-at-a-time _lowfreq_appearance_pull path.
+            weights = []
+            for i in range(n_bridge):
+                u = float(i) / float(max(1, n_bridge - 1)) if n_bridge > 1 else 0.0
+                weights.append(w0 * 0.5 * (1.0 + math.cos(math.pi * u)))
+            try:
+                body = _lowfreq_appearance_pull_batched(body, guide, weights, blur, _grade_device())
+            except Exception as exc:  # no CUDA / OOM / driver surprise
+                log.warning(
+                    "Segment continuity: source body bridge grade fell back to CPU "
+                    "(%s: %s)",
+                    type(exc).__name__,
+                    exc,
+                )
+                for i in range(n_bridge):
+                    body[i] = _lowfreq_appearance_pull(
+                        body[i], guide, weight=weights[i], blur=blur
+                    )
+        else:
+            for i in range(n_bridge):
+                u = float(i) / float(max(1, n_bridge - 1)) if n_bridge > 1 else 0.0
+                w = w0 * 0.5 * (1.0 + math.cos(math.pi * u))
                 body[i] = (guide * w + body[i] * (1.0 - w)).clamp(0.0, 1.0).to(
                     dtype=body.dtype
                 )
@@ -1593,7 +1771,7 @@ def concat_continuous_chunks(
         if float(CONTINUITY_SPIKE_WEIGHT) > 0:
             body = _ease_opening_spikes(body)
         body = _soften_body0_toward_prev(body, left)
-        body = _additive_opening_luma(body, left)
+        body = match_export_opening_grade(body, left)
         left, body = _micro_seam_bridge(left, body)
         fixed[-1] = left
         fixed.append(body)
@@ -1641,7 +1819,7 @@ def _seam_fix_windows(
     if float(CONTINUITY_SPIKE_WEIGHT) > 0:
         body = _ease_opening_spikes(body)
     body = _soften_body0_toward_prev(body, left)
-    body = _additive_opening_luma(body, left)
+    body = match_export_opening_grade(body, left)
     return _micro_seam_bridge(left, body)
 
 

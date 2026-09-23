@@ -21,6 +21,7 @@ from typing import Any
 import torch
 
 from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge
+from ..lib.media_b64 import tensor_frame_to_jpeg_b64
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from . import cache_layout
 from . import segment_slots
@@ -38,7 +39,7 @@ from .audio_export import (
     AUDIO_MODE_GENERATE, AUDIO_MODE_MUTE, AUDIO_MODE_SOURCE,
     empty_audio_dict, resolve_audio_mode,
 )
-from .segment_runtime import frames_label, resolve_segment_raw_clip, segment_passthrough_chunk, tensor_frame_to_jpeg_b64
+from .segment_runtime import frames_label, resolve_segment_raw_clip, segment_passthrough_chunk
 from .plan import (
     DirectorPlan, prepare_segment_clip, resolve_ref_image_size,
     ref_audios_to_dict, ref_video_audios_to_dict, ref_videos_to_dict,
@@ -1715,7 +1716,8 @@ def execute_director_batch(
         def _report_step_preview(step: int, total_steps: int, x0) -> None:
             # Live frame for the batch-card preview slot.
             try:
-                from .tae_preview import pil_to_jpeg_b64, x0_to_preview_pil
+                from ..lib.media_b64 import pil_to_jpeg_b64
+                from .tae_preview import x0_to_preview_pil
                 pil = x0_to_preview_pil(x0, max_side=512)
                 if pil is None:
                     return

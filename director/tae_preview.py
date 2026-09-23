@@ -195,12 +195,3 @@ def x0_to_preview_pil(x0: Any, *, max_side: int = 512) -> Image.Image | None:
     if max_side and max_side > 0 and (pil.width > max_side or pil.height > max_side):
         pil = ImageOps.contain(pil, (max_side, max_side), Image.LANCZOS)
     return pil
-
-
-def pil_to_jpeg_b64(pil: Image.Image, *, quality: int = 80) -> str:
-    import base64
-    import io
-
-    buf = io.BytesIO()
-    pil.save(buf, format="JPEG", quality=int(quality))
-    return base64.b64encode(buf.getvalue()).decode("ascii")

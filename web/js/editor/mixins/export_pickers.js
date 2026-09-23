@@ -293,7 +293,7 @@ export const export_pickersMixin = {
         const panel = document.createElement("div");
         panel.className = "bd-modal bd-modal-wide";
         panel.innerHTML = `
-            <div class="bd-modal-title">二次采样（二采）</div>
+            <div class="bd-modal-title">${t("secondSample.title")}</div>
             <div class="bd-modal-body"></div>
             <div class="bd-modal-list"></div>
             <div class="bd-modal-actions"></div>`;
@@ -309,12 +309,11 @@ export const export_pickersMixin = {
 
         const hint = document.createElement("div");
         hint.className = "bd-seg-export-hint";
-        hint.textContent =
-            "勾选要二次采样的连续片段：按「引用上段」关系自动合并为「段」，标号 1/2/3…。勾选即二采整段连续区间（不可选子集）。";
+        hint.textContent = t("secondSample.hint");
         bodyEl.appendChild(hint);
         const legend = document.createElement("div");
         legend.className = "bd-seg-export-legend";
-        legend.innerHTML = `<span class="bd-seg-dot ready"></span>可二采 <span class="bd-seg-dot partial"></span>有缓存但不可二采 <span class="bd-seg-dot empty"></span>无缓存 <span class="bd-seg-dot ready bd-seg-dot-done"></span>已有二采结果`;
+        legend.innerHTML = `<span class="bd-seg-dot ready"></span>${t("secondSample.legendCan")} <span class="bd-seg-dot partial"></span>${t("secondSample.legendCachedNo")} <span class="bd-seg-dot empty"></span>${t("segmentExport.noCache")} <span class="bd-seg-dot ready bd-seg-dot-done"></span>${t("secondSample.legendDone")}`;
         bodyEl.appendChild(legend);
         listEl.classList.remove("hidden");
 
@@ -322,7 +321,9 @@ export const export_pickersMixin = {
         let countEl = null;
         const refreshCount = () => {
             const checked = checkboxes.filter((c) => c.checked && !c.disabled).length;
-            countEl.textContent = checked ? `已选 ${checked} 段` : "未选择片段";
+            countEl.textContent = checked
+                ? t("secondSample.selectedCount", { count: checked })
+                : t("secondSample.noneSelected");
             okBtn.disabled = checked === 0;
         };
 
@@ -334,7 +335,7 @@ export const export_pickersMixin = {
         const okBtn = document.createElement("button");
         okBtn.type = "button";
         okBtn.className = "bd-btn bd-btn-primary";
-        okBtn.textContent = "执行二采";
+        okBtn.textContent = t("secondSample.runBtn");
         okBtn.disabled = true;
         okBtn.onclick = () => {
             const indices = [];
@@ -347,7 +348,7 @@ export const export_pickersMixin = {
         const cancelBtn = document.createElement("button");
         cancelBtn.type = "button";
         cancelBtn.className = "bd-btn";
-        cancelBtn.textContent = "取消";
+        cancelBtn.textContent = t("dialog.cancel");
         cancelBtn.onclick = () => finish(null);
         actionsEl.appendChild(cancelBtn);
         actionsEl.appendChild(okBtn);
@@ -378,8 +379,8 @@ export const export_pickersMixin = {
             const runInfos = run.indices.map((i) => avail[i] || {});
             const sampleable = runInfos.length > 0 && runInfos.every((info) => info.canSecondSample);
             const rangeLabel = run.start === run.end
-                ? `片段 ${run.start + 1}`
-                : `片段 ${run.start + 1}–${run.end + 1}`;
+                ? t("secondSample.segmentOne", { n: run.start + 1 })
+                : t("secondSample.segmentRange", { a: run.start + 1, b: run.end + 1 });
             const row = document.createElement("div");
             row.className = "bd-modal-item bd-seg-export-item" + (sampleable ? "" : " disabled");
             const cb = document.createElement("input");
@@ -392,7 +393,7 @@ export const export_pickersMixin = {
             row.prepend(cb);
             const nameSpan = document.createElement("span");
             nameSpan.className = "bd-seg-export-name";
-            nameSpan.textContent = `段${runNo} · ${rangeLabel}`;
+            nameSpan.textContent = t("secondSample.runLabel", { no: runNo, range: rangeLabel });
             row.appendChild(nameSpan);
             const badgeSpan = document.createElement("span");
             badgeSpan.className = "bd-seg-export-badges";
@@ -429,12 +430,12 @@ export const export_pickersMixin = {
     // 优雅的缓存状态展示:每段一个点(悬停看明细),整段再加一行摘要,
     // 取代之前一长串文字胶囊。
     _secondSampleBadgeText(info) {
-        if (!info) return "无缓存";
+        if (!info) return t("segmentExport.noCache");
         const parts = [];
-        parts.push(info.hasLatent ? "首采 latent ✓" : "无首采 latent");
-        parts.push(info.hasTextCond ? "文本编码 ✓" : "无文本编码");
-        if (info.hasSecondLatent) parts.push("已有二采结果");
-        if (!info.canSecondSample) parts.push("→ 不可二采");
+        parts.push(info.hasLatent ? t("secondSample.badgeHasLatent") : t("secondSample.badgeNoLatent"));
+        parts.push(info.hasTextCond ? t("secondSample.badgeHasTextCond") : t("secondSample.badgeNoTextCond"));
+        if (info.hasSecondLatent) parts.push(t("secondSample.legendDone"));
+        if (!info.canSecondSample) parts.push(t("secondSample.badgeCannot"));
         return parts.join(" · ");
     },
     _secondSampleDots(infos) {
@@ -455,9 +456,11 @@ export const export_pickersMixin = {
         const ready = (infos || []).filter((i) => i && i.canSecondSample).length;
         const done = (infos || []).filter((i) => i && i.hasSecondLatent).length;
         let txt;
-        if (ready === total) txt = done === total ? `全部已二采 · ${total}` : `全部可二采 · ${total}`;
-        else if (ready === 0) txt = `全部缺缓存 · ${total}`;
-        else txt = `${ready}/${total} 可二采`;
+        if (ready === total) txt = done === total
+            ? t("secondSample.summaryAllDone", { total })
+            : t("secondSample.summaryAllReady", { total });
+        else if (ready === 0) txt = t("secondSample.summaryNoneReady", { total });
+        else txt = t("secondSample.summaryPartial", { ready, total });
         return `<span class="bd-seg-export-summary">${txt}</span>`;
     },
     resolveSecondSample(val) {
@@ -474,7 +477,7 @@ export const export_pickersMixin = {
                 const queued = app.queuePrompt();
                 const clearAfter = () => {
                     this._clearSecondSampleFlag();
-                    this._secondSampleToast("二次采样已加入队列");
+                    this._secondSampleToast(t("secondSample.queued"));
                 };
                 if (queued && typeof queued.then === "function") {
                     queued.then(clearAfter, clearAfter);
@@ -482,11 +485,11 @@ export const export_pickersMixin = {
                     setTimeout(clearAfter, 0);
                 }
             } else {
-                this._secondSampleToast("请点击运行以执行二次采样");
+                this._secondSampleToast(t("secondSample.needRun"));
             }
         } catch (e) {
             console.warn("[MiniMax] second sample queue prompt failed", e);
-            this._secondSampleToast("请点击运行以执行二次采样");
+            this._secondSampleToast(t("secondSample.needRun"));
         }
     },
     _clearSecondSampleFlag() {

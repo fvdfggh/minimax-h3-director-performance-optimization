@@ -4,17 +4,17 @@
 import { api } from "../../../scripts/api.js";
 import { coerceTimelineFps } from "../core/dims.js";
 import { healOversizedDirectorNode, hideWidget, parseTimeline, syncDirectorNodeSize } from "../core/editor_lifecycle.js";
-import { buildIdentityFrameMap, deletedSourceRanges, normalizeFrameMapEntry, sourceToLogicalFrame } from "../core/frame_map.js";
+import { deletedSourceRanges, normalizeFrameMapEntry } from "../core/frame_map.js";
 
-import { HIDDEN_WIDGETS, MIN_SEG, RULER_H, SEG_LABEL_H, THUMB_JPEG_Q, THUMB_MAX_W, THUMB_PREFETCH_BATCH, TRACK_H } from "../core/layout_spec.js";
+import { HIDDEN_WIDGETS, MIN_SEG, RULER_H, SEG_LABEL_H, THUMB_PREFETCH_BATCH, TRACK_H } from "../core/layout_spec.js";
 
 
-import { UPLOAD_SOFT_LIMIT, formatUploadError, uploadToInput, uploadToInputSmart } from "../core/upload.js";
+import { uploadToInput, uploadToInputSmart } from "../core/upload.js";
 import { clamp, relPath, uid } from "../core/utils.js";
 
 
 import { inputViewUrl, refViewUrl, videoRelativePath } from "./urls.js";
-import { openFl2vUpload, removeFl2vShot, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../minimax_fl2v.js";
+import { removeFl2vShot, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../minimax_fl2v.js";
 import { MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, defaultFrameCount, getDirectorMode, isVideoBatchTask, refAudioLabel, refImageLabel, refVideoLabel, resolveTaskKey, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../minimax_gen_timeline.js";
 import { onLocaleChange, t } from "../minimax_i18n.js";
 import { bindDomWidgetContentComputeSize, bindR2vMediaPlayback, deleteImageBatchGroup, ensureImageBatchTimeline, formatMediaDuration, isBatchDetailSolo, rebaseR2vGroupSlotsForCommon, syncBatchPanelFillHeight, updateR2vToolbarBtns, wireMediaDuration } from "../minimax_image_batch.js";
@@ -42,6 +42,8 @@ import { frame_map_ioMixin } from "./mixins/frame_map_io.js";
 import { task_uiMixin } from "./mixins/task_ui.js";
 import { output_uiMixin } from "./mixins/output_ui.js";
 import { widget_syncMixin } from "./mixins/widget_sync.js";
+import { stage_previewMixin } from "./mixins/stage_preview.js";
+import { thumbnailsMixin } from "./mixins/thumbnails.js";
 
 export class MiniMaxH3DirectorOptEditor {
     constructor(node, container, domWidget) {
@@ -411,697 +413,35 @@ export class MiniMaxH3DirectorOptEditor {
 
 
 
-    getVideoViewUrl() {
-        return this.getClipViewUrl(0);
-    }
 
-    getSourceFrameIndex(logicalFrame) {
-        return this.getFrameMapEntry(logicalFrame).frame;
-    }
 
-    _previewUrlEquals(videoEl, url) {
-        if (!videoEl || !url) return false;
-        const src = videoEl.currentSrc || videoEl.getAttribute("src") || videoEl.src || "";
-        if (!src) return false;
-        try {
-            return new URL(src, location.href).href === new URL(url, location.href).href;
-        } catch {
-            return src === url;
-        }
-    }
 
-    _assignPreviewSrc(videoEl, url) {
-        if (!videoEl || !url) return;
-        if (this._previewUrlEquals(videoEl, url)) return;
-        videoEl.pause();
-        videoEl.src = url;
-        videoEl.load();
-    }
 
-    _getPreviewVideoForClip(clipIndex) {
-        const url = this.getClipViewUrl(clipIndex);
-        if (!this._previewVideos) this._previewVideos = new Map();
-        if (clipIndex === 0 && this._previewVideo && !this._previewVideos.has(0)) {
-            this._previewVideos.set(0, this._previewVideo);
-        }
-        if (!url) return this._previewVideos.get(clipIndex) || (clipIndex === 0 ? this._previewVideo : null);
-        let v = this._previewVideos.get(clipIndex);
-        if (!v) {
-            v = document.createElement("video");
-            v.crossOrigin = "anonymous";
-            v.muted = true;
-            v.playsInline = true;
-            v.preload = "auto";
-            v.style.cssText = "position:fixed;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none";
-            document.body.appendChild(v);
-            this._previewVideos.set(clipIndex, v);
-        }
-        this._assignPreviewSrc(v, url);
-        return v;
-    }
 
-    async _ensurePreviewReady(clipIndex, timeoutMs = 8000) {
-        const v = this._getPreviewVideoForClip(clipIndex);
-        if (!v) return null;
-        if (v.videoWidth && v.readyState >= 2) return v;
-        await new Promise((resolve) => {
-            let done = false;
-            const finish = () => {
-                if (done) return;
-                done = true;
-                v.removeEventListener("loadeddata", finish);
-                v.removeEventListener("canplay", finish);
-                resolve();
-            };
-            v.addEventListener("loadeddata", finish);
-            v.addEventListener("canplay", finish);
-            if (v.videoWidth && v.readyState >= 2) finish();
-            else setTimeout(finish, timeoutMs);
-        });
-        return v.videoWidth ? v : null;
-    }
 
-    _restorePreviewVideos() {
-        const clips = this.getVideoClips();
-        if (!clips.length) return;
-        for (let i = 0; i < clips.length; i++) this._getPreviewVideoForClip(i);
-        this._previewVideo = this._previewVideos.get(0) || this._previewVideo;
-    }
 
-    _clearPreviewVideos(removeExtra = true) {
-        if (!this._previewVideos) return;
-        for (const [idx, v] of this._previewVideos.entries()) {
-            v.pause();
-            if (idx === 0 && v === this._previewVideo) {
-                v.removeAttribute("src");
-                v.load();
-                continue;
-            }
-            if (removeExtra) {
-                v.removeAttribute("src");
-                v.load();
-                v.remove();
-            }
-        }
-        const keep = this._previewVideo;
-        this._previewVideos.clear();
-        if (keep) this._previewVideos.set(0, keep);
-    }
 
-    async _seekPreviewVideo(timeSec, clipIndex = 0) {
-        this._seekChain = this._seekChain.then(() => new Promise((resolve) => {
-            const v = this._getPreviewVideoForClip(clipIndex);
-            if (!v || !(v.currentSrc || v.getAttribute("src"))) { resolve(); return; }
-            const target = Math.max(0, timeSec);
-            let settled = false;
-            const finish = () => {
-                if (settled) return;
-                settled = true;
-                v.removeEventListener("seeked", finish);
-                resolve();
-            };
-            v.addEventListener("seeked", finish);
-            try {
-                v.currentTime = target;
-            } catch {
-                finish();
-                return;
-            }
-            if (Math.abs(v.currentTime - target) < 0.02 && v.readyState >= 2) {
-                finish();
-            } else {
-                setTimeout(finish, 1500);
-            }
-        }));
-        return this._seekChain;
-    }
 
-    updateStageVisibility() {
-        if (!this.stageEl) return;
-        const show = this.hasVideo()
-            && !this.isImageBatch()
-            && !this.isGenMode()
-            && !this.isFl2vMode();
-        this.stageEl.classList.toggle("hidden", !show);
-        if (!show) {
-            if (this.stageVideo) {
-                this.stageVideo.pause();
-                this.stageVideo.classList.add("hidden");
-            }
-            this.stageImg?.classList.add("hidden");
-            this.stageEmpty?.classList.remove("hidden");
-            this.stageBadge?.classList.add("hidden");
-            this._stageClipIndex = -1;
-        } else {
-            this._syncStagePreview(this.currentFrame, { force: true });
-        }
-        this.updateDomWidgetHeight();
-        syncDirectorNodeSize(this.node, this);
-    }
 
-    _updateStageBadge(logicalFrame) {
-        if (!this.stageBadge) return;
-        const total = this.getTotalFrames();
-        const frame = clamp(logicalFrame | 0, 0, Math.max(0, total - 1));
-        const clips = this.getVideoClips();
-        const entry = this.getFrameMapEntry(frame);
-        const clipHint = clips.length > 1 ? t("canvas.clipHint", { n: entry.clip + 1 }) : "";
-        this.stageBadge.textContent = t("player.frameOf", { cur: frame + 1, total, clip: clipHint });
-        this.stageBadge.classList.remove("hidden");
-    }
 
-    _logicalRangeForClip(clipIndex) {
-        const map = this.getFrameMap();
-        let start = -1;
-        let end = -1;
-        for (let i = 0; i < map.length; i++) {
-            const e = normalizeFrameMapEntry(map[i]);
-            if (e.clip !== clipIndex) {
-                if (start >= 0) break;
-                continue;
-            }
-            if (start < 0) start = i;
-            end = i + 1;
-        }
-        if (start < 0) return { start: 0, end: this.getTotalFrames() };
-        return { start, end };
-    }
 
-    _logicalFromStageTime(clipIndex, timeSec) {
-        const fps = Math.max(0.001, this.getFrameRate());
-        const srcFrame = Math.max(0, Math.round(Number(timeSec) * fps));
-        const map = this.getFrameMap();
-        if (!map.length) {
-            const logical = sourceToLogicalFrame(srcFrame, this.timeline.video || {});
-            if (logical < 0) return -1; // source lands in a deleted gap
-            return clamp(logical, 0, Math.max(0, this.getTotalFrames() - 1));
-        }
-        let first = -1;
-        let best = -1;
-        for (let i = 0; i < map.length; i++) {
-            const e = normalizeFrameMapEntry(map[i]);
-            if (e.clip !== clipIndex) continue;
-            if (first < 0) first = i;
-            if (e.frame === srcFrame) return i;
-            if (e.frame <= srcFrame) best = i;
-        }
-        if (best >= 0) return best;
-        if (first >= 0) return first;
-        return 0;
-    }
 
-    /** Next logical index whose source frame is strictly after srcFrame (same clip). */
-    _nextLogicalAfterSourceFrame(clipIndex, srcFrame) {
-        const map = this.getFrameMap();
-        if (!map.length) {
-            // Sparse: walk forward until source maps to a kept logical frame.
-            const total = this.getTotalFrames();
-            const startLogical = sourceToLogicalFrame(srcFrame, this.timeline.video || {});
-            const from = startLogical < 0 ? 0 : startLogical;
-            for (let i = from; i < total; i++) {
-                if (this.logicalToSourceFrame(i) > srcFrame) return i;
-            }
-            return -1;
-        }
-        for (let i = 0; i < map.length; i++) {
-            const e = normalizeFrameMapEntry(map[i]);
-            if (e.clip === clipIndex && e.frame > srcFrame) return i;
-        }
-        return -1;
-    }
 
-    _syncStagePreview(logicalFrame, { force = false } = {}) {
-        if (!this.stageEl || this.stageEl.classList.contains("hidden")) return;
-        if (!this.hasVideo()) {
-            this.stageEmpty?.classList.remove("hidden");
-            this.stageVideo?.classList.add("hidden");
-            this.stageImg?.classList.add("hidden");
-            return;
-        }
 
-        // During native playback, do not seek every tick (that causes stutter).
-        // Only refresh the badge; playhead is driven from video.currentTime.
-        if (this.isPlaying && !force && !this._legacyFrames.length) {
-            this._updateStageBadge(logicalFrame);
-            return;
-        }
 
-        const frame = clamp(logicalFrame | 0, 0, Math.max(0, this.getTotalFrames() - 1));
-        const fps = Math.max(0.001, this.getFrameRate());
 
-        if (this._legacyFrames.length) {
-            const dataUrl = this._legacyFrames[frame];
-            if (this.stageVideo) {
-                this.stageVideo.pause();
-                this.stageVideo.classList.add("hidden");
-            }
-            if (this.stageImg && dataUrl) {
-                this.stageImg.src = dataUrl;
-                this.stageImg.classList.remove("hidden");
-                this.stageEmpty?.classList.add("hidden");
-            }
-            this._updateStageBadge(frame);
-            return;
-        }
 
-        const entry = this.getFrameMapEntry(frame);
-        const url = this.getClipViewUrl(entry.clip);
-        const v = this.stageVideo;
-        if (!v || !url) {
-            this.stageEmpty?.classList.remove("hidden");
-            return;
-        }
 
-        this.stageImg?.classList.add("hidden");
-        this.stageEmpty?.classList.add("hidden");
-        v.classList.remove("hidden");
 
-        let sameSrc = false;
-        if (v.src && url) {
-            try {
-                sameSrc = new URL(v.src, location.href).href === new URL(url, location.href).href;
-            } catch {
-                sameSrc = v.src === url;
-            }
-        }
-        // Must reload when the file changes even if clip index stays 0 (replace upload).
-        if (this._stageClipIndex !== entry.clip || !sameSrc) {
-            this._stageClipIndex = entry.clip;
-            if (!sameSrc) {
-                v.pause();
-                v.src = url;
-                v.load();
-            }
-        }
 
-        const target = Math.max(0, entry.frame / fps);
-        if (force || Math.abs(v.currentTime - target) > 0.035) {
-            try {
-                v.currentTime = target;
-            } catch {
-                /* ignore seek races while loading */
-            }
-        }
-        if (this.isPlaying && force) {
-            v.play().catch(() => {});
-        }
-        this._updateStageBadge(frame);
-    }
 
-    async _ensureStageReadyForFrame(logicalFrame) {
-        this._syncStagePreview(logicalFrame, { force: true });
-        const v = this.stageVideo;
-        if (!v || this._legacyFrames.length) return false;
-        if (v.readyState >= 2) return true;
-        await new Promise((resolve) => {
-            const done = () => {
-                v.removeEventListener("loadeddata", done);
-                v.removeEventListener("canplay", done);
-                resolve();
-            };
-            v.addEventListener("loadeddata", done);
-            v.addEventListener("canplay", done);
-            setTimeout(done, 800);
-        });
-        return true;
-    }
 
-    _queueThumbPrefetch(logicalFrame) {
-        if (this.isPlaying) return;
-        if (!this._usesSourceVideoThumbs()) return;
-        const cacheKey = this._frameThumbKey(logicalFrame);
-        if (this._thumbCache.has(cacheKey) || this._thumbPending.has(cacheKey)) return;
-        if (!this.hasVideo() && !this._legacyFrames.length) return;
-        this._thumbPending.add(cacheKey);
-        this._fetchThumb(logicalFrame).then((img) => {
-            this._thumbPending.delete(cacheKey);
-            if (!img) return;
-            if (this._frameThumbKey(logicalFrame) !== cacheKey) return;
-            this._thumbCache.set(cacheKey, img);
-            this.scheduleRender();
-        }).catch(() => {
-            this._thumbPending.delete(cacheKey);
-        });
-    }
 
-    /** Capture a still from an r2v reference video for the timeline strip. */
-    _queueR2vVideoThumb(cacheKey, videoFile, type = "input") {
-        if (!cacheKey || !videoFile) return;
-        if (this._thumbCache.has(cacheKey) || this._thumbPending.has(cacheKey)) return;
-        this._thumbPending.add(cacheKey);
-        const url = inputViewUrl(videoFile, type || "input");
-        const v = document.createElement("video");
-        v.muted = true;
-        v.playsInline = true;
-        v.preload = "auto";
-        v.crossOrigin = "anonymous";
-        let done = false;
-        const finish = (img) => {
-            if (done) return;
-            done = true;
-            this._thumbPending.delete(cacheKey);
-            try {
-                v.removeAttribute("src");
-                v.load();
-            } catch (_) { /* ignore */ }
-            if (img) this._thumbCache.set(cacheKey, img);
-            this.scheduleRender();
-        };
-        const capture = () => {
-            try {
-                if (!v.videoWidth) {
-                    finish(null);
-                    return;
-                }
-                if (!this._thumbCanvas) {
-                    this._thumbCanvas = document.createElement("canvas");
-                    this._thumbCtx = this._thumbCanvas.getContext("2d", { alpha: false });
-                }
-                const ratio = v.videoWidth > THUMB_MAX_W ? THUMB_MAX_W / v.videoWidth : 1;
-                const tw = Math.max(1, Math.round(v.videoWidth * ratio));
-                const th = Math.max(1, Math.round(v.videoHeight * ratio));
-                this._thumbCanvas.width = tw;
-                this._thumbCanvas.height = th;
-                this._thumbCtx.drawImage(v, 0, 0, tw, th);
-                const img = new Image();
-                img.onload = () => finish(img);
-                img.onerror = () => finish(null);
-                img.src = this._thumbCanvas.toDataURL("image/jpeg", THUMB_JPEG_Q);
-            } catch (_) {
-                finish(null);
-            }
-        };
-        v.addEventListener("loadeddata", () => {
-            const seekTo = Math.min(0.15, Math.max(0, (v.duration || 1) * 0.05));
-            const onSeeked = () => {
-                v.removeEventListener("seeked", onSeeked);
-                capture();
-            };
-            v.addEventListener("seeked", onSeeked);
-            try {
-                v.currentTime = seekTo;
-            } catch (_) {
-                capture();
-            }
-            setTimeout(() => {
-                if (!done) capture();
-            }, 700);
-        }, { once: true });
-        v.onerror = () => finish(null);
-        v.src = url;
-    }
 
-    async _fetchThumb(logicalFrame) {
-        if (this._legacyFrames.length) {
-            const dataUrl = this._legacyFrames[logicalFrame];
-            if (!dataUrl) return null;
-            return this._decodeThumb(dataUrl);
-        }
-        const entry = this.getFrameMapEntry(logicalFrame);
-        const v = await this._ensurePreviewReady(entry.clip);
-        if (!v?.videoWidth) return null;
-        const t = Math.max(0, entry.frame / this.getFrameRate());
-        await this._seekPreviewVideo(t, entry.clip);
-        if (!v.videoWidth) return null;
-        try {
-            const ratio = v.videoWidth > THUMB_MAX_W ? THUMB_MAX_W / v.videoWidth : 1;
-            const tw = Math.max(1, Math.round(v.videoWidth * ratio));
-            const th = Math.max(1, Math.round(v.videoHeight * ratio));
-            if (!this._thumbCanvas) {
-                this._thumbCanvas = document.createElement("canvas");
-                this._thumbCtx = this._thumbCanvas.getContext("2d", { alpha: false });
-            }
-            this._thumbCanvas.width = tw;
-            this._thumbCanvas.height = th;
-            this._thumbCtx.drawImage(v, 0, 0, tw, th);
-            const dataUrl = this._thumbCanvas.toDataURL("image/jpeg", THUMB_JPEG_Q);
-            return new Promise((resolve) => {
-                const img = new Image();
-                img.onload = () => resolve(img);
-                img.onerror = () => resolve(null);
-                img.src = dataUrl;
-            });
-        } catch {
-            return null;
-        }
-    }
 
-    _clearVideoState({ dropUnusedThumbs = false } = {}) {
-        const oldIds = dropUnusedThumbs ? this._liveVideoFileIdentities() : [];
-        this._legacyFrames = [];
-        this.timeline.videoClips = [];
-        this.timeline.videoWorkspace = null;
-        // Wipe video identity BEFORE visibility sync — otherwise hasVideo() stays
-        // true via the old videoFile and stage reloads the previous clip.
-        this.timeline.video = {
-            fileName: "",
-            videoFile: "",
-            subfolder: "",
-            type: "input",
-            frames: [],
-            frameMap: [],
-            deletedSourceRanges: [],
-            sourceFrameCount: 0,
-            width: 0,
-            height: 0,
-        };
-        this.timeline.totalFrames = 0;
-        this._storageWidth = 0;
-        this._storageHeight = 0;
-        this._clearPreviewVideos(true);
-        if (this._previewVideo) {
-            this._previewVideo.pause();
-            this._previewVideo.removeAttribute("src");
-            this._previewVideo.load();
-        }
-        if (this.stageVideo) {
-            this.stageVideo.pause();
-            this.stageVideo.removeAttribute("src");
-            this.stageVideo.load();
-            this.stageVideo.classList.add("hidden");
-        }
-        this.stageImg?.classList.add("hidden");
-        if (this.stageImg) this.stageImg.removeAttribute("src");
-        this.stageEmpty?.classList.remove("hidden");
-        this.stageBadge?.classList.add("hidden");
-        this._stageClipIndex = -1;
-        if (dropUnusedThumbs) this._dropThumbsIfUnused(oldIds);
-        this.updateStageVisibility();
-    }
 
-    _resetTimelineForReplaceUpload() {
-        const ids = this._liveVideoFileIdentities();
-        if (ids.length) this._thumbIdsPendingDrop = ids;
-        this._clearVideoState();
-        this.timeline.segments = [];
-        this.selectedIndex = 0;
-        this.currentFrame = 0;
-        if (this.seekBar) {
-            this.seekBar.value = 0;
-            this.seekBar.max = 0;
-        }
-    }
 
-    _setSingleSegment(totalFrames) {
-        const total = Math.max(0, totalFrames);
-        this.timeline.segments = total > 0
-            ? [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], referenceVideo: {} }]
-            : [];
-        this.selectedIndex = 0;
-        this.currentFrame = 0;
-        if (this.seekBar) {
-            this.seekBar.max = Math.max(0, total - 1);
-            this.seekBar.value = 0;
-        }
-    }
 
-    restoreVideoFromTimeline() {
-        const video = this.timeline.video || {};
-        this._storageWidth = video.storageWidth || 0;
-        this._storageHeight = video.storageHeight || 0;
-
-        const legacy = video.frames || [];
-        if (legacy.length && !video.videoFile) {
-            this._legacyFrames = legacy;
-            this.setFrameMap(buildIdentityFrameMap(legacy.length));
-            this.videoNameEl.textContent = t("videoName.legacy", {
-                name: video.fileName || t("videoName.defaultVideo"),
-                frames: legacy.length,
-            });
-            this._prefetchSegmentThumbs(0, legacy.length);
-            this.updateStageVisibility();
-            return;
-        }
-
-        if (!video.videoFile) {
-            this._clearVideoState();
-            return;
-        }
-
-        this._restorePreviewVideos();
-        const n = this.getTotalFrames();
-        this._prefetchSegmentThumbs(0, Math.min(n, THUMB_PREFETCH_BATCH * 4));
-        this.updateVideoNameLabel();
-        if (taskUsesReferenceVideo(this.getTaskKey()) && this.getReferenceVideoViewUrl(this.timeline.global?.referenceVideo)) {
-            this.renderRefVideoSlot();
-        }
-        this.updateStageVisibility();
-    }
-
-    _prefetchSegmentThumbs(from, to) {
-        if (!this._usesSourceVideoThumbs()) return;
-        for (let f = from; f < to; f++) this._queueThumbPrefetch(f);
-    }
-
-    _decodeThumb(dataUrl) {
-        return new Promise((resolve) => {
-            const img = new Image();
-            img.onload = () => {
-                if (!img.naturalWidth || img.naturalWidth <= THUMB_MAX_W) {
-                    resolve(img);
-                    return;
-                }
-                const ratio = THUMB_MAX_W / img.naturalWidth;
-                const w = THUMB_MAX_W;
-                const h = Math.max(1, Math.round(img.naturalHeight * ratio));
-                const c = document.createElement("canvas");
-                c.width = w;
-                c.height = h;
-                c.getContext("2d").drawImage(img, 0, 0, w, h);
-                const thumb = new Image();
-                thumb.onload = () => resolve(thumb);
-                thumb.onerror = () => resolve(img);
-                thumb.src = c.toDataURL("image/jpeg", THUMB_JPEG_Q);
-            };
-            img.onerror = () => resolve(null);
-            img.src = dataUrl.startsWith("data:") ? dataUrl : `data:image/jpeg;base64,${dataUrl}`;
-        });
-    }
-
-    pickVideoFile() {
-        if (this.isFl2vMode()) {
-            openFl2vUpload(this);
-            return;
-        }
-        const input = document.createElement("input");
-        input.type = "file"; input.accept = "video/*";
-        input.onchange = () => { if (input.files?.[0]) this.loadVideoFile(input.files[0]); };
-        input.click();
-    }
-
-    async pickExistingVideoFile() {
-        if (this.isFl2vMode()) return;
-        try {
-            const picked = await this.chooseVideoInput({
-                title: t("mediaPicker.pickVideo"),
-                currentValue: this.timeline.video?.videoFile || "",
-            });
-            if (!picked?.relPath) return;
-            const btn = this.root.querySelector('[data-a="video-existing"]');
-            if (btn) { btn.disabled = true; btn.textContent = t("common.analyzing"); }
-            this.videoNameEl.textContent = t("upload.inProgress", { name: picked.fileName || picked.relPath });
-            try {
-                await this._applyLoadedVideo({
-                    fileName: picked.fileName || picked.relPath,
-                    relPath: picked.relPath,
-                    subfolder: picked.subfolder || "",
-                    type: picked.type || "input",
-                    statusPrefix: t("parse.prefix"),
-                });
-            } catch (err) {
-                console.error("[MiniMax H3Director] video load failed:", err);
-                this.videoNameEl.textContent = t("upload.loadFailed", { err: formatUploadError(err) });
-                this.updateVideoNameLabel();
-                this._flushPendingThumbDrops();
-            } finally {
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = t("mediaPicker.pickExistingVideo");
-                }
-            }
-        } catch (err) {
-            console.error("[MiniMax H3Director] video pick failed:", err);
-        }
-    }
-
-    pickAppendVideoFile() {
-        if (!this.hasVideo()) {
-            this.showBdMessage(
-                t("dialog.appendVideoTitle"),
-                t("dialog.appendVideoNeedFirst")
-            );
-            return;
-        }
-        const input = document.createElement("input");
-        input.type = "file"; input.accept = "video/*";
-        input.onchange = () => { if (input.files?.[0]) this.appendVideoFile(input.files[0]); };
-        input.click();
-    }
-
-    async appendVideoFile(file) {
-        const btn = this.root.querySelector('[data-a="video-append"]');
-        if (btn) { btn.disabled = true; btn.textContent = t("common.uploading"); }
-        this.videoNameEl.textContent = t("upload.appendProgress", { name: file.name });
-        try {
-            const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
-                const pct = Math.round(frac * 100);
-                const mode = file.size > UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
-                this.videoNameEl.textContent = t("upload.appendChunk", {
-                    mode, name: file.name, cur, total, pct,
-                });
-            });
-            const relPath = videoRelativePath(uploaded);
-            await this._applyAppendedVideo({
-                fileName: file.name,
-                relPath,
-                subfolder: uploaded.subfolder || "",
-                type: uploaded.type || "input",
-                statusPrefix: t("parse.prefix"),
-            });
-        } catch (err) {
-            console.error("[MiniMax H3Director] append video failed:", err);
-            this.videoNameEl.textContent = t("upload.appendFailed", { err: formatUploadError(err) });
-            this.updateVideoNameLabel();
-        } finally {
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = t("toolbar.appendVideo");
-            }
-        }
-    }
-
-    async loadVideoFile(file) {
-        const btn = this.root.querySelector('[data-a="video"]');
-        if (btn) { btn.disabled = true; btn.textContent = t("common.uploading"); }
-        this.videoNameEl.textContent = t("upload.inProgress", { name: file.name });
-        try {
-            const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
-                const pct = Math.round(frac * 100);
-                const mode = file.size > UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
-                this.videoNameEl.textContent = t("upload.loadChunk", {
-                    mode, name: file.name, cur, total, pct,
-                });
-            });
-            const relPath = videoRelativePath(uploaded);
-            await this._applyLoadedVideo({
-                fileName: file.name,
-                relPath,
-                subfolder: uploaded.subfolder || "",
-                type: uploaded.type || "input",
-                statusPrefix: t("parse.prefix"),
-            });
-        } catch (err) {
-            console.error("[MiniMax H3Director] video load failed:", err);
-            this.videoNameEl.textContent = t("upload.loadFailed", { err: formatUploadError(err) });
-            this.updateVideoNameLabel();
-            this._flushPendingThumbDrops();
-        } finally {
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = t("toolbar.uploadVideo");
-            }
-        }
-    }
 
     _closeBdModal() {
         if (this._modalKeyHandler) {
@@ -3770,6 +3110,10 @@ export class MiniMaxH3DirectorOptEditor {
         this._playRaf = requestAnimationFrame(tick);
     }
 }
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, thumbnailsMixin);
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, stage_previewMixin);
 
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, widget_syncMixin);
 

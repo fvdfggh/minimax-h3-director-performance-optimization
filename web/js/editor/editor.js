@@ -2,16 +2,16 @@
 
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
-import { coerceTimelineFps, resolveOutputDimensions, snapDim } from "../dims.js";
-import { ensureDirectorNodeFitsContent, getDirectorUiHeight, healOversizedDirectorNode, hideWidget, parseTimeline, stopDomEvent, syncDirectorNodeSize } from "../editor_lifecycle.js";
-import { buildClipFrameMap, buildIdentityFrameMap, deletedSourceRanges, logicalToSourceFrame, normalizeFrameMapEntry, sourceToLogicalFrame } from "../frame_map.js";
-import { collectExternalGroupNodes, collectExternalGroupSpecs, getStableWorkflowId, imageRefFromPath } from "../graph_refs.js";
-import { CLIP_SEGMENT_COLORS, CONT_JOINT_H, CONT_JOINT_HIT_PAD, CONT_JOINT_W, CONT_JOINT_Y, DIRECTOR_MIN_WIDTH, HANDLE_PX, HIDDEN_WIDGETS, MAX_THUMBS_PER_SEGMENT, MIN_SEG, RULER_H, RUN_CHECK_HIT_PAD_X, RUN_CHECK_HIT_PAD_Y, RUN_CHECK_SIZE, SEG_LABEL_H, THUMB_JPEG_Q, THUMB_MAX_W, THUMB_PREFETCH_BATCH, TIMELINE_SYNC_DEBOUNCE_MS, TRACK_H, TRACK_Y } from "../layout_spec.js";
-import { formatProbeFps, formatRulerTime, pickRulerMajorStepSec, pickRulerMinorStepSec } from "../ruler.js";
-import { DEFAULT_CONTINUITY_FRAMES, cloneJson, isContinuityEligible, isContinuityEnabled, normalizeAudioMode, normalizeOutputContinuity, sanitizeBatchWorkspace, sanitizeSegmentForPayload, sanitizeVideoWorkspace, snapContinuityFrames, stripTimelineContinuityRootFields, stripTimelineEphemeralFields } from "../timeline_sanitize.js";
-import { UPLOAD_SOFT_LIMIT, formatUploadError, uploadToInput, uploadToInputSmart } from "../upload.js";
-import { clamp, relPath, uid, viewUrl } from "../utils.js";
-import { applyDirectorWidgetLabels } from "../widget_labels.js";
+import { coerceTimelineFps, resolveOutputDimensions, snapDim } from "../core/dims.js";
+import { ensureDirectorNodeFitsContent, getDirectorUiHeight, healOversizedDirectorNode, hideWidget, parseTimeline, stopDomEvent, syncDirectorNodeSize } from "../core/editor_lifecycle.js";
+import { buildClipFrameMap, buildIdentityFrameMap, deletedSourceRanges, logicalToSourceFrame, normalizeFrameMapEntry, sourceToLogicalFrame } from "../core/frame_map.js";
+import { collectExternalGroupNodes, collectExternalGroupSpecs, getStableWorkflowId, imageRefFromPath } from "../core/graph_refs.js";
+import { CLIP_SEGMENT_COLORS, CONT_JOINT_H, CONT_JOINT_HIT_PAD, CONT_JOINT_W, CONT_JOINT_Y, DIRECTOR_MIN_WIDTH, HANDLE_PX, HIDDEN_WIDGETS, MAX_THUMBS_PER_SEGMENT, MIN_SEG, RULER_H, RUN_CHECK_HIT_PAD_X, RUN_CHECK_HIT_PAD_Y, RUN_CHECK_SIZE, SEG_LABEL_H, THUMB_JPEG_Q, THUMB_MAX_W, THUMB_PREFETCH_BATCH, TIMELINE_SYNC_DEBOUNCE_MS, TRACK_H, TRACK_Y } from "../core/layout_spec.js";
+import { formatProbeFps, formatRulerTime, pickRulerMajorStepSec, pickRulerMinorStepSec } from "../core/ruler.js";
+import { DEFAULT_CONTINUITY_FRAMES, cloneJson, isContinuityEligible, isContinuityEnabled, normalizeAudioMode, normalizeOutputContinuity, sanitizeBatchWorkspace, sanitizeSegmentForPayload, sanitizeVideoWorkspace, snapContinuityFrames, stripTimelineContinuityRootFields, stripTimelineEphemeralFields } from "../core/timeline_sanitize.js";
+import { UPLOAD_SOFT_LIMIT, formatUploadError, uploadToInput, uploadToInputSmart } from "../core/upload.js";
+import { clamp, relPath, uid, viewUrl } from "../core/utils.js";
+import { applyDirectorWidgetLabels } from "../core/widget_labels.js";
 import { STYLES } from "./styles.js";
 import { inputViewUrl, refViewUrl, videoRelativePath } from "./urls.js";
 import { bindFl2vEvents, buildFl2vPayloadFields, drawFl2vSegmentThumbnails, ensureFl2vTimeline, fl2vStartIndices, flushFl2vPromptDraft, getFl2vSampleFrames, getFl2vTotalDurationSec, getFl2vVisualFrames, mountFl2vPanel, newFl2vShot, normalizeFl2vSegments, openFl2vUpload, removeFl2vShot, rippleFl2vRightEdge, setFl2vToolbar, syncFl2vDurationSecAfterDrag, syncFl2vFromShots, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../minimax_fl2v.js";

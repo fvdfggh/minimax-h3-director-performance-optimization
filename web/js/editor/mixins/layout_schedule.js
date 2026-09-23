@@ -120,5 +120,16 @@ export const layout_scheduleMixin = {
             if (this.isPlaying) this.renderTimelineOnly();
             else this.render();
         });
+    },
+    onNodeResize() {
+        if (this.isPlaying || this._pauseSettling) return;
+        // Growable layout (no computeSize) → LiteGraph puts free space into computedHeight.
+        bindDomWidgetContentComputeSize(this);
+        this._resetLayoutStyles();
+        this.applyZoomWidth();
+        syncBatchPanelFillHeight(this);
+        // Re-fill after LiteGraph finishes arranging widgets for the new node size.
+        requestAnimationFrame(() => syncBatchPanelFillHeight(this));
+        this.scheduleSettleRender();
     }
 };

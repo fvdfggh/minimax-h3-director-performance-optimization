@@ -17,7 +17,7 @@ import { HIDDEN_WIDGETS, RULER_H, SEG_LABEL_H, TRACK_H } from "../core/layout_sp
 
 import { getDirectorMode, resolveTaskKey } from "../minimax_gen_timeline.js";
 import { onLocaleChange, t } from "../minimax_i18n.js";
-import { bindDomWidgetContentComputeSize, ensureImageBatchTimeline, syncBatchPanelFillHeight } from "../minimax_image_batch.js";
+import { ensureImageBatchTimeline } from "../minimax_image_batch.js";
 
 
 
@@ -471,17 +471,6 @@ export class MiniMaxH3DirectorOptEditor {
 
 
 
-    onNodeResize() {
-        if (this.isPlaying || this._pauseSettling) return;
-        // Growable layout (no computeSize) → LiteGraph puts free space into computedHeight.
-        bindDomWidgetContentComputeSize(this);
-        this._resetLayoutStyles();
-        this.applyZoomWidth();
-        syncBatchPanelFillHeight(this);
-        // Re-fill after LiteGraph finishes arranging widgets for the new node size.
-        requestAnimationFrame(() => syncBatchPanelFillHeight(this));
-        this.scheduleSettleRender();
-    }
 
 
 
@@ -591,6 +580,8 @@ export class MiniMaxH3DirectorOptEditor {
 
 }
 
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, layout_scheduleMixin);
+
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, ref_slotsMixin);
 
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, live_playbackMixin);
@@ -629,7 +620,6 @@ Object.assign(MiniMaxH3DirectorOptEditor.prototype, modesMixin);
 
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, fieldsMixin);
 
-Object.assign(MiniMaxH3DirectorOptEditor.prototype, layout_scheduleMixin);
 
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, external_groupsMixin);
 

@@ -117,42 +117,10 @@ import { coerceTimelineFps, resolveOutputDimensions, snapDim, snapScaledDim } fr
 import { RULER_MAJOR_SEC, formatProbeFps, formatRulerTime, pickRulerMajorStepSec, pickRulerMinorStepSec } from "./core/ruler.js";
 import { DEFAULT_CONTINUITY_FRAMES, cloneJson, isContinuityEligible, isContinuityEnabled, normalizeAudioMode, normalizeOutputContinuity, sanitizeBatchGlobalCommon, sanitizeBatchWorkspace, sanitizeRefAudio, sanitizeRefImage, sanitizeRefVideo, sanitizeSegmentForPayload, sanitizeVideoMedia, sanitizeVideoWorkspace, snapContinuityFrames, stripTimelineContinuityRootFields, stripTimelineEphemeralFields } from "./core/timeline_sanitize.js";
 import { DIRECTOR_GROUP_LABEL_KEYS, applyDirectorWidgetLabels } from "./core/widget_labels.js";
+import { bindDirectorDomWidgetSizing, destroyDirectorEditor, ensureDirectorDomWidgetWidth, ensureDirectorNodeFitsContent, finalizeDirectorWidgetOrder, getDirectorUiHeight, healOversizedDirectorNode, hideWidget, hookTaskTypeWidget, installDirectorClipboardGuard, parseTimeline, patchDirectorDomWidgetLayout, pruneDirectorDomWidgets, scheduleDirectorLayoutSettle, stopDomEvent, syncDirectorNodeSize } from "./core/editor_lifecycle.js";
+import { CONT_JOINT_H, CONT_JOINT_HIT_PAD, CONT_JOINT_W, CONT_JOINT_Y, DIRECTOR_DOM_WIDGET_NAME, DIRECTOR_MIN_WIDTH, DIRECTOR_UI_RUNAWAY_ABS_H, DIRECTOR_UI_RUNAWAY_EXTRA_H, HANDLE_PX, HIDDEN_WIDGETS, LIVE_SAMPLE_PREVIEW_H, MAX_THUMBS_PER_SEGMENT, MIN_SEG, RULER_H, RUN_CHECK_HIT_PAD_X, RUN_CHECK_HIT_PAD_Y, RUN_CHECK_SIZE, SEG_LABEL_H, STAGE_PREVIEW_H, THUMB_JPEG_Q, THUMB_MAX_W, THUMB_PREFETCH_BATCH, TIMELINE_SYNC_DEBOUNCE_MS, TRACK_H, TRACK_Y } from "./core/layout_spec.js";
 import { EXTERNAL_COMBINE_NODE_TYPE, EXTERNAL_GROUP_NODE_TYPES, collectExternalGroupNodes, collectExternalGroupSpecs, findDirectorNode, getStableWorkflowId, imageRefFromPath, notifyDirectorsSyncExternalGroups } from "./core/graph_refs.js";
 import { clearAllDirectorRunStatus, isDirectorNodeDef, isMiniMaxH3DirectorOptNode, normalizeDirectorOutputs, sanitizeAllWidgetValues, sanitizeWidgetValues } from "./core/node_migrations.js";
-
-const RULER_H = 24;
-const SEG_LABEL_H = 20;
-const TRACK_H = 160;
-const TRACK_Y = RULER_H + SEG_LABEL_H;
-const STAGE_PREVIEW_H = 220;
-const LIVE_SAMPLE_PREVIEW_H = 320;
-const MIN_SEG = 4;
-const HANDLE_PX = 14;
-/** Canvas-drawn run-select checkbox (not a DOM control). */
-const RUN_CHECK_SIZE = 14;
-const RUN_CHECK_HIT_PAD_X = 8;
-const RUN_CHECK_HIT_PAD_Y = 4;
-/** Canvas-drawn 段间引导 marker at a clip joint (only when master switch is on). */
-const CONT_JOINT_W = 22;
-const CONT_JOINT_H = 16;
-const CONT_JOINT_Y = TRACK_Y + 4;
-const CONT_JOINT_HIT_PAD = 5;
-const THUMB_MAX_W = 168;
-const THUMB_JPEG_Q = 0.55;
-const TIMELINE_SYNC_DEBOUNCE_MS = 500;
-const MAX_THUMBS_PER_SEGMENT = 20;
-const THUMB_PREFETCH_BATCH = 6;
-const DIRECTOR_MIN_WIDTH = 900;
-
-
-/** Segment continuity is opt-in; default off unless explicitly enabled in output. */
-
-// 仅隐藏内部序列化字段 timeline_data，以及和时间轴面板重复的只读/派生参数。
-// cfg 与“声音”控制按用户要求可见（不在此列表）。bd_grp_* 分组头本就不在此列表，永远可见。
-const HIDDEN_WIDGETS = [
-    "timeline_data", "total_frames", "width", "height", "ref_max_size",
-    "task_type", "global_prompt", "frame_rate",
-];
 
 
 function drawGroupHeader(ctx, node, widget_width, y, H, label) {
@@ -677,206 +645,27 @@ const refViewUrl = viewUrl;
 
 const CLIP_SEGMENT_COLORS = ["rgba(255,200,50,0.9)", "rgba(102,170,255,0.9)", "rgba(79,255,143,0.9)", "rgba(255,102,170,0.9)"];
 
-function getDirectorUiHeight(editor) {
-    if (editor?.getDirectorMode?.() === "prompt_batch") {
-        const batchH = getImageBatchUiHeight(editor);
-        // t2v / i2v / r2v show the main timeline track above batch cards.
-        if (editor?.usesBatchTimeline?.()) {
-            const track = editor?.canvasHeight || RULER_H + SEG_LABEL_H + TRACK_H;
-            // toolbar + track + batch panel (batchH already includes list max-height cap)
-            return batchH + track + 100;
-        }
-        return batchH + 100;
-    }
-    if (editor?.getDirectorMode?.() === "fl2v") {
-        let h = getFl2vUiHeight(editor) + 110;
-        if (editor?.needsLiveSamplePanel?.()) h += LIVE_SAMPLE_PREVIEW_H + 12;
-        return h;
-    }
-    let h = (editor?.canvasHeight || RULER_H + SEG_LABEL_H + TRACK_H) + 370 + 52;
-    if (
-        editor?.hasVideo?.()
-        && !editor?.isImageBatch?.()
-        && !editor?.isGenMode?.()
-        && !editor?.isFl2vMode?.()
-    ) {
-        h += STAGE_PREVIEW_H + 10;
-    }
-    // v2v live preview sits beside the prompt (no extra vertical stack).
-    if (editor?.needsLiveSamplePanel?.() && !editor?.usesV2vPromptStyle?.()) {
-        h += LIVE_SAMPLE_PREVIEW_H + 12;
-    }
-    return h;
-}
 
-function hookTaskTypeWidget(node) {
-    const tw = node.widgets?.find((w) => w.name === "task_type");
-    if (!tw || tw._berniniTaskHooked) return;
-    tw._berniniTaskHooked = true;
-    const orig = tw.callback;
-    tw.callback = function (...args) {
-        const r = orig?.apply(this, args);
-        const ed = node._minimaxEditor;
-        if (ed?.globalTask) ed.globalTask.value = tw.value;
-        ed?.onTaskTypeChanged?.(tw.value);
-        return r;
-    };
-}
 
 /**
  * Only snap *runaway* heights (old infinite-growth corruption).
  * ideal+1200 was far too aggressive: r2v users routinely drag taller, and init heal
  * wiped the workflow-saved size on every Comfy restart (#7 regression).
  */
-const DIRECTOR_UI_RUNAWAY_ABS_H = 12000;
-const DIRECTOR_UI_RUNAWAY_EXTRA_H = 8000;
 
-function healOversizedDirectorNode(node, editor) {
-    if (!node?.size || !node.computeSize) return false;
-    bindDomWidgetContentComputeSize(editor);
-    const ideal = node.computeSize()?.[1];
-    if (ideal == null) return false;
-    const curH = node.size[1] || 0;
-    const runaway = curH > DIRECTOR_UI_RUNAWAY_ABS_H
-        || curH > ideal + DIRECTOR_UI_RUNAWAY_EXTRA_H;
-    if (!runaway) return false;
-    // Keep a modest stretch so heal does not feel like a hard snap to content min.
-    const safeH = Math.max(ideal, Math.min(curH, ideal + DIRECTOR_UI_MAX_EXTRA_H));
-    node.setSize([node.size[0], safeH]);
-    node.setDirtyCanvas?.(true, true);
-    return true;
-}
 
 /** After graph load / init: re-fill once LiteGraph assigns computedHeight from saved size. */
-function scheduleDirectorLayoutSettle(editor) {
-    if (!editor) return;
-    const run = () => {
-        if (editor.isPlaying || editor._pauseSettling) return;
-        bindDomWidgetContentComputeSize(editor);
-        // On reload the node kept its old saved size; grow it to the (possibly larger)
-        // content min so the batch list actually gets the taller slot. Only grows,
-        // never shrinks a user-enlarged node — safe for workflow size preservation.
-        // 所有模式通用：i2v/t2v 多组提示词/参考图也需要把节点撑高到内容高度，
-        // 否则列表被 .bd-wrap overflow:hidden 裁掉（之前只给 r2v 兜底，导致非 r2v 显示异常）。
-        ensureDirectorNodeFitsContent(editor?.node, editor);
-        syncBatchPanelFillHeight(editor, { settle: true });
-    };
-    requestAnimationFrame(() => {
-        run();
-        requestAnimationFrame(run);
-        setTimeout(run, 80);
-        setTimeout(run, 250);
-    });
-}
 
 /** Grow once when content min increases (mode switch); never shrink; never use stretch. */
-function ensureDirectorNodeFitsContent(node, editor) {
-    if (!node?.size || !node.computeSize) return false;
-    // Progress ticks must not grow the node — status text / rebuild noise used to ratchet.
-    if (editor?.runStatusEl?.classList?.contains("active")) return false;
-    bindDomWidgetContentComputeSize(editor);
-    const ideal = node.computeSize()?.[1];
-    if (ideal == null) return false;
-    if ((node.size[1] || 0) >= ideal - 2) return false;
-    const maxOk = ideal + DIRECTOR_UI_MAX_EXTRA_H;
-    node.setSize([node.size[0], Math.min(ideal, maxOk)]);
-    node.setDirtyCanvas?.(true, true);
-    return true;
-}
 
-function syncDirectorNodeSize(node, editor) {
-    if (editor?.isPlaying) return;
-    // Update CSS/content min. Avoid stretch bookkeeping + Vue RO feedback loops.
-    // User-dragged height is preserved by never shrinking (#7).
-    editor?.updateDomWidgetHeight?.();
-}
 
-function ensureDirectorDomWidgetWidth(node) {
-    const widget = node?._minimaxDomWidget;
-    const fullW = node?.size?.[0];
-    if (!widget || !fullW) return false;
-    if (widget.width === fullW) return false;
-    widget.width = fullW;
-    return true;
-}
 
-function moveDirectorDomWidgetToEnd(node) {
-    const widget = node?._minimaxDomWidget;
-    if (!widget || !node?.widgets?.length) return;
-    const idx = node.widgets.indexOf(widget);
-    if (idx === -1 || idx === node.widgets.length - 1) return;
-    node.widgets.splice(idx, 1);
-    node.widgets.push(widget);
-}
 
-function finalizeDirectorWidgetOrder(node) {
-    moveDirectorDomWidgetToEnd(node);
-}
 
-const DIRECTOR_DOM_WIDGET_NAME = "minimax_director_ui";
-
-function listDirectorDomWidgets(node) {
-    return (node?.widgets || []).filter((w) => w?.name === DIRECTOR_DOM_WIDGET_NAME);
-}
 
 /** Keep one Director DOM widget; drop extras left by double-wrapped onNodeCreated. */
-function pruneDirectorDomWidgets(node) {
-    if (!node) return null;
-    const dups = listDirectorDomWidgets(node);
-    const keep = dups.find((w) => w.element?.querySelector?.(":scope > .bd-wrap"))
-        || dups.find((w) => w === node._minimaxDomWidget && w?.element)
-        || dups.find((w) => w?.element)
-        || node._minimaxDomWidget
-        || null;
-    if (dups.length > 1) {
-        for (const w of dups) {
-            if (w === keep) continue;
-            const idx = node.widgets.indexOf(w);
-            if (idx !== -1) node.widgets.splice(idx, 1);
-            try { w.onRemove?.(); } catch { /* ignore */ }
-            w.element?.remove?.();
-        }
-    }
-    if (keep) node._minimaxDomWidget = keep;
-    return keep || null;
-}
 
-function destroyDirectorEditor(node) {
-    const ed = node?._minimaxEditor;
-    if (!ed) {
-        if (node) node._minimaxEditor = null;
-        return;
-    }
-    try { ed.destroy(); } catch { /* ignore */ }
-    if (node._minimaxEditor === ed) node._minimaxEditor = null;
-    if (ed.domWidget?._minimaxEditor === ed) ed.domWidget._minimaxEditor = null;
-}
 
-function bindDirectorDomWidgetSizing(node, widget, getEditor) {
-    const editor = getEditor?.();
-    const minHeight = () => getDirectorUiHeight(getEditor?.());
-    // Do not set computeSize — fixed-size widgets never receive resize free space.
-    try {
-        delete widget.computeSize;
-    } catch {
-        widget.computeSize = undefined;
-    }
-    widget.computeLayoutSize = () => ({
-        minHeight: minHeight(),
-        maxHeight: undefined,
-        minWidth: DIRECTOR_MIN_WIDTH,
-    });
-    if (widget.options) {
-        widget.options.getMinHeight = minHeight;
-        delete widget.options.getMaxHeight;
-    }
-    const el = widget.element;
-    if (el) {
-        el.style.minHeight = `${minHeight()}px`;
-        el.style.setProperty("--comfy-widget-min-height", `${minHeight()}px`);
-    }
-    if (editor) bindDomWidgetContentComputeSize(editor);
-}
 
 function initDirectorEditor(node) {
     // Must not share Bernini's `_directorDomWidget` — their loadedGraphNode mounts on that key.
@@ -922,295 +711,17 @@ function initDirectorEditor(node) {
     }
 }
 
-function patchDirectorDomWidgetLayout() {
-    const canvas = app.canvas;
-    if (!canvas || canvas._minimaxDirectorLayoutPatch) return;
-    canvas._minimaxDirectorLayoutPatch = true;
-    const prev = canvas.onDrawForeground;
-    canvas.onDrawForeground = function (ctx) {
-        const graph = app.graph ?? canvas.graph;
-        for (const node of graph?._nodes ?? graph?.nodes ?? []) {
-            if (node._minimaxEditor?.isPlaying) continue;
-            ensureDirectorDomWidgetWidth(node);
-        }
-        return prev?.apply(this, arguments);
-    };
-}
 
-function stopDomEvent(e) {
-    e.stopPropagation();
-}
 
 /** True when focus/target is a Director text field (incl. contenteditable token editor). */
-function directorEditableFromEventTarget(target) {
-    let node = target;
-    if (node?.nodeType === Node.TEXT_NODE) node = node.parentElement;
-    if (!node?.closest) return null;
-    if (!node.closest(".mmx-host")) return null;
-    return node.closest("input, textarea, select, [contenteditable='true'], .bd-token-editor");
-}
 
 /**
  * Stop Comfy graph copy/paste from firing while typing in Director prompts.
  * contenteditable chips are invisible to Comfy's INPUT/TEXTAREA checks, so Ctrl+V
  * otherwise pastes the last copied nodes beside the Director.
  */
-function installDirectorClipboardGuard() {
-    if (typeof document === "undefined" || document.__mmxDirectorClipboardGuard) return;
-    document.__mmxDirectorClipboardGuard = true;
 
-    const blockBubbleToCanvas = (e) => {
-        if (!directorEditableFromEventTarget(e.target)
-            && !directorEditableFromEventTarget(document.activeElement)) {
-            return;
-        }
-        e.stopImmediatePropagation();
-    };
 
-    for (const type of ["paste", "copy", "cut"]) {
-        document.addEventListener(type, blockBubbleToCanvas, true);
-    }
-    document.addEventListener("keydown", (e) => {
-        if (!(e.ctrlKey || e.metaKey)) return;
-        const k = e.key?.toLowerCase?.();
-        if (k !== "v" && k !== "c" && k !== "x") return;
-        blockBubbleToCanvas(e);
-    }, true);
-
-    const patchPaste = () => {
-        const canvas = app.canvas;
-        if (!canvas) return;
-        const wrap = (obj, key) => {
-            if (!obj || typeof obj[key] !== "function" || obj[key].__mmxDirectorPatched) return;
-            const orig = obj[key];
-            const patched = function (...args) {
-                if (directorEditableFromEventTarget(document.activeElement)) return null;
-                return orig.apply(this, args);
-            };
-            patched.__mmxDirectorPatched = true;
-            obj[key] = patched;
-        };
-        wrap(canvas, "pasteFromClipboard");
-        wrap(canvas.constructor?.prototype, "pasteFromClipboard");
-        // Some frontend builds expose paste on the LiteGraph canvas proto only.
-        try {
-            const LG = globalThis.LiteGraph?.LGraphCanvas?.prototype;
-            wrap(LG, "pasteFromClipboard");
-        } catch {
-            /* ignore */
-        }
-    };
-    patchPaste();
-    queueMicrotask(patchPaste);
-    setTimeout(patchPaste, 0);
-    setTimeout(patchPaste, 500);
-}
-
-function hideWidget(w) {
-    if (!w) return;
-    // Group headers in HIDDEN_WIDGETS duplicate timeline panel sections — hide them too.
-    if (w._bdGroupHeader && !HIDDEN_WIDGETS.includes(w.name)) return;
-    w.hidden = true;
-    if (!w.options) w.options = {};
-    w.options.hidden = true;
-    w.computeSize = () => [0, 0];
-    if (w.element) w.element.style.display = "none";
-}
-
-function parseTimeline(raw, totalFrames, fps) {
-    const total = totalFrames || 124;
-    const base = {
-        version: 4,
-        editMode: "global",
-        totalFrames: total,
-        frameRate: coerceTimelineFps(fps || 24),
-        video: {
-            fileName: "",
-            videoFile: "",
-            subfolder: "",
-            type: "input",
-            frames: [],
-            frameMap: [],
-        },
-        videoClips: [],
-        global: {
-            taskType: "", prompt: "", refs: [], refAudios: [], referenceVideo: {},
-            continuousReference: false, commonEnabled: false, commonCollapsed: false,
-        },
-        output: {
-            // v2v/rv2v default: scale by long edge (preserve aspect). Fixed = center-crop.
-            mode: "long_edge",
-            aspectRatio: DEFAULT_ASPECT_RATIO,
-            megapixels: DEFAULT_MEGAPIXELS,
-            multiple: MINIMAX_CANVAS_MULTIPLE,
-            longEdge: 848, width: 848, height: 480,
-            maxExportFrames: 0, exportMode: "all",
-            audioMode: "generate",
-            refImageSize: "match",
-            continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
-        },
-        runSelectEnabled: false,
-        runSelection: [],
-        liveTaePreview: true,
-        batchDetailMode: "solo",
-        segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], refAudios: [], referenceVideo: {} }],
-    };
-    if (!raw?.trim()) return base;
-    try {
-        const data = JSON.parse(raw);
-        data.version = data.version || 4;
-        data.editMode = data.editMode || "global";
-        data.frameRate = coerceTimelineFps(data.frameRate ?? fps ?? 24);
-        data.video = data.video || { fileName: "", frames: [] };
-        if (!data.video.videoFile && data.video.fileName) {
-            data.video.videoFile = data.video.fileName;
-        }
-        data.video.type = data.video.type || "input";
-        data.video.subfolder = data.video.subfolder || "";
-        data.video.frames = data.video.frames || [];
-        data.global = data.global || {
-            refs: [], refAudios: [], referenceVideo: {},
-            continuousReference: false, commonEnabled: false, commonCollapsed: false,
-        };
-        data.global.refs = data.global.refs || [];
-        data.global.refAudios = data.global.refAudios || data.global.ref_audios || [];
-        data.global.refVideos = data.global.refVideos || data.global.ref_videos || [];
-        if (Array.isArray(data.global.refVideos)) {
-            data.global.refVideos = data.global.refVideos.map(sanitizeRefVideo);
-        }
-        data.global.referenceVideo = data.global.referenceVideo || data.global.reference_video || {};
-        data.global.continuousReference = !!data.global.continuousReference || !!data.global.continuous_reference;
-        // r2v shared params: default OFF unless explicitly enabled.
-        data.global.commonEnabled = !!(
-            data.global.commonEnabled ?? data.global.common_enabled
-        );
-        // UI fold only — does not affect runtime merge when commonEnabled is true.
-        data.global.commonCollapsed = !!(
-            data.global.commonCollapsed ?? data.global.common_collapsed
-        );
-        const legacyRef = data.referenceVideo || data.reference_video;
-        if (legacyRef && (legacyRef.videoFile || legacyRef.fileName)
-            && !(data.global.referenceVideo.videoFile || data.global.referenceVideo.fileName)) {
-            data.global.referenceVideo = { ...legacyRef };
-        }
-        delete data.referenceVideo;
-        delete data.reference_video;
-        data.output = normalizeOutputContinuity({
-            mode: data.output?.mode || "long_edge",
-            // Keep ResolutionSelector fields across reload (were previously dropped → always 16:9).
-            aspectRatio: data.output?.aspectRatio != null
-                ? normalizeAspectRatioLabel(data.output.aspectRatio)
-                : undefined,
-            megapixels: data.output?.megapixels ?? data.output?.megaPixels ?? undefined,
-            multiple: data.output?.multiple ?? MINIMAX_CANVAS_MULTIPLE,
-            longEdge: data.output?.longEdge ?? data.output?.long_edge ?? data.refMaxSize ?? 848,
-            width: data.output?.width ?? data.width ?? 864,
-            height: data.output?.height ?? data.height ?? 480,
-            maxExportFrames: data.output?.maxExportFrames ?? data.output?.max_export_frames ?? 0,
-            exportMode: data.output?.exportMode ?? data.output?.export_mode ?? "all",
-            audioMode: normalizeAudioMode(data.output?.audioMode ?? data.output?.audio_mode),
-            refImageSize: normalizeRefImageSize(data.output?.refImageSize ?? data.output?.ref_image_size),
-            continuityEnabled: data.output?.continuityEnabled ?? data.output?.continuity_enabled,
-            continuityOverlapFrames: data.output?.continuityOverlapFrames ?? data.output?.continuity_overlap_frames,
-        });
-        // Infer aspectRatio from saved width/height when older payloads omitted the label.
-        if (!data.output.aspectRatio && data.output.width > 0 && data.output.height > 0) {
-            const rw = data.output.width;
-            const rh = data.output.height;
-            const match = RESOLUTION_ASPECTS.find(([, aw, ah]) => Math.abs(rw / rh - aw / ah) < 0.02);
-            data.output.aspectRatio = match ? match[0] : CUSTOM_ASPECT_RATIO;
-        }
-        if (!data.output.aspectRatio) data.output.aspectRatio = DEFAULT_ASPECT_RATIO;
-        if (data.output.megapixels == null) data.output.megapixels = DEFAULT_MEGAPIXELS;
-        stripTimelineContinuityRootFields(data);
-        stripTimelineEphemeralFields(data);
-        const legacyFrames = data.video.frames?.length || 0;
-        if (!data.video.frameMap?.length) {
-            const n = data.totalFrames || data.video.sourceFrameCount || legacyFrames || total;
-            data.totalFrames = n;
-            data.video.sourceFrameCount = data.video.sourceFrameCount || n;
-            data.video.deletedSourceRanges = data.video.deletedSourceRanges || [];
-            data.video.frameMap = [];
-        }
-        if (!data.segments?.length) {
-            const n = data.totalFrames || data.video.sourceFrameCount || legacyFrames || total;
-            data.segments = [{ id: uid(), start: 0, length: Math.max(MIN_SEG, n), prompt: "", taskType: "", refs: [], refAudios: [], referenceVideo: {} }];
-        }
-        for (const seg of data.segments) {
-            if (!seg.id) seg.id = uid();
-            if (seg.length == null && seg.end != null) seg.length = seg.end - seg.start;
-            if (seg.frameCount == null && seg.length != null) seg.frameCount = seg.length;
-            seg.refs = seg.refs || [];
-            seg.refAudios = seg.refAudios || seg.ref_audios || [];
-            seg.referenceVideo = seg.referenceVideo || seg.reference_video || {};
-            seg.genImage = seg.genImage || { imageFile: seg.imageFile || "" };
-            seg.negativePrompt = seg.negativePrompt ?? "";
-        }
-        data.gen = data.gen || { defaultFrameCount: 124 };
-        if (data.global) {
-            data.global.genImage = data.global.genImage || { imageFile: data.global.imageFile || "" };
-        }
-        data.runSelectEnabled = !!data.runSelectEnabled;
-        data.runSelection = Array.isArray(data.runSelection) ? data.runSelection.map((i) => parseInt(i, 10)).filter((i) => i >= 0) : [];
-        // Default on when missing (older timelines).
-        data.liveTaePreview = data.liveTaePreview !== false && data.live_tae_preview !== false;
-        const detailMode = data.batchDetailMode ?? data.batch_detail_mode;
-        data.batchDetailMode = detailMode === "all" ? "all" : "solo";
-        if (data.timelineMode === "fl2v" || resolveTaskKey(data.global?.taskType || "") === "fl2v") {
-            data.timelineMode = "fl2v";
-            data.editMode = "segment";
-            data.keyframes = Array.isArray(data.keyframes) ? data.keyframes : [];
-            data.shots = Array.isArray(data.shots) ? data.shots : [];
-            const stored = parseInt(data.totalFrames, 10);
-            const farthest = Math.max(
-                0,
-                ...(data.segments || []).map((s) => (parseInt(s.start, 10) || 0) + (parseInt(s.length ?? s.frameCount, 10) || 0)),
-                ...(data.keyframes || []).map((k) => (parseInt(k.start, 10) || 0) + (parseInt(k.frameCount ?? k.length, 10) || 0)),
-            );
-            data.totalFrames = (Number.isFinite(stored) && stored > 0)
-                ? stored
-                : Math.max(farthest, total, 240);
-            return data;
-        }
-        if (data.timelineMode === "image_batch" || data.timelineMode === "prompt_batch") {
-            data.timelineMode = "prompt_batch";
-            data.editMode = "segment";
-            data.totalFrames = sumFrameCounts(data.segments) || data.totalFrames || total;
-            return data;
-        }
-        if (data.timelineMode === "gen_blank" || data.timelineMode === "gen_image") {
-            const gkey = resolveTaskKey(data.global?.taskType || "");
-            if (isPromptBatchTask(gkey)) {
-                data.timelineMode = "prompt_batch";
-                data.editMode = "segment";
-            }
-            data.totalFrames = sumFrameCounts(data.segments) || data.totalFrames || total;
-            return data;
-        }
-        if (!data.videoClips?.length && data.video?.videoFile) {
-            data.videoClips = [{
-                id: data.video.id || uid(),
-                fileName: data.video.fileName || "",
-                videoFile: data.video.videoFile || data.video.fileName || "",
-                subfolder: data.video.subfolder || "",
-                type: data.video.type || "input",
-                width: data.video.width || 0,
-                height: data.video.height || 0,
-                duration: data.video.duration || 0,
-                nativeFps: data.video.nativeFps || data.video.native_fps || 0,
-                nativeFrameCount: data.video.nativeFrameCount || data.video.native_frame_count || 0,
-                sourceFrameCount: data.video.sourceFrameCount || data.video.frameMap?.length || 0,
-                storageWidth: data.video.storageWidth,
-                storageHeight: data.video.storageHeight,
-            }];
-        }
-        data.videoClips = data.videoClips || [];
-        data.totalFrames = data.totalFrames || data.video.sourceFrameCount || data.video.frameMap?.length || total;
-        return data;
-    } catch {
-        return base;
-    }
-}
 
 /* ===========================================================================
  * Cross-module contract for MiniMaxH3DirectorOptEditor  (cross-module ABI)

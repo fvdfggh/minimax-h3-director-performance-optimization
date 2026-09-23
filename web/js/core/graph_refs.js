@@ -17,7 +17,10 @@
  * Extracted verbatim from minimax_timeline.js — no behaviour change.
  */
 
-import { app } from "../../scripts/app.js";
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import { isMiniMaxH3DirectorOptNode } from "./node_migrations.js";
+import { viewUrl } from "./utils.js";
 
 export function getStableWorkflowId() {
     try {

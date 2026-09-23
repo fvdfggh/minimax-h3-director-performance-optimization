@@ -9,7 +9,7 @@
  * Extracted verbatim from minimax_timeline.js — no behaviour change.
  */
 
-import { app } from "../../scripts/app.js";
+import { app } from "../../../scripts/app.js";
 
 export function clearAllDirectorRunStatus() {
     const graph = app.graph ?? app.canvas?.graph;

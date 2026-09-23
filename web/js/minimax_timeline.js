@@ -1660,6 +1660,80 @@ function parseTimeline(raw, totalFrames, fps) {
     }
 }
 
+/* ===========================================================================
+ * Cross-module contract for MiniMaxH3DirectorOptEditor  (cross-module ABI)
+ * ===========================================================================
+ * Other feature modules address this class as ``editor.<member>`` — 74 distinct
+ * members across ~540 call sites (minimax_image_batch, minimax_fl2v,
+ * minimax_pack, minimax_prompt_mentions; counts below are those call sites).
+ *
+ * Nothing enforces this list, and most call sites use ``editor.x?.()``, so a
+ * refactor that turns any of these into a module-level function, a lookup table
+ * or a static silently disables the caller. Treat the names below as the ABI:
+ * they must exist on the *instance*.
+ *
+ * See also "Feature-owned state" at the bottom: fields the feature modules
+ * attach to the editor at runtime. The editor itself reads three of them, so the
+ * editor half-depends on minimax_image_batch having run.
+ *
+ * Adding a member here without adding it to the list is how the implicit ABI
+ * grew in the first place; keep both sides in step.
+ * ---------------------------------------------------------------------------
+ * State shared with every feature module
+ *   timeline (166)            the timeline model — mutate via commit(), never in place
+ *   selectedIndex (46)        selected group index
+ *   root (29)                 the editor's root element
+ *   node (4)                  the ComfyUI node this editor is bound to
+ *   domWidget (5) / widget (1) / container (2) / mainBody (1)
+ *
+ * Render + sync entry points (the only supported way to publish a change)
+ *   commit (28)               settle a change, then render + sync
+ *   scheduleRender (15)       request a render on the next frame
+ *   scheduleTimelineSync (6) / flushTimelineSync (3) / _schedulePromptRender (1)
+ *   renderImageBatchGroups (25) / updateDomWidgetHeight (15)
+ *   updateVideoNameLabel (12) / updateOutputPreview (3) / getDirectorUiMinHeight (2)
+ *
+ * Widget handles (live ComfyUI widgets the feature modules read/write)
+ *   taskTypeWidget (10) / totalFramesWidget (6) / frameRateWidget (3)
+ *   globalPromptWidget (3) / widthWidget (1) / heightWidget (1) / equalCountInput (11)
+ *
+ * Data + task queries
+ *   getTaskKey (12) / getFrameRate (1) / getWorkflowId (1)
+ *   buildTimelinePayload (1) / applyImportedTimeline (1)
+ *
+ * Mode predicates (read-only; feature modules branch on these)
+ *   hasExternalI2vGroups (7) / hasExternalR2vGroups (7) / isR2vCommonEnabled (6)
+ *   isRunSelectEnabled (4) / usesBatchTimeline (2) / supportsRunSelect (2)
+ *   isSegmentRunEnabled (2) / isFl2vMode (2) / isImageBatch (1) / isR2vBatch (1)
+ *   fl2vUi (10) / _previewSegments (3)
+ *
+ * Run selection / segment actions
+ *   toggleRunSelectMode (1) / setRunSelectionAll (1) / toggleSegmentRun (2)
+ *   _runHighlightSeg (1) / onSegmentRemoved (1) / canAlignToNext (1)
+ *   _syncR2vCardSelection (2) / writeExternalGroupPrompt (1)
+ *
+ * Media pickers (open a file dialog and feed the editor)
+ *   chooseImageInput (3) / chooseImageInputs (1) / chooseVideoInput (1)
+ *   chooseVideoInputs (1) / chooseAudioInput (1) / chooseAudioInputs (1)
+ *   btnVideo (3) / btnVideoExisting (3) / btnVideoAppend (3)
+ *
+ * Dialogs
+ *   showBdDialog (2) / showBdMessage (2)
+ *
+ * Feature-owned DOM handles the editor keeps as a meeting point
+ *   batchPanel (4) / batchList (7) / batchPicker (5) / batchI2vNotice (5)
+ *   batchHint (2) / batchAddBtn (1) / globalPrompt (4) / segPrompt (1)
+ *   _thumbCache (2) / _thumbPending (4) / _fl2vUploadMode (4)
+ *   _fl2vSlotKind (4) / _fl2vSlotShotIndex (4)
+ *
+ * Feature-owned state (attached at runtime — NOT declared in this class)
+ *   minimax_image_batch: r2vPage, r2vScope, r2vFold, r2vAssetPage,
+ *     r2vPreviewTab, _batchRefDragMoved,
+ *     batchRunSelectBtn / batchRunSelectAllWrap / batchRunSelectAllCb
+ *     — the last three are read back by this class (the dependency is mutual)
+ *   minimax_fl2v: _fl2vDragFrom, _fl2vShotDrag, _fl2vShotDragFrom, _fl2vSlotDrag,
+ *     _fl2vIgnoreSlotClickUntil, _fl2vPromptSegIndex
+ * =========================================================================== */
 class MiniMaxH3DirectorOptEditor {
     constructor(node, container, domWidget) {
         this.node = node;

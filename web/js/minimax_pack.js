@@ -8,11 +8,11 @@ import here unchanged.
 import { api } from "../../scripts/api.js";
 import { t } from "./minimax_i18n.js";
 import { safeUploadFilename } from "./minimax_gen_timeline.js";
+import { UPLOAD_SOFT_LIMIT, uploadChunked } from "./core/upload.js";
 
 const PACK_WIDGET_NAMES = ["steps", "sampler", "scheduler", "cfg", "shift_video", "shift_audio", "seed"];
 const LARGE_PACK_BYTES = 500 * 1024 * 1024;
-const CHUNK_SOFT_LIMIT = 95 * 1024 * 1024;
-const CHUNK_SIZE = 8 * 1024 * 1024;
+
 
 export function collectPackWidgets(editor) {
     const widgets = {};
@@ -93,30 +93,10 @@ function pickZipFile() {
     });
 }
 
-async function uploadZipChunked(file, onProgress) {
+function uploadZipChunked(file, onProgress) {
     const filename = safeUploadFilename(file?.name || "pack.mmxpack.zip", "application/zip");
     const zipName = filename.toLowerCase().endsWith(".zip") ? filename : `${filename}.zip`;
-    const uploadId = crypto.randomUUID();
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-    for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const body = new FormData();
-        body.append("upload_id", uploadId);
-        body.append("chunk_index", String(i));
-        body.append("total_chunks", String(totalChunks));
-        body.append("filename", zipName);
-        body.append("chunk", file.slice(start, end), `${zipName}.part`);
-        const resp = await api.fetchApi("/minimax/director_opt/upload_chunk", { method: "POST", body });
-        if (!resp.ok) {
-            const text = await resp.text();
-            throw new Error(text || t("upload.chunkFailed", { status: resp.status }));
-        }
-        onProgress?.((i + 1) / totalChunks);
-        const data = await resp.json();
-        if (data.name) return data;
-    }
-    throw new Error(t("upload.chunkIncomplete"));
+    return uploadChunked(file, { filename: zipName, onProgress });
 }
 
 export async function exportDirectorPack(editor) {
@@ -173,7 +153,7 @@ export async function importDirectorPack(editor) {
     const file = await pickZipFile();
     if (!file) return;
     let data;
-    if (file.size <= CHUNK_SOFT_LIMIT) {
+    if (file.size <= UPLOAD_SOFT_LIMIT) {
         const body = new FormData();
         body.append("pack", file, file.name || "pack.mmxpack.zip");
         const resp = await api.fetchApi("/minimax/director_opt/import_pack", { method: "POST", body });

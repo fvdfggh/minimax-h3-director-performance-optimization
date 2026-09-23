@@ -4,7 +4,6 @@
  * Total duration = sum of shot durations. Timeline shows one block per shot.
  */
 
-import { api } from "../../scripts/api.js";
 import {
     defaultDurationSec,
     defaultFrameCount,
@@ -18,10 +17,10 @@ import {
     preferredDurationSecFromFrames,
     resolveTaskKey,
     roundDurationSec,
-    fileForComfyUpload,
 } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
 import { clamp, uid, viewUrl } from "./core/utils.js";
+import { uploadToInput } from "./core/upload.js";
 
 export const FL2V_STYLES = `
 .bd-fl2v-detail-wrap{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px}
@@ -85,17 +84,6 @@ const DEFAULT_TOTAL = defaultFrameCount("fl2v");
 export const DEFAULT_FL2V_NEGATIVE = "bad video";
 export function fl2vViewUrl(imageFile) {
     return imageFile ? viewUrl(imageFile, "input") : "";
-}
-
-async function uploadImage(file) {
-    const uploadFile = fileForComfyUpload(file);
-    const body = new FormData();
-    body.append("image", uploadFile, uploadFile.name);
-    body.append("type", "input");
-    body.append("overwrite", "false");
-    const resp = await api.fetchApi("/upload/image", { method: "POST", body });
-    if (!resp.ok) throw new Error((await resp.text()) || `Upload failed (${resp.status})`);
-    return resp.json();
 }
 
 function imageDims(file) {
@@ -1069,7 +1057,7 @@ function bindFl2vSlotDnD(editor, slotEl, shotIndex, slotKind) {
             (async () => {
                 try {
                     ensureFl2vTimeline(editor);
-                    const up = await uploadImage(f);
+                    const up = await uploadToInput(f);
                     const dims = await imageDims(f);
                     const name = up.name || up.filename;
                     const sub = (up.subfolder || "").replace(/\\/g, "/").replace(/\/$/, "");
@@ -1344,7 +1332,7 @@ export function bindFl2vEvents(editor) {
         ensureFl2vTimeline(editor);
         try {
             const file = files[0];
-            const up = await uploadImage(file);
+            const up = await uploadToInput(file);
             const dims = await imageDims(file);
             const name = up.name || up.filename;
             const sub = (up.subfolder || "").replace(/\\/g, "/").replace(/\/$/, "");

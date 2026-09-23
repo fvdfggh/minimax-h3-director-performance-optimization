@@ -30,8 +30,6 @@ import {
     resolveTaskKey,
     roundDurationSec,
     sumFrameCounts,
-    fileForComfyUpload,
-    safeUploadFilename,
 } from "./minimax_gen_timeline.js";
 import { refreshPromptTokenEditors, teardownPromptImageMentions, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
@@ -41,6 +39,7 @@ import {
     prepareLocalReferenceAudio,
 } from "./minimax_ref_audio.js";
 import { clamp, relPath, viewUrl } from "./core/utils.js";
+import { UPLOAD_SOFT_LIMIT, uploadChunked, uploadToInput } from "./core/upload.js";
 
 const _players = new WeakMap();
 /** r2v picture grid: 9 slots in 3×3; reveal 3 → 6 → 9. */
@@ -701,45 +700,12 @@ export const IMAGE_BATCH_STYLES = `
 }
 `;
 
-const BATCH_CHUNK_SIZE = 8 * 1024 * 1024;
-const BATCH_UPLOAD_SOFT_LIMIT = 95 * 1024 * 1024;
 
-async function uploadImage(file) {
-    const uploadFile = fileForComfyUpload(file);
-    const body = new FormData();
-    body.append("image", uploadFile, uploadFile.name);
-    body.append("type", "input");
-    body.append("overwrite", "false");
-    const resp = await api.fetchApi("/upload/image", { method: "POST", body });
-    if (!resp.ok) throw new Error(await resp.text() || `Upload failed (${resp.status})`);
-    return resp.json();
-}
-
-async function uploadChunked(file) {
-    const filename = safeUploadFilename(file?.name, file?.type);
-    const uploadId = crypto.randomUUID();
-    const totalChunks = Math.ceil(file.size / BATCH_CHUNK_SIZE);
-    for (let i = 0; i < totalChunks; i++) {
-        const start = i * BATCH_CHUNK_SIZE;
-        const end = Math.min(start + BATCH_CHUNK_SIZE, file.size);
-        const body = new FormData();
-        body.append("upload_id", uploadId);
-        body.append("chunk_index", String(i));
-        body.append("total_chunks", String(totalChunks));
-        body.append("filename", filename);
-        body.append("chunk", file.slice(start, end), `${filename}.part`);
-        const resp = await api.fetchApi("/minimax/director_opt/upload_chunk", { method: "POST", body });
-        if (!resp.ok) throw new Error(await resp.text() || t("upload.chunkFailed", { status: resp.status }));
-        const data = await resp.json();
-        if (data.name) return data;
-    }
-    throw new Error(t("upload.chunkIncomplete"));
-}
 
 async function uploadMedia(file) {
-    if (file.size <= BATCH_UPLOAD_SOFT_LIMIT) {
+    if (file.size <= UPLOAD_SOFT_LIMIT) {
         try {
-            return await uploadImage(file);
+            return await uploadToInput(file);
         } catch (err) {
             const msg = String(err?.message || err || "");
             if (!/too large|size|413/i.test(msg)) throw err;
@@ -1067,7 +1033,7 @@ async function assignSegSourceFromFile(editor, index, file) {
     const segId = editor.timeline.segments[index]?.id;
     try {
         if (!isBatchImageFile(file)) throw new Error("Not an image file");
-        const uploaded = await uploadImage(file);
+        const uploaded = await uploadToInput(file);
         const imageFile = relPath(uploaded);
         if (!imageFile) throw new Error("Upload returned empty filename");
         applySegSourceImage(editor, index, imageFile, 0, 0);
@@ -1127,7 +1093,7 @@ function readImageDimensions(file) {
 async function assignSegRefFromFile(editor, index, slot, file) {
     if (!file?.type?.startsWith("image/")) return;
     try {
-        const uploaded = await uploadImage(file);
+        const uploaded = await uploadToInput(file);
         const seg = editor.timeline.segments[index];
         if (!seg) return;
         seg.refs = (seg.refs || []).filter((r) => Number(r.index ?? r.slot) !== slot);
@@ -1895,7 +1861,7 @@ async function assignCommonAssetFromFile(editor, kind, abs, file) {
     if (kind === "image") {
         if (!file?.type?.startsWith("image/")) return false;
         try {
-            const uploaded = await uploadImage(file);
+            const uploaded = await uploadToInput(file);
             setCommonAsset(editor, kind, abs, { imageFile: relPath(uploaded), imageB64: "" });
             return true;
         } catch (err) {

@@ -1,8 +1,6 @@
 import { api } from "../../scripts/api.js";
 import { fileForComfyUpload } from "./minimax_gen_timeline.js";
-
-const CHUNK_SIZE = 8 * 1024 * 1024;
-const COMFY_UPLOAD_SOFT_LIMIT = 95 * 1024 * 1024;
+import { CHUNK_SIZE, UPLOAD_SOFT_LIMIT } from "./core/upload.js";
 
 export function isReferenceAudioFile(file) {
     return !!file && (
@@ -41,7 +39,7 @@ export async function prepareLocalReferenceAudio(file, onProgress) {
     if (!isReferenceAudioSourceFile(file)) {
         throw new Error("Please select an audio or video file.");
     }
-    if (isReferenceAudioFile(file) && file.size <= COMFY_UPLOAD_SOFT_LIMIT) {
+    if (isReferenceAudioFile(file) && file.size <= UPLOAD_SOFT_LIMIT) {
         const uploadFile = fileForComfyUpload(file);
         const body = new FormData();
         body.append("image", uploadFile, uploadFile.name);

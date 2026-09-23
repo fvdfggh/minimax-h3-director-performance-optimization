@@ -42,8 +42,6 @@ import {
     taskUsesReferenceAudios,
     taskUsesReferenceImages,
     taskUsesReferenceVideo,
-    fileForComfyUpload,
-    safeUploadFilename,
 } from "./minimax_gen_timeline.js";
 import {
     IMAGE_BATCH_STYLES,
@@ -113,6 +111,7 @@ import {
 } from "./minimax_i18n.js";
 import { bindPackActions } from "./minimax_pack.js";
 import { clamp, relPath, uid, viewUrl } from "./core/utils.js";
+import { UPLOAD_SOFT_LIMIT, uploadChunked, uploadToInput } from "./core/upload.js";
 
 const RULER_H = 24;
 const SEG_LABEL_H = 20;
@@ -141,8 +140,7 @@ const TIMELINE_SYNC_DEBOUNCE_MS = 500;
 const MAX_THUMBS_PER_SEGMENT = 20;
 const THUMB_PREFETCH_BATCH = 6;
 const DIRECTOR_MIN_WIDTH = 900;
-const COMFY_UPLOAD_SOFT_LIMIT = 95 * 1024 * 1024;
-const MINIMAX_CHUNK_SIZE = 8 * 1024 * 1024;
+
 
 /** Segment continuity is opt-in; default off unless explicitly enabled in output. */
 function isContinuityEnabled(output) {
@@ -1051,54 +1049,15 @@ function coerceTimelineFps(value, fallback = 24) {
     return Math.round(clamp(fps, 1, 240) * 100) / 100;
 }
 
-async function uploadToInput(file) {
-    const uploadFile = fileForComfyUpload(file);
-    const body = new FormData();
-    body.append("image", uploadFile, uploadFile.name);
-    body.append("type", "input");
-    body.append("overwrite", "false");
-    const resp = await api.fetchApi("/upload/image", { method: "POST", body });
-    if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(text || `Upload failed (${resp.status})`);
-    }
-    return resp.json();
-}
-
-async function uploadVideoChunked(file, onProgress) {
-    const filename = safeUploadFilename(file?.name, file?.type);
-    const uploadId = crypto.randomUUID();
-    const totalChunks = Math.ceil(file.size / MINIMAX_CHUNK_SIZE);
-    for (let i = 0; i < totalChunks; i++) {
-        const start = i * MINIMAX_CHUNK_SIZE;
-        const end = Math.min(start + MINIMAX_CHUNK_SIZE, file.size);
-        const body = new FormData();
-        body.append("upload_id", uploadId);
-        body.append("chunk_index", String(i));
-        body.append("total_chunks", String(totalChunks));
-        body.append("filename", filename);
-        body.append("chunk", file.slice(start, end), `${filename}.part`);
-        const resp = await api.fetchApi("/minimax/director_opt/upload_chunk", { method: "POST", body });
-        if (!resp.ok) {
-            const text = await resp.text();
-            throw new Error(text || t("upload.chunkFailed", { status: resp.status }));
-        }
-        onProgress?.((i + 1) / totalChunks, i + 1, totalChunks);
-        const data = await resp.json();
-        if (data.name) return data;
-    }
-    throw new Error(t("upload.chunkIncomplete"));
-}
-
 async function uploadToInputSmart(file, onProgress) {
-    if (file.size <= COMFY_UPLOAD_SOFT_LIMIT) {
+    if (file.size <= UPLOAD_SOFT_LIMIT) {
         try {
             return await uploadToInput(file);
         } catch (err) {
             if (!isUploadSizeError(err)) throw err;
         }
     }
-    return uploadVideoChunked(file, onProgress);
+    return uploadChunked(file, { onProgress });
 }
 
 // Thin aliases over web/js/core/utils.js. Kept as aliases (rather than renamed
@@ -5503,7 +5462,7 @@ class MiniMaxH3DirectorOptEditor {
         try {
             const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
                 const pct = Math.round(frac * 100);
-                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
+                const mode = file.size > UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
                 if (nameEl) {
                     nameEl.textContent = t("upload.refVideoProgress", {
                         mode, name: file.name, cur, total, pct,
@@ -7636,7 +7595,7 @@ class MiniMaxH3DirectorOptEditor {
         try {
             const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
                 const pct = Math.round(frac * 100);
-                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
+                const mode = file.size > UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
                 this.videoNameEl.textContent = t("upload.appendChunk", {
                     mode, name: file.name, cur, total, pct,
                 });
@@ -7668,7 +7627,7 @@ class MiniMaxH3DirectorOptEditor {
         try {
             const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
                 const pct = Math.round(frac * 100);
-                const mode = file.size > COMFY_UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
+                const mode = file.size > UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
                 this.videoNameEl.textContent = t("upload.loadChunk", {
                     mode, name: file.name, cur, total, pct,
                 });

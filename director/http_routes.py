@@ -16,16 +16,20 @@ import folder_paths
 from aiohttp import web
 from server import PromptServer
 
+from ..lib.pathutil import (
+    AUDIO_EXTS,
+    IMAGE_EXTS,
+    VIDEO_EXTS,
+    posix_relpath,
+    SAFE_EXT_RE as _SAFE_EXT,
+    WIN_ILLEGAL_RE as _WIN_ILLEGAL,
+    WIN_RESERVED_RE as _WIN_RESERVED,
+)
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
 
 CHUNK_ROOT = os.path.join(folder_paths.get_temp_directory(), "minimax_upload_chunks")
 REF_AUDIO_CHUNK_ROOT = os.path.join(folder_paths.get_temp_directory(), "minimax_ref_audio_chunks")
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
-VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg", ".mts", ".ts"}
-AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"}
-_WIN_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
-_WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$", re.I)
-_SAFE_EXT = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 _ROUTES_REGISTERED = False
 
 
@@ -104,7 +108,7 @@ def _list_director_clips(exclude_rel: set[str] | None = None) -> list[dict]:
     for dirpath, _dirs, files in os.walk(cache_root):
         rel_dir = ""
         try:
-            rel_dir = os.path.relpath(dirpath, cache_root).replace("\\", "/")
+            rel_dir = posix_relpath(dirpath, cache_root)
         except ValueError:
             continue
         if rel_dir == ".":
@@ -194,7 +198,7 @@ def _list_input_media(kind: str, include_cache: bool = False) -> list[dict]:
             except OSError:
                 continue
             try:
-                rel_path = os.path.relpath(abs_path, input_dir).replace("\\", "/")
+                rel_path = posix_relpath(abs_path, input_dir)
             except ValueError:
                 continue
             if rel_path.startswith(".."):

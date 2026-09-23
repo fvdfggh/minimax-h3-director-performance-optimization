@@ -28,6 +28,13 @@ from typing import Any
 import folder_paths
 from aiohttp import web
 
+from ..lib.pathutil import (
+    AUDIO_EXTS,
+    IMAGE_EXTS,
+    MEDIA_EXTS,
+    SAFE_EXT_RE,
+    VIDEO_EXTS,
+)
 from ..lib.task_prompts import resolve_task_key, task_type_option_label, TASK_PROMPT_BY_KEY
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director-Opt.director.pack")
@@ -40,7 +47,6 @@ PACK_FORMATS = (PACK_FORMAT, PACK_FORMAT_OPT)
 PACK_VERSION = 1
 PACK_PREFIXES = ("shared_params/", "asset_groups/", "source_video/", "extra/")
 ASCII_PATH_RE = re.compile(r"^[A-Za-z0-9_./]+$")
-SAFE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
 #: Opt removes the upstream slot caps: PictureN / VideoN / AudioN accept any
 #: count. Upstream only reads 1-9 / 1-3 when it has to rebuild a timeline from
 #: folder scanning, but it always prefers timeline.json — which Opt writes in
@@ -50,11 +56,6 @@ VIDEO_FILE_RE = re.compile(r"^Video(\d+)(\.[A-Za-z0-9]{1,8})$", re.I)
 AUDIO_FILE_RE = re.compile(r"^Audio(\d+)(\.[A-Za-z0-9]{1,8})$", re.I)
 START_FILE_RE = re.compile(r"^start(\.[A-Za-z0-9]{1,8})$", re.I)
 END_FILE_RE = re.compile(r"^end(\.[A-Za-z0-9]{1,8})$", re.I)
-
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
-VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg", ".mts", ".ts"}
-AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"}
-MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS | AUDIO_EXTS
 
 MAX_UNCOMPRESSED = 16 * 1024 * 1024 * 1024
 MAX_ZIP_ENTRIES = 8000

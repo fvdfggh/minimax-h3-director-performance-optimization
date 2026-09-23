@@ -52,6 +52,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..lib.pathutil import (
+    WIN_ILLEGAL_RE as _WIN_ILLEGAL,
+    WIN_RESERVED_RE as _WIN_RESERVED,
+)
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache_layout")
 
 #: Unified cache root under ComfyUI's output directory.
@@ -139,11 +144,6 @@ SCRATCH_MARK = "_scratch_"
 SCRATCH_GLOB = f"{SCRATCH_PREFIX}*{SCRATCH_MARK}*.pt"
 #: Glob prefixes covering durable artefacts of **both** passes.
 SEGMENT_GLOBS = (f"{SCRATCH_PREFIX}*", f"{SECOND_PREFIX}*")
-
-# Windows-illegal path characters, Windows reserved device names.
-_WIN_ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
-_WIN_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])$", re.I)
-
 
 def output_root() -> Path:
     """ComfyUI's output directory."""

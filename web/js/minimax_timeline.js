@@ -112,6 +112,7 @@ import {
     toggleLocale,
 } from "./minimax_i18n.js";
 import { bindPackActions } from "./minimax_pack.js";
+import { clamp, relPath, uid, viewUrl } from "./core/utils.js";
 
 const RULER_H = 24;
 const SEG_LABEL_H = 20;
@@ -957,9 +958,6 @@ ${FL2V_STYLES}
 }
 `;
 
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-
 function snapDim(v, stride = 32) {
     return Math.max(stride, Math.round(v / stride) * stride);
 }
@@ -1103,25 +1101,12 @@ async function uploadToInputSmart(file, onProgress) {
     return uploadVideoChunked(file, onProgress);
 }
 
-function videoRelativePath(upload) {
-    const name = upload.name || upload.filename;
-    const sub = (upload.subfolder || "").replace(/\\/g, "/").replace(/\/$/, "");
-    return sub ? `${sub}/${name}` : name;
-}
-
-function inputViewUrl(relativePath, type = "input") {
-    const norm = String(relativePath || "").replace(/\\/g, "/");
-    const slash = norm.lastIndexOf("/");
-    const filename = slash >= 0 ? norm.slice(slash + 1) : norm;
-    const subfolder = slash >= 0 ? norm.slice(0, slash) : "";
-    const params = new URLSearchParams({ filename, type });
-    if (subfolder) params.set("subfolder", subfolder);
-    return api.apiURL(`/view?${params.toString()}`);
-}
-
-function refViewUrl(imageFile) {
-    return inputViewUrl(imageFile, "input");
-}
+// Thin aliases over web/js/core/utils.js. Kept as aliases (rather than renamed
+// call sites) because this file has local ``const relPath`` / ``const viewUrl``
+// variables that would shadow — or self-reference — a straight rename.
+const videoRelativePath = relPath;
+const inputViewUrl = viewUrl;
+const refViewUrl = viewUrl;
 
 function deletedSourceRanges(video) {
     return video?.deletedSourceRanges || video?.deleted_source_ranges || [];

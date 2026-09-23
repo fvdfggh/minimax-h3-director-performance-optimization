@@ -40,16 +40,13 @@ import {
     isReferenceAudioSourceFile,
     prepareLocalReferenceAudio,
 } from "./minimax_ref_audio.js";
+import { clamp, relPath, viewUrl } from "./core/utils.js";
 
 const _players = new WeakMap();
 /** r2v picture grid: 9 slots in 3×3; reveal 3 → 6 → 9. */
 const R2V_PICTURE_SLOTS = MAX_REFERENCE_IMAGES;
 const R2V_PICTURE_STEP = 3;
 let _activeR2vMedia = null;
-
-function clamp(n, lo, hi) {
-    return Math.max(lo, Math.min(hi, n));
-}
 
 function _refHasImage(r) {
     return !!(r?.imageFile || r?.imageB64);
@@ -749,29 +746,6 @@ async function uploadMedia(file) {
         }
     }
     return uploadChunked(file);
-}
-
-function relPath(upload) {
-    const name = upload.name || upload.filename;
-    const sub = (upload.subfolder || "").replace(/\\/g, "/").replace(/\/$/, "");
-    return sub ? `${sub}/${name}` : name;
-}
-
-function viewUrl(imageFile, type = "input") {
-    const norm = String(imageFile || "").replace(/\\/g, "/");
-    const slash = norm.lastIndexOf("/");
-    const filename = slash >= 0 ? norm.slice(slash + 1) : norm;
-    const subfolder = slash >= 0 ? norm.slice(0, slash) : "";
-    // Must echo the record's own ``type``: ``/api/view`` resolves the file under
-    // whichever directory that names. Hardcoding input made any non-input media
-    // 404 in the preview even though the backend could read it — Director's own
-    // renders live in output/. ComfyUI only serves input/output/temp.
-    const dirType = ["input", "output", "temp"].includes(String(type || "").toLowerCase())
-        ? String(type).toLowerCase()
-        : "input";
-    const params = new URLSearchParams({ filename, type: dirType });
-    if (subfolder) params.set("subfolder", subfolder);
-    return api.apiURL(`/view?${params.toString()}`);
 }
 
 export function mountImageBatchPanel(root) {

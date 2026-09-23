@@ -15,6 +15,7 @@ import {
     resolveTaskKey,
 } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
+import { viewUrl } from "./core/utils.js";
 
 const TAG_RE = /<(Picture|Video|Audio)\s+(\d+)\s*>/gi;
 const TOKEN_CLASS = "bd-token";
@@ -124,16 +125,8 @@ function injectStyles() {
     document.head.appendChild(el);
 }
 
-function inputViewUrl(filename, type = "input") {
-    const subfolder = filename.includes("/") ? filename.slice(0, filename.lastIndexOf("/")) : "";
-    const base = subfolder ? filename.slice(subfolder.length + 1) : filename;
-    const params = new URLSearchParams({ filename: base, type });
-    if (subfolder) params.set("subfolder", subfolder);
-    return api.apiURL(`/view?${params.toString()}`);
-}
-
 function refThumbUrl(ref) {
-    if (ref?.imageFile) return inputViewUrl(ref.imageFile, "input");
+    if (ref?.imageFile) return viewUrl(ref.imageFile, "input");
     if (ref?.imageB64) {
         return ref.imageB64.startsWith("data:") ? ref.imageB64 : `data:image/png;base64,${ref.imageB64}`;
     }
@@ -142,7 +135,7 @@ function refThumbUrl(ref) {
 
 function videoThumbUrl(ref) {
     if (ref?.previewImageUrl) return String(ref.previewImageUrl);
-    if (ref?.previewImageFile) return inputViewUrl(ref.previewImageFile, "input");
+    if (ref?.previewImageFile) return viewUrl(ref.previewImageFile, "input");
     return "";
 }
 

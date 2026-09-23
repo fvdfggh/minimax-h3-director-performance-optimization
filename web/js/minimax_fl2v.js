@@ -21,6 +21,7 @@ import {
     fileForComfyUpload,
 } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
+import { clamp, uid, viewUrl } from "./core/utils.js";
 
 export const FL2V_STYLES = `
 .bd-fl2v-detail-wrap{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px}
@@ -82,23 +83,8 @@ export const FL2V_STYLES = `
 const DEFAULT_TOTAL = defaultFrameCount("fl2v");
 /** Same default as the node ``negative_prompt_unused`` widget. */
 export const DEFAULT_FL2V_NEGATIVE = "bad video";
-function uid() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-}
-
-function clamp(n, lo, hi) {
-    return Math.max(lo, Math.min(hi, n));
-}
-
 export function fl2vViewUrl(imageFile) {
-    if (!imageFile) return "";
-    const norm = String(imageFile).replace(/\\/g, "/");
-    const slash = norm.lastIndexOf("/");
-    const filename = slash >= 0 ? norm.slice(slash + 1) : norm;
-    const subfolder = slash >= 0 ? norm.slice(0, slash) : "";
-    const params = new URLSearchParams({ filename, type: "input" });
-    if (subfolder) params.set("subfolder", subfolder);
-    return api.apiURL(`/view?${params.toString()}`);
+    return imageFile ? viewUrl(imageFile, "input") : "";
 }
 
 async function uploadImage(file) {

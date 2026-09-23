@@ -1,4 +1,4 @@
-/** task_ui mixin for MiniMaxH3DirectorOptEditor.
+/** task_ui mixin for the Director editor (task_ui).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -6,7 +6,6 @@
 
 import { getStableWorkflowId } from "../../core/graph_refs.js";
 import { applyDirectorWidgetLabels } from "../../core/widget_labels.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { updateFl2vDetailUI, updateFl2vToolbarBtns } from "../../minimax_fl2v.js";
 import { resolveTaskKey, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../../minimax_gen_timeline.js";
 import { applyI18nDom, aspectDisplayLabel, getLocale, t, taskDisplayLabel } from "../../minimax_i18n.js";

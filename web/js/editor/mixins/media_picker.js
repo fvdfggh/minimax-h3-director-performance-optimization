@@ -1,4 +1,4 @@
-/** media_picker mixin for MiniMaxH3DirectorOptEditor.
+/** media_picker mixin for the Director editor (media_picker).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -6,7 +6,6 @@
 
 import { uploadToInput, uploadToInputSmart } from "../../core/upload.js";
 import { relPath } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { inputViewUrl, videoRelativePath } from "../urls.js";
 import { t } from "../../minimax_i18n.js";
 import { extractReferenceAudioFromExistingVideo, prepareLocalReferenceAudio } from "../../minimax_ref_audio.js";

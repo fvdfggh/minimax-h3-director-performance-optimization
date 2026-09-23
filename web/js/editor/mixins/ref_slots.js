@@ -1,4 +1,4 @@
-/** ref_slots mixin for MiniMaxH3DirectorOptEditor.
+/** ref_slots mixin for the Director editor (ref_slots).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -6,7 +6,6 @@
 
 import { uploadToInput, uploadToInputSmart } from "../../core/upload.js";
 import { relPath } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { refViewUrl, videoRelativePath } from "../urls.js";
 import { MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, refAudioLabel, refImageLabel, refVideoLabel, resolveTaskKey } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";

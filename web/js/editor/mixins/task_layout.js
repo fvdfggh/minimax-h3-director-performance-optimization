@@ -1,11 +1,10 @@
-/** task_layout mixin for MiniMaxH3DirectorOptEditor.
+/** task_layout mixin for the Director editor (task_layout).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
  */
 
 import { clamp, uid } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { ensureFl2vTimeline, setFl2vToolbar, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../../minimax_fl2v.js";
 import { DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_GEN_FRAMES, MINIMAX_CANVAS_MULTIPLE, NO_VIDEO_UPLOAD_TASKS, defaultFrameCount, genLayoutHint, getDirectorMode, isCustomAspectRatio, isVideoBatchTask, minFrameCount, normalizeAspectRatioLabel, resolveTaskKey, sumFrameCounts, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";

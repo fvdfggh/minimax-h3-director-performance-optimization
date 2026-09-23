@@ -1,4 +1,4 @@
-/** widget_sync mixin for MiniMaxH3DirectorOptEditor.
+/** widget_sync mixin for the Director editor (widget_sync).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -9,7 +9,6 @@ import { MIN_SEG } from "../../core/layout_spec.js";
 import { formatProbeFps } from "../../core/ruler.js";
 import { DEFAULT_CONTINUITY_FRAMES, isContinuityEligible, isContinuityEnabled, normalizeAudioMode, snapContinuityFrames } from "../../core/timeline_sanitize.js";
 import { clamp, uid } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { getFl2vSampleFrames, normalizeFl2vSegments, updateFl2vDetailUI } from "../../minimax_fl2v.js";
 import { DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MINIMAX_CANVAS_MULTIPLE, NO_VIDEO_UPLOAD_TASKS, clampMegapixels, isCustomAspectRatio, normalizeRefImageSize, taskUsesReferenceAudios, taskUsesReferenceImages } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";

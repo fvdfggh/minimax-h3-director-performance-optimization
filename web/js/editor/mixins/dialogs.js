@@ -1,13 +1,13 @@
-/** dialogs mixin for MiniMaxH3DirectorOptEditor.
+/** dialogs mixin for the Director editor (dialogs).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
  */
 
 import { relPath } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { inputViewUrl } from "../urls.js";
 import { t } from "../../minimax_i18n.js";
+import { api } from "../../../../scripts/api.js";
 export const dialogsMixin = {
     _closeBdModal() {
         if (this._modalKeyHandler) {

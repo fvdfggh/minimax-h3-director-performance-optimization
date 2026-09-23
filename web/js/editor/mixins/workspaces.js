@@ -1,4 +1,4 @@
-/** workspaces mixin for MiniMaxH3DirectorOptEditor.
+/** workspaces mixin for the Director editor (workspaces).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -6,7 +6,6 @@
 
 import { cloneJson, sanitizeBatchWorkspace, sanitizeVideoWorkspace } from "../../core/timeline_sanitize.js";
 import { clamp } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { defaultDurationSec, getDirectorMode, isVideoBatchTask, newBatchSegment, resolveTaskKey } from "../../minimax_gen_timeline.js";
 import { flushBatchPromptInputs } from "../../minimax_image_batch.js";
 export const workspacesMixin = {

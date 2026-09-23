@@ -1,4 +1,4 @@
-/** events mixin for MiniMaxH3DirectorOptEditor.
+/** events mixin for the Director editor (events).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -7,7 +7,6 @@
 import { coerceTimelineFps } from "../../core/dims.js";
 import { parseTimeline, stopDomEvent } from "../../core/editor_lifecycle.js";
 import { clamp } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { ensureFl2vTimeline, flushFl2vPromptDraft, openFl2vUpload, updateFl2vDetailUI } from "../../minimax_fl2v.js";
 import { DEFAULT_MEGAPIXELS, clampMegapixels, getDirectorMode, normalizeRefImageSize, parseMegapixelsInput, resolveTaskKey } from "../../minimax_gen_timeline.js";
 import { t, toggleLocale } from "../../minimax_i18n.js";

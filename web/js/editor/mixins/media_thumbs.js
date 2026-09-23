@@ -1,11 +1,10 @@
-/** media_thumbs mixin for MiniMaxH3DirectorOptEditor.
+/** media_thumbs mixin for the Director editor (media_thumbs).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
  */
 
 import { uid } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { inputViewUrl } from "../urls.js";
 export const media_thumbsMixin = {
     _videoIdentityFromParts(video, clips) {

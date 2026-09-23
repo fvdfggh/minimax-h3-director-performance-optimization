@@ -1,4 +1,4 @@
-/** segments_model mixin for MiniMaxH3DirectorOptEditor.
+/** segments_model mixin for the Director editor (segments_model).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -7,7 +7,6 @@
 import { logicalToSourceFrame, normalizeFrameMapEntry } from "../../core/frame_map.js";
 import { MIN_SEG, THUMB_PREFETCH_BATCH } from "../../core/layout_spec.js";
 import { clamp, uid } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { syncFl2vFromShots, updateFl2vDetailUI } from "../../minimax_fl2v.js";
 import { minFrameCount } from "../../minimax_gen_timeline.js";
 import { normalizeImageBatchSegments } from "../../minimax_image_batch.js";

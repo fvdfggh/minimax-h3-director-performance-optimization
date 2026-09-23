@@ -1,4 +1,4 @@
-/** segment_edit mixin for MiniMaxH3DirectorOptEditor.
+/** segment_edit mixin for the Director editor (segment_edit).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -7,11 +7,11 @@
 import { normalizeFrameMapEntry } from "../../core/frame_map.js";
 import { MIN_SEG, THUMB_PREFETCH_BATCH } from "../../core/layout_spec.js";
 import { clamp, uid } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { removeFl2vShot, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../../minimax_fl2v.js";
 import { defaultFrameCount, resolveTaskKey, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";
 import { deleteImageBatchGroup, isBatchDetailSolo, updateR2vToolbarBtns } from "../../minimax_image_batch.js";
+import { api } from "../../../../scripts/api.js";
 export const segment_editMixin = {
     addSplitAtMouse(e) {
         const { x } = this.getMousePos(e);

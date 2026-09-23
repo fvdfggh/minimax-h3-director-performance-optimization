@@ -1,10 +1,9 @@
-/** fields mixin for MiniMaxH3DirectorOptEditor.
+/** fields mixin for the Director editor (fields).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
  */
 
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { resolveTaskKey } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";
 export const fieldsMixin = {

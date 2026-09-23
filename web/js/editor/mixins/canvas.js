@@ -1,4 +1,4 @@
-/** canvas mixin for MiniMaxH3DirectorOptEditor.
+/** canvas mixin for the Director editor (canvas).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -7,7 +7,6 @@
 import { CLIP_SEGMENT_COLORS, MAX_THUMBS_PER_SEGMENT, RULER_H, RUN_CHECK_SIZE, SEG_LABEL_H, TRACK_H, TRACK_Y } from "../../core/layout_spec.js";
 import { formatRulerTime, pickRulerMajorStepSec, pickRulerMinorStepSec } from "../../core/ruler.js";
 import { clamp } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { refViewUrl } from "../urls.js";
 import { drawFl2vSegmentThumbnails, getFl2vSampleFrames } from "../../minimax_fl2v.js";
 import { t } from "../../minimax_i18n.js";

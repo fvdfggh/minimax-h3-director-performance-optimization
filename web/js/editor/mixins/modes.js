@@ -1,10 +1,9 @@
-/** modes mixin for MiniMaxH3DirectorOptEditor.
+/** modes mixin for the Director editor (modes).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
  */
 
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { getDirectorMode, isVideoBatchTask } from "../../minimax_gen_timeline.js";
 export const modesMixin = {
     getDirectorMode() {

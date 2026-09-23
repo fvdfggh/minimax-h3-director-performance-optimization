@@ -1,4 +1,4 @@
-/** layout_schedule mixin for MiniMaxH3DirectorOptEditor.
+/** layout_schedule mixin for the Director editor (layout_schedule).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -6,7 +6,6 @@
 
 import { ensureDirectorNodeFitsContent, getDirectorUiHeight, healOversizedDirectorNode } from "../../core/editor_lifecycle.js";
 import { DIRECTOR_MIN_WIDTH } from "../../core/layout_spec.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { bindDomWidgetContentComputeSize, contentDomWidgetMinHeight, syncBatchPanelFillHeight } from "../../minimax_image_batch.js";
 export const layout_scheduleMixin = {
     _observeViewportResize() {

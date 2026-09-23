@@ -1,4 +1,4 @@
-/** stage_preview mixin for MiniMaxH3DirectorOptEditor.
+/** stage_preview mixin for the Director editor (stage_preview).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -7,7 +7,6 @@
 import { syncDirectorNodeSize } from "../../core/editor_lifecycle.js";
 import { normalizeFrameMapEntry, sourceToLogicalFrame } from "../../core/frame_map.js";
 import { clamp } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { t } from "../../minimax_i18n.js";
 export const stage_previewMixin = {
     getVideoViewUrl() {

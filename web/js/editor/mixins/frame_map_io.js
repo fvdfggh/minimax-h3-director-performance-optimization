@@ -1,4 +1,4 @@
-/** frame_map_io mixin for MiniMaxH3DirectorOptEditor.
+/** frame_map_io mixin for the Director editor (frame_map_io).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -8,7 +8,6 @@ import { coerceTimelineFps } from "../../core/dims.js";
 import { buildIdentityFrameMap, deletedSourceRanges, logicalToSourceFrame, normalizeFrameMapEntry } from "../../core/frame_map.js";
 import { THUMB_PREFETCH_BATCH } from "../../core/layout_spec.js";
 import { clamp } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { getFl2vTotalDurationSec, getFl2vVisualFrames } from "../../minimax_fl2v.js";
 import { preferredDurationSecFromFrames, roundDurationSec, sumFrameCounts } from "../../minimax_gen_timeline.js";
 export const frame_map_ioMixin = {

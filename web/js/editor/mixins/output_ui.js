@@ -1,4 +1,4 @@
-/** output_ui mixin for MiniMaxH3DirectorOptEditor.
+/** output_ui mixin for the Director editor (output_ui).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -6,7 +6,6 @@
 
 import { resolveOutputDimensions, snapDim } from "../../core/dims.js";
 import { DEFAULT_CONTINUITY_FRAMES, isContinuityEligible, isContinuityEnabled, normalizeAudioMode, snapContinuityFrames } from "../../core/timeline_sanitize.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MINIMAX_CANVAS_MULTIPLE, NO_VIDEO_UPLOAD_TASKS, isContinuityMasterEnabled, isCustomAspectRatio, isSegmentContinuityFromPrev, normalizeAspectRatioLabel, resolutionFromSelector, resolveSegmentRefImageSize, snapResolutionDim } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";
 export const output_uiMixin = {

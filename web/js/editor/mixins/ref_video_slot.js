@@ -1,4 +1,4 @@
-/** ref_video_slot mixin for MiniMaxH3DirectorOptEditor.
+/** ref_video_slot mixin for the Director editor (ref_video_slot).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -7,7 +7,6 @@
 import { formatProbeFps } from "../../core/ruler.js";
 import { UPLOAD_SOFT_LIMIT, formatUploadError, uploadToInput, uploadToInputSmart } from "../../core/upload.js";
 import { clamp, relPath, uid, viewUrl } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { refViewUrl, videoRelativePath } from "../urls.js";
 import { getFl2vTotalDurationSec } from "../../minimax_fl2v.js";
 import { MAX_GEN_FRAMES, defaultFrameCount, durationToClampedMiniMaxFrames, framesToDurationSec, isVideoBatchTask, minFrameCount, preferredDurationSecFromFrames, resolveTaskKey, roundDurationSec, taskUsesReferenceVideo } from "../../minimax_gen_timeline.js";

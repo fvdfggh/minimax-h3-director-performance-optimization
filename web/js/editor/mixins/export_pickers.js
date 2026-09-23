@@ -1,12 +1,13 @@
-/** export_pickers mixin for MiniMaxH3DirectorOptEditor.
+/** export_pickers mixin for the Director editor (export_pickers).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
  */
 
 import { getStableWorkflowId } from "../../core/graph_refs.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { t } from "../../minimax_i18n.js";
+import { app } from "../../../../scripts/app.js";
+import { api } from "../../../../scripts/api.js";
 export const export_pickersMixin = {
     /** Stored under ``timeline.output.segmentExport``; written by the picker. */
     _segmentExportConfig() {

@@ -1,14 +1,14 @@
-/** run_selection mixin for MiniMaxH3DirectorOptEditor.
+/** run_selection mixin for the Director editor (run_selection).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
  */
 
 import { getStableWorkflowId } from "../../core/graph_refs.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { fl2vStartIndices } from "../../minimax_fl2v.js";
 import { isPromptBatchTask, resolveTaskKey } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";
+import { api } from "../../../../scripts/api.js";
 export const run_selectionMixin = {
     getTaskKey() {
         return resolveTaskKey(

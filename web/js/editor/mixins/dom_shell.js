@@ -1,10 +1,9 @@
-/** dom_shell mixin for MiniMaxH3DirectorOptEditor.
+/** dom_shell mixin for the Director editor (dom_shell).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
  */
 
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { STYLES } from "../styles.js";
 import { bindFl2vEvents, mountFl2vPanel } from "../../minimax_fl2v.js";
 import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_GEN_FRAMES, RESOLUTION_ASPECTS } from "../../minimax_gen_timeline.js";

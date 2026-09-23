@@ -1,4 +1,4 @@
-/** thumbnails mixin for MiniMaxH3DirectorOptEditor.
+/** thumbnails mixin for the Director editor (thumbnails).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -8,7 +8,6 @@ import { buildIdentityFrameMap, deletedSourceRanges } from "../../core/frame_map
 import { THUMB_JPEG_Q, THUMB_MAX_W, THUMB_PREFETCH_BATCH } from "../../core/layout_spec.js";
 import { UPLOAD_SOFT_LIMIT, formatUploadError, uploadToInputSmart } from "../../core/upload.js";
 import { relPath, uid } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { inputViewUrl, videoRelativePath } from "../urls.js";
 import { openFl2vUpload } from "../../minimax_fl2v.js";
 import { taskUsesReferenceVideo } from "../../minimax_gen_timeline.js";

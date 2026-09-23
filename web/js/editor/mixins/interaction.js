@@ -1,4 +1,4 @@
-/** interaction mixin for MiniMaxH3DirectorOptEditor.
+/** interaction mixin for the Director editor (interaction).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -8,7 +8,6 @@ import { stopDomEvent } from "../../core/editor_lifecycle.js";
 import { CONT_JOINT_H, CONT_JOINT_HIT_PAD, CONT_JOINT_W, CONT_JOINT_Y, HANDLE_PX, MIN_SEG, RULER_H, RUN_CHECK_HIT_PAD_X, RUN_CHECK_HIT_PAD_Y, RUN_CHECK_SIZE, SEG_LABEL_H, THUMB_PREFETCH_BATCH, TRACK_H, TRACK_Y } from "../../core/layout_spec.js";
 import { isContinuityEligible } from "../../core/timeline_sanitize.js";
 import { clamp } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { flushFl2vPromptDraft, getFl2vTotalDurationSec, openFl2vUpload, rippleFl2vRightEdge, syncFl2vDurationSecAfterDrag, updateFl2vDetailUI } from "../../minimax_fl2v.js";
 import { MAX_GEN_FRAMES, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, framesToDurationSec, isContinuityMasterEnabled, isSegmentContinuityFromPrev, isVideoBatchTask, minFrameCount, preferredDurationSecFromFrames, resolveTaskKey, roundDurationSec, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";

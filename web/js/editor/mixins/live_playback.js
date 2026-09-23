@@ -1,4 +1,4 @@
-/** live_playback mixin for MiniMaxH3DirectorOptEditor.
+/** live_playback mixin for the Director editor (live_playback).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -7,7 +7,6 @@
 import { healOversizedDirectorNode, syncDirectorNodeSize } from "../../core/editor_lifecycle.js";
 import { deletedSourceRanges } from "../../core/frame_map.js";
 import { clamp } from "../../core/utils.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { isVideoBatchTask } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";
 export const live_playbackMixin = {

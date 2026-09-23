@@ -1,11 +1,10 @@
-/** external_groups mixin for MiniMaxH3DirectorOptEditor.
+/** external_groups mixin for the Director editor (external_groups).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
  */
 
 import { collectExternalGroupNodes, collectExternalGroupSpecs, imageRefFromPath } from "../../core/graph_refs.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { flushFl2vPromptDraft, newFl2vShot, setFl2vToolbar, syncFl2vFromShots, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../../minimax_fl2v.js";
 import { defaultDurationSec, isPromptBatchTask, newBatchSegment, resolveTaskKey } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";

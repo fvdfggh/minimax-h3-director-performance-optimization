@@ -1,4 +1,4 @@
-/** timeline_payload mixin for MiniMaxH3DirectorOptEditor.
+/** timeline_payload mixin for the Director editor (timeline_payload).
  *
  * Extracted verbatim from editor.js; methods are unchanged apart from the
  * trailing comma an object literal needs.
@@ -8,7 +8,6 @@ import { resolveOutputDimensions } from "../../core/dims.js";
 import { deletedSourceRanges } from "../../core/frame_map.js";
 import { TIMELINE_SYNC_DEBOUNCE_MS } from "../../core/layout_spec.js";
 import { normalizeOutputContinuity, sanitizeSegmentForPayload, stripTimelineContinuityRootFields, stripTimelineEphemeralFields } from "../../core/timeline_sanitize.js";
-import { MiniMaxH3DirectorOptEditor } from "../editor.js";
 import { buildFl2vPayloadFields, flushFl2vPromptDraft } from "../../minimax_fl2v.js";
 import { imageBatchRequiresFixedOutput, isSegmentContinuityFromPrev, isVideoBatchTask, resolveSegmentRefImageSize, sumFrameCounts } from "../../minimax_gen_timeline.js";
 import { flushBatchPromptInputs } from "../../minimax_image_batch.js";

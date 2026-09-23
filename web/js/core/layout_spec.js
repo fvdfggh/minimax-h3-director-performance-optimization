@@ -50,3 +50,6 @@ export const DIRECTOR_UI_RUNAWAY_EXTRA_H = 8000;
 
 
 export const DIRECTOR_DOM_WIDGET_NAME = "minimax_director_ui";
+
+
+export const CLIP_SEGMENT_COLORS = ["rgba(255,200,50,0.9)", "rgba(102,170,255,0.9)", "rgba(79,255,143,0.9)", "rgba(255,102,170,0.9)"];

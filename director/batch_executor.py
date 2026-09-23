@@ -98,6 +98,221 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.batch")
 # Main batch executor
 # ---------------------------------------------------------------------------
 
+def _prepare_one_segment(
+    plan: DirectorPlan,
+    seg,
+    seg_pos: int,
+    *,
+    node_id: int,
+    all_segments,
+    run_indices: set,
+    completed_av_latents: dict,
+    cache_dir,
+    workflow_name: str | None,
+    use_conditioning_cache: bool,
+    audio_vae,
+    timeline_seg_total: int,
+    segment_total: int,
+    reports: list,
+) -> dict:
+    """Per-segment body of the Phase 1 loop.
+
+    Stages this segment's pixels and conditioning and writes its cache entries.
+    Returns ``{"text_key", "cache_hit", "staged", "meta"}``; on a conditioning
+    cache hit there is nothing left to encode, so ``staged``/``meta`` are None and
+    the caller only counts the hit.
+    """
+    ui_idx = seg.timeline_index
+    report_director_progress(
+        node_id, segment_index=seg_pos, segment_total=segment_total,
+        phase="batch_prepare", phase_value=0, phase_max=1,
+        frames_label=frames_label(seg), task_key=seg.task_key,
+        timeline_segment_index=ui_idx, timeline_segment_total=timeline_seg_total,
+    )
+    target_len = max(1, int(seg.frame_count or plan.total_frames or 124))
+    raw_clip = resolve_segment_raw_clip(plan, seg)
+    if seg.source_clip is not None:
+        body_raw = seg.source_clip
+        target_len = max(target_len, int(body_raw.shape[0]))
+    else:
+        body_raw = raw_clip[:target_len] if int(raw_clip.shape[0]) > target_len else raw_clip
+    if body_raw is not None and body_raw.shape[0] > 0:
+        if plan.output_mode == "fixed":
+            clip_frames = fit_canvas(body_raw, plan.width, plan.height)
+        else:
+            clip_frames = fit_video_long_edge(body_raw, plan.ref_max_size)
+            if int(clip_frames.shape[1]) != int(plan.height) or int(clip_frames.shape[2]) != int(plan.width):
+                clip_frames = fit_canvas(clip_frames, plan.width, plan.height)
+    else:
+        clip_frames = None
+    num_frames = minimax_align_frame_count(target_len)
+    if clip_frames is not None:
+        clip_frames, _ = prepare_segment_clip(clip_frames, num_frames)
+    continuity_active = is_continuity_active(plan, seg)
+    ctx_w = int(plan.width)
+    ctx_h = int(plan.height)
+    if clip_frames is not None and clip_frames.shape[0] > 0:
+        ctx_h, ctx_w = int(clip_frames.shape[1]), int(clip_frames.shape[2])
+    assert_minimax_canvas(ctx_w, ctx_h)
+    positive_prompt = seg.prompt
+    if seg.task_key == "fl2v":
+        from .fl2v_timeline import reinforce_fl2v_prompt
+        has_start = any(getattr(r, "index", None) == 0 for r in (seg.refs or []))
+        has_end = any(getattr(r, "index", None) == 1 for r in (seg.refs or []))
+        if not has_start and not has_end and seg.refs:
+            has_start = True
+            has_end = len(seg.refs) >= 2
+        positive_prompt = reinforce_fl2v_prompt(positive_prompt, has_end_frame=has_end, has_start_frame=has_start)
+    elif seg.task_key == "r2v":
+        ref_idxs = [int(getattr(r, "index", 0)) for r in (seg.refs or []) if r is not None]
+        vid_idxs = [int(getattr(v, "index", 0)) for v in (getattr(seg, "ref_videos", None) or []) if v is not None]
+        audio_idxs = [int(getattr(a, "index", 0)) for a in (seg.ref_audios or []) if a is not None]
+        positive_prompt = reinforce_r2v_prompt(positive_prompt, ref_indices=ref_idxs, video_indices=vid_idxs, audio_indices=audio_idxs)
+    elif seg.task_key == "v2v":
+        positive_prompt = reinforce_v2v_prompt(positive_prompt)
+    elif seg.task_key == "rv2v":
+        ref_idxs = [int(getattr(r, "index", 0)) for r in (seg.refs or []) if r is not None]
+        audio_idxs = [int(getattr(a, "index", 0)) for a in (seg.ref_audios or []) if a is not None]
+        positive_prompt = reinforce_rv2v_prompt(positive_prompt, ref_indices=ref_idxs, audio_indices=audio_idxs)
+    # Build inputs (without prev_tail — we don't have it yet in phase 1)
+    first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios = _build_minimax_inputs(
+        plan, seg, clip_frames=clip_frames, ctx_w=ctx_w, ctx_h=ctx_h, prev_tail=None,
+    )
+    i2v_new_anchor = seg.task_key == "i2v" and first_frame is not None
+    # Probe availability here, not in Phase 2: sample_len is baked into the
+    # conditioning below, so the pin decision cannot be revised later.
+    prev_context_available = _prev_context_available(
+        node_id, plan, all_segments, seg.index, run_indices, completed_av_latents,
+        width=ctx_w, height=ctx_h, workflow_name=workflow_name,
+    )
+    use_motion_context = (
+        continuity_active
+        and not i2v_new_anchor
+        and seg.index > 0
+        and prev_context_available
+    )
+    if use_motion_context:
+        first_frame = None  # context owns the head
+    if continuity_active and seg.index > 0 and not use_motion_context:
+        reports.append(
+            f"  Seg #{seg.index + 1}: 无上段可引用（前段未采样且无缓存），"
+            "本段不继承运动——请按顺序重跑该段以恢复接缝连贯。"
+        )
+    # The head pin *replays* the previous segment's tail, so it lengthens
+    # the sample and is trimmed after decode. The tail pin needs its room
+    # reserved up front: it is replayed past the export and dropped, and
+    # taking that room out of the free zone instead is what used to clip a
+    # segment's ending.
+    context_n = (
+        snap_context_frames(plan.continuity_overlap_frames) if use_motion_context else 0
+    )
+    next_pin = bool(getattr(seg, "continuity_to_next", False))
+    tail_room = int(TAIL_CONTEXT_FRAMES) if (use_motion_context and next_pin) else 0
+    role = (
+        "both" if (context_n > 0 and next_pin) else
+        "prev" if context_n > 0 else
+        "next" if next_pin else
+        "none"
+    )
+    # sample_len only here; export length is recomputed in Phase 2 from the
+    # same role so the three-zone budget stays the single source of truth.
+    sample_len, _, _, _ = generation_frame_budget(
+        num_frames, context_n, role, tail_room,
+    )
+    if seg.task_key in {"r2v", "v2v", "rv2v"} and (ref_images or ref_videos or ref_audios or ref_video_audios) and audio_vae is None:
+        raise ValueError("r2v/v2v/rv2v requires audio_vae input.")
+    # Text-side identity of this segment. Segments sharing a key produce
+    # interchangeable encodings, so the expensive Qwen prefill runs once per
+    # distinct key rather than once per segment.
+    ref_image_size = resolve_ref_image_size(seg, plan)
+    # The canvas only enters the key when this segment actually feeds pixels to
+    # the text encoder (refs / videos / first-last frames); the sample length
+    # never does, so a duration tweak reuses the encoding instead of paying for
+    # another Qwen prefill.
+    text_key = text_cache_key(
+        positive_prompt, ctx_w, ctx_h, sample_len, seg.task_key,
+        ref_image_size, ref_images,
+        ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
+    )
+    # Remember this segment's first-pass text/context identity on disk so a
+    # later「二次采样」can load the *same* conditioning file without re-hashing
+    # refs (pixel tensors that no longer exist once this run ends).
+    # Keyed by content hash, not by position: a later timeline reorder must
+    # not let one segment pick up another's encoding.
+    save_segment_second_params(
+        node_id=node_id,
+        workflow_name=workflow_name,
+        segment_index=seg.index,
+        slot_key=slot_content_hash(seg, plan),
+        text_key=text_key,
+        ctx_w=ctx_w,
+        ctx_h=ctx_h,
+        sample_len=sample_len,
+        num_frames=num_frames,
+        frame_count=getattr(seg, "frame_count", 0) or num_frames,
+        context_n=context_n,
+        task_key=seg.task_key,
+        ref_image_size=ref_image_size,
+        positive_prompt=positive_prompt,
+    )
+    # Try conditioning cache first
+    cached_conditioning = None
+    if use_conditioning_cache:
+        cached_conditioning = load_conditioning_cache(
+            node_id=node_id, segment_index=seg.index, prompt=positive_prompt,
+            width=ctx_w, height=ctx_h, length=sample_len, task_key=seg.task_key,
+            ref_image_size=ref_image_size, ref_images=ref_images,
+            workflow_name=workflow_name,
+            ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
+        )
+    # Ref data feeds Phase 2; write it before any cache short-circuit.
+    ref_data = {
+        "first_frame": first_frame,
+        "last_frame": last_frame,
+        "ref_images": ref_images,
+        "ref_videos": ref_videos,
+        "ref_audios": ref_audios,
+        "ref_video_audios": ref_video_audios,
+        "clip_frames": clip_frames,
+        "num_frames": num_frames,
+        "target_len": target_len,
+        "sample_len": sample_len,
+        "ctx_w": ctx_w,
+        "ctx_h": ctx_h,
+        "positive_prompt": positive_prompt,
+        "context_n": context_n,
+        "use_motion_context": use_motion_context,
+    }
+    _save_batch_ref(node_id, seg.index, ref_data, cache_dir)
+    if cached_conditioning is not None:
+        # Cache hit: nothing to encode, so this segment never touches a model.
+        _save_batch_conditioning(
+            node_id, seg.index,
+            cached_conditioning["positive"], cached_conditioning["negative"],
+            cache_dir,
+        )
+        reports.append(f"  Seg #{seg.index + 1}: conditioning CACHE HIT")
+        return {"text_key": text_key, "cache_hit": True, "staged": None, "meta": None}
+    # Stage the pixels now; the encoders consume them in the grouped passes.
+    staged = prepare_segment_materials(
+        prompt=positive_prompt, width=ctx_w, height=ctx_h,
+        length=sample_len, task_key=seg.task_key,
+        first_frame=first_frame, last_frame=last_frame,
+        ref_images=ref_images, ref_videos=ref_videos,
+        ref_video_audios=ref_video_audios, ref_audios=ref_audios,
+        ref_image_size=ref_image_size,
+    )
+    staged["text_key"] = text_key
+    meta = {
+        "seg": seg, "positive_prompt": positive_prompt,
+        "ctx_w": ctx_w, "ctx_h": ctx_h, "sample_len": sample_len,
+        "ref_images": ref_images, "ref_image_size": ref_image_size,
+        "ref_videos": ref_videos, "first_frame": first_frame, "last_frame": last_frame,
+        "text_key": text_key,
+    }
+
+    return {"text_key": text_key, "cache_hit": False, "staged": staged, "meta": meta}
+
 def execute_director_batch(
     plan: DirectorPlan,
     *,
@@ -243,214 +458,21 @@ def execute_director_batch(
     aud_cache: dict = {}
 
     for seg in run_list:
-        ui_idx = seg.timeline_index
         seg_pos = run_list.index(seg)
-        report_director_progress(
-            node_id, segment_index=seg_pos, segment_total=len(run_list),
-            phase="batch_prepare", phase_value=0, phase_max=1,
-            frames_label=frames_label(seg), task_key=seg.task_key,
-            timeline_segment_index=ui_idx, timeline_segment_total=timeline_seg_total,
+        staged_entry = _prepare_one_segment(
+            plan, seg, seg_pos,
+            node_id=node_id, all_segments=all_segments, run_indices=run_indices,
+            completed_av_latents=completed_av_latents, cache_dir=cache_dir,
+            workflow_name=workflow_name, use_conditioning_cache=use_conditioning_cache,
+            audio_vae=audio_vae, timeline_seg_total=timeline_seg_total,
+            segment_total=len(run_list), reports=reports,
         )
-
-        target_len = max(1, int(seg.frame_count or plan.total_frames or 124))
-        raw_clip = resolve_segment_raw_clip(plan, seg)
-
-        if seg.source_clip is not None:
-            body_raw = seg.source_clip
-            target_len = max(target_len, int(body_raw.shape[0]))
-        else:
-            body_raw = raw_clip[:target_len] if int(raw_clip.shape[0]) > target_len else raw_clip
-
-        if body_raw is not None and body_raw.shape[0] > 0:
-            if plan.output_mode == "fixed":
-                clip_frames = fit_canvas(body_raw, plan.width, plan.height)
-            else:
-                clip_frames = fit_video_long_edge(body_raw, plan.ref_max_size)
-                if int(clip_frames.shape[1]) != int(plan.height) or int(clip_frames.shape[2]) != int(plan.width):
-                    clip_frames = fit_canvas(clip_frames, plan.width, plan.height)
-        else:
-            clip_frames = None
-
-        num_frames = minimax_align_frame_count(target_len)
-        if clip_frames is not None:
-            clip_frames, _ = prepare_segment_clip(clip_frames, num_frames)
-
-        continuity_active = is_continuity_active(plan, seg)
-
-        ctx_w = int(plan.width)
-        ctx_h = int(plan.height)
-        if clip_frames is not None and clip_frames.shape[0] > 0:
-            ctx_h, ctx_w = int(clip_frames.shape[1]), int(clip_frames.shape[2])
-        assert_minimax_canvas(ctx_w, ctx_h)
-
-        positive_prompt = seg.prompt
-        if seg.task_key == "fl2v":
-            from .fl2v_timeline import reinforce_fl2v_prompt
-            has_start = any(getattr(r, "index", None) == 0 for r in (seg.refs or []))
-            has_end = any(getattr(r, "index", None) == 1 for r in (seg.refs or []))
-            if not has_start and not has_end and seg.refs:
-                has_start = True
-                has_end = len(seg.refs) >= 2
-            positive_prompt = reinforce_fl2v_prompt(positive_prompt, has_end_frame=has_end, has_start_frame=has_start)
-        elif seg.task_key == "r2v":
-            ref_idxs = [int(getattr(r, "index", 0)) for r in (seg.refs or []) if r is not None]
-            vid_idxs = [int(getattr(v, "index", 0)) for v in (getattr(seg, "ref_videos", None) or []) if v is not None]
-            audio_idxs = [int(getattr(a, "index", 0)) for a in (seg.ref_audios or []) if a is not None]
-            positive_prompt = reinforce_r2v_prompt(positive_prompt, ref_indices=ref_idxs, video_indices=vid_idxs, audio_indices=audio_idxs)
-        elif seg.task_key == "v2v":
-            positive_prompt = reinforce_v2v_prompt(positive_prompt)
-        elif seg.task_key == "rv2v":
-            ref_idxs = [int(getattr(r, "index", 0)) for r in (seg.refs or []) if r is not None]
-            audio_idxs = [int(getattr(a, "index", 0)) for a in (seg.ref_audios or []) if a is not None]
-            positive_prompt = reinforce_rv2v_prompt(positive_prompt, ref_indices=ref_idxs, audio_indices=audio_idxs)
-
-        # Build inputs (without prev_tail — we don't have it yet in phase 1)
-        first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios = _build_minimax_inputs(
-            plan, seg, clip_frames=clip_frames, ctx_w=ctx_w, ctx_h=ctx_h, prev_tail=None,
-        )
-
-        i2v_new_anchor = seg.task_key == "i2v" and first_frame is not None
-        # Probe availability here, not in Phase 2: sample_len is baked into the
-        # conditioning below, so the pin decision cannot be revised later.
-        prev_context_available = _prev_context_available(
-            node_id, plan, all_segments, seg.index, run_indices, completed_av_latents,
-            width=ctx_w, height=ctx_h, workflow_name=workflow_name,
-        )
-        use_motion_context = (
-            continuity_active
-            and not i2v_new_anchor
-            and seg.index > 0
-            and prev_context_available
-        )
-        if use_motion_context:
-            first_frame = None  # context owns the head
-        if continuity_active and seg.index > 0 and not use_motion_context:
-            reports.append(
-                f"  Seg #{seg.index + 1}: 无上段可引用（前段未采样且无缓存），"
-                "本段不继承运动——请按顺序重跑该段以恢复接缝连贯。"
-            )
-
-        # The head pin *replays* the previous segment's tail, so it lengthens
-        # the sample and is trimmed after decode. The tail pin needs its room
-        # reserved up front: it is replayed past the export and dropped, and
-        # taking that room out of the free zone instead is what used to clip a
-        # segment's ending.
-        context_n = (
-            snap_context_frames(plan.continuity_overlap_frames) if use_motion_context else 0
-        )
-        next_pin = bool(getattr(seg, "continuity_to_next", False))
-        tail_room = int(TAIL_CONTEXT_FRAMES) if (use_motion_context and next_pin) else 0
-        role = (
-            "both" if (context_n > 0 and next_pin) else
-            "prev" if context_n > 0 else
-            "next" if next_pin else
-            "none"
-        )
-        # sample_len only here; export length is recomputed in Phase 2 from the
-        # same role so the three-zone budget stays the single source of truth.
-        sample_len, _, _, _ = generation_frame_budget(
-            num_frames, context_n, role, tail_room,
-        )
-
-        if seg.task_key in {"r2v", "v2v", "rv2v"} and (ref_images or ref_videos or ref_audios or ref_video_audios) and audio_vae is None:
-            raise ValueError("r2v/v2v/rv2v requires audio_vae input.")
-
-        # Text-side identity of this segment. Segments sharing a key produce
-        # interchangeable encodings, so the expensive Qwen prefill runs once per
-        # distinct key rather than once per segment.
-        ref_image_size = resolve_ref_image_size(seg, plan)
-        # The canvas only enters the key when this segment actually feeds pixels to
-        # the text encoder (refs / videos / first-last frames); the sample length
-        # never does, so a duration tweak reuses the encoding instead of paying for
-        # another Qwen prefill.
-        text_key = text_cache_key(
-            positive_prompt, ctx_w, ctx_h, sample_len, seg.task_key,
-            ref_image_size, ref_images,
-            ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
-        )
-        used_text_keys.add(text_key)
-        # Remember this segment's first-pass text/context identity on disk so a
-        # later「二次采样」can load the *same* conditioning file without re-hashing
-        # refs (pixel tensors that no longer exist once this run ends).
-        # Keyed by content hash, not by position: a later timeline reorder must
-        # not let one segment pick up another's encoding.
-        save_segment_second_params(
-            node_id=node_id,
-            workflow_name=workflow_name,
-            segment_index=seg.index,
-            slot_key=slot_content_hash(seg, plan),
-            text_key=text_key,
-            ctx_w=ctx_w,
-            ctx_h=ctx_h,
-            sample_len=sample_len,
-            num_frames=num_frames,
-            frame_count=getattr(seg, "frame_count", 0) or num_frames,
-            context_n=context_n,
-            task_key=seg.task_key,
-            ref_image_size=ref_image_size,
-            positive_prompt=positive_prompt,
-        )
-
-        # Try conditioning cache first
-        cached_conditioning = None
-        if use_conditioning_cache:
-            cached_conditioning = load_conditioning_cache(
-                node_id=node_id, segment_index=seg.index, prompt=positive_prompt,
-                width=ctx_w, height=ctx_h, length=sample_len, task_key=seg.task_key,
-                ref_image_size=ref_image_size, ref_images=ref_images,
-                workflow_name=workflow_name,
-                ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
-            )
-
-        # Ref data feeds Phase 2; write it before any cache short-circuit.
-        ref_data = {
-            "first_frame": first_frame,
-            "last_frame": last_frame,
-            "ref_images": ref_images,
-            "ref_videos": ref_videos,
-            "ref_audios": ref_audios,
-            "ref_video_audios": ref_video_audios,
-            "clip_frames": clip_frames,
-            "num_frames": num_frames,
-            "target_len": target_len,
-            "sample_len": sample_len,
-            "ctx_w": ctx_w,
-            "ctx_h": ctx_h,
-            "positive_prompt": positive_prompt,
-            "context_n": context_n,
-            "use_motion_context": use_motion_context,
-        }
-        _save_batch_ref(node_id, seg.index, ref_data, cache_dir)
-
-        if cached_conditioning is not None:
-            # Cache hit: nothing to encode, so this segment never touches a model.
-            _save_batch_conditioning(
-                node_id, seg.index,
-                cached_conditioning["positive"], cached_conditioning["negative"],
-                cache_dir,
-            )
-            reports.append(f"  Seg #{seg.index + 1}: conditioning CACHE HIT")
+        used_text_keys.add(staged_entry["text_key"])
+        if staged_entry["cache_hit"]:
             cache_hits += 1
             continue
-
-        # Stage the pixels now; the encoders consume them in the grouped passes.
-        staged = prepare_segment_materials(
-            prompt=positive_prompt, width=ctx_w, height=ctx_h,
-            length=sample_len, task_key=seg.task_key,
-            first_frame=first_frame, last_frame=last_frame,
-            ref_images=ref_images, ref_videos=ref_videos,
-            ref_video_audios=ref_video_audios, ref_audios=ref_audios,
-            ref_image_size=ref_image_size,
-        )
-        staged["text_key"] = text_key
-        pending.append(staged)
-        pending_meta.append({
-            "seg": seg, "positive_prompt": positive_prompt,
-            "ctx_w": ctx_w, "ctx_h": ctx_h, "sample_len": sample_len,
-            "ref_images": ref_images, "ref_image_size": ref_image_size,
-            "ref_videos": ref_videos, "first_frame": first_frame, "last_frame": last_frame,
-            "text_key": text_key,
-        })
+        pending.append(staged_entry["staged"])
+        pending_meta.append(staged_entry["meta"])
 
     # ---- Step 1: text encoder -------------------------------------------------
     if pending:

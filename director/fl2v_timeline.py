@@ -306,11 +306,11 @@ def _build_fl2v_endpoint_source(
     image0 and last frame is image1 (middle held at image0) gives the model a much
     stronger first/last-frame signal — especially on long later shots.
     """
-    from .plan import wan_align_frame_count
+    from .frame_align import minimax_align_frame_count
 
     if start_img.ndim == 3:
         start_img = start_img.unsqueeze(0)
-    n = wan_align_frame_count(max(MIN_FL2V_FRAMES, int(frame_count)))
+    n = minimax_align_frame_count(max(MIN_FL2V_FRAMES, int(frame_count)))
     # Hold start through the body (i2v-like), snap last frame to end when present.
     clip = start_img[:1].expand(n, -1, -1, -1).contiguous().clone()
     if end_img is not None:
@@ -539,12 +539,12 @@ def build_fl2v_director_plan(
     height: int,
     ref_max_size: int,
 ):
-    from .plan import (
+    from .plan_types import (
         DirectorPlan,
-        SegmentPlan,
         SegmentRef,
-        _parse_run_selection,
-        _resolve_export_mode,
+        SegmentPlan,
+        parse_run_selection,
+        resolve_export_mode,
     )
 
     global_block = timeline.get("global") or {}
@@ -575,7 +575,7 @@ def build_fl2v_director_plan(
     # runSelection uses shot indices when shots[] is present; else keyframe indices.
     # Keep full shot list for continuity neighbors; honor selection via run_indices.
     run_count = len(timeline.get("shots") or []) if used_explicit_shots else len(keyframes)
-    run_sel = _parse_run_selection(timeline, max(1, run_count))
+    run_sel = parse_run_selection(timeline, max(1, run_count))
     if run_sel is not None:
         if not any(int(s["source_index"]) in run_sel for s in shots):
             raise ValueError(
@@ -609,7 +609,7 @@ def build_fl2v_director_plan(
     )
     assert_minimax_canvas(out_w, out_h)
 
-    export_mode = _resolve_export_mode(output_block)
+    export_mode = resolve_export_mode(output_block)
     fallback_prompt = (global_block.get("prompt") or global_prompt or "").strip()
     fallback_negative = (
         global_block.get("negativePrompt")

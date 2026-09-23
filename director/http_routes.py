@@ -754,7 +754,8 @@ async def minimax_segment_export_status(request):
     if isinstance(timeline_data, dict):
         timeline_data = json.dumps(timeline_data, ensure_ascii=False)
     try:
-        from .plan import build_director_plan, normalize_segment_export_source
+        from .plan import build_director_plan
+        from .plan_types import normalize_segment_export_source
         from .segment_cache import inspect_segment_export_status, sync_segment_slots
         from .segment_slots import VARIANT_SECOND
 
@@ -973,8 +974,8 @@ async def minimax_segment_export(request):
         return web.Response(status=400, text="No segment indices selected.")
 
     try:
-        from .plan import build_director_plan, normalize_segment_export_mode
-        from .plan import normalize_segment_export_source
+        from .plan import build_director_plan
+        from .plan_types import normalize_segment_export_mode, normalize_segment_export_source
         from .segment_cache import run_segment_export, sync_segment_slots
         from .segment_slots import VARIANT_SECOND
 

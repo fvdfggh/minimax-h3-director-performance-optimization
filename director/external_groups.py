@@ -230,16 +230,16 @@ def _parse_timeline_meta(timeline_data: str | None) -> dict:
 
 
 def _run_selection_filter(timeline: dict, count: int) -> list[int]:
-    from .plan import _parse_run_selection
+    from .plan_types import parse_run_selection
 
-    sel = _parse_run_selection(timeline, count)
+    sel = parse_run_selection(timeline, count)
     if sel is None:
         return list(range(count))
     return sorted(int(i) for i in sel)
 
 
 def _resolve_dims(timeline: dict, width: int, height: int, ref_max_size: int, sample_img: torch.Tensor | None):
-    from .plan import _resolve_export_mode
+    from .plan_types import resolve_export_mode
 
     output_block = timeline.get("output") or {}
     out_mode = str(output_block.get("mode") or "long_edge").lower()
@@ -260,7 +260,7 @@ def _resolve_dims(timeline: dict, width: int, height: int, ref_max_size: int, sa
         fixed_width=int(output_block.get("width") or timeline.get("width") or width or 864),
         fixed_height=int(output_block.get("height") or timeline.get("height") or height or 480),
     )
-    export_mode = _resolve_export_mode(output_block)
+    export_mode = resolve_export_mode(output_block)
     assert_minimax_canvas(out_w, out_h)
     return out_w, out_h, ref_max, out_mode, export_mode
 
@@ -347,16 +347,18 @@ def build_plan_from_external_groups(
     ref_max_size: int,
 ):
     from .plan import (
+        _load_ref_audios,
+        _load_refs,
+        reinforce_r2v_prompt,
+    )
+    from .plan_types import (
         DirectorPlan,
         SegmentPlan,
         SegmentRef,
         SegmentRefAudio,
         SegmentRefVideo,
-        _load_ref_audios,
-        _load_refs,
         concat_common_segment_prompt,
         merge_indexed_refs,
-        reinforce_r2v_prompt,
         resolve_ref_image_size,
     )
 

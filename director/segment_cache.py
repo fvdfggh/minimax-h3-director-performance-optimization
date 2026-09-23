@@ -27,7 +27,7 @@ from ..lib.fs import (
 from . import cache_layout
 from . import segment_slots
 from .h3_motion_context import CONTINUITY_PIPELINE_ID
-from .plan import DirectorPlan, SegmentPlan, resolve_ref_image_size
+from .plan_types import DirectorPlan, SegmentPlan, resolve_ref_image_size
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache")
 
@@ -2469,7 +2469,7 @@ def run_segment_export(
     rest still exports. When ``out_dir`` is None the files land in
     ``<output>/minimax_segment_export/<node_id>``.
     """
-    from .plan import normalize_segment_export_mode
+    from .plan_types import normalize_segment_export_mode
 
     normalized = normalize_segment_export_mode(mode)
     segments = _segments_by_index(plan)

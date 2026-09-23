@@ -15,7 +15,7 @@ from ..director.audio_export import (
 )
 from ..director.frame_align import pad_or_trim_frames
 from ..director.gen_timeline import is_prompt_batch_timeline, is_video_batch_task_key
-from ..director.plan import build_director_plan, count_all_timeline_segments, count_timeline_segments, plan_summary, _parse_second_sample
+from ..director.plan import build_director_plan, count_all_timeline_segments, count_timeline_segments, plan_summary, parse_second_sample
 from ..director.progress import report_director_planning
 from ..lib.constants import (
     DEFAULT_HEIGHT,
@@ -269,7 +269,7 @@ def _attach_segment_export(plan, timeline_data: str) -> None:
     the final segment list. Never raises — a malformed block just means the
     feature stays off and the node runs normally.
     """
-    from ..director.plan import _parse_segment_export
+    from ..director.plan import parse_segment_export
 
     try:
         timeline = json.loads(timeline_data) if timeline_data and timeline_data.strip() else {}
@@ -278,7 +278,7 @@ def _attach_segment_export(plan, timeline_data: str) -> None:
     if not isinstance(timeline, dict):
         return
     try:
-        plan.segment_export = _parse_segment_export(timeline, len(plan.segments))
+        plan.segment_export = parse_segment_export(timeline, len(plan.segments))
         _seg_export = plan.segment_export
         log.info(
             "MiniMax H3 Director Opt 分段导出 parsed: enabled=%s mode=%s source=%s indices=%s nseg=%d",
@@ -308,7 +308,7 @@ def _attach_second_sample(plan, timeline_data: str) -> None:
     if not isinstance(timeline, dict):
         return
     try:
-        plan.second_sample = _parse_second_sample(timeline, len(plan.segments))
+        plan.second_sample = parse_second_sample(timeline, len(plan.segments))
         _ss = plan.second_sample
         log.info(
             "MiniMax H3 Director Opt 二次采样 parsed: enabled=%s indices=%s nseg=%d",

@@ -19,7 +19,7 @@ import folder_paths
 import torch
 
 from .audio_export import prepare_segment_audio_for_file_export
-from .plan import DirectorPlan, SegmentPlan
+from .plan_types import DirectorPlan, SegmentPlan
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.mp4_export")
 

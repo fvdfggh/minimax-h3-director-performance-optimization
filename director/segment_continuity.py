@@ -26,14 +26,17 @@ from .h3_motion_context import (
     DEFAULT_CONTEXT_FRAMES as DEFAULT_CONTINUITY_OVERLAP,
     snap_context_frames,
 )
-from .plan import DirectorPlan, SegmentPlan, wan_align_frame_count
 from . import segment_slots
+from .frame_align import minimax_align_frame_count
+from .plan_types import (
+    MAX_CONTINUITY_OVERLAP,
+    MIN_CONTINUITY_OVERLAP,
+    DirectorPlan,
+    SegmentPlan,
+)
 from .segment_cache import load_segment_cache
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.continuity")
-
-MIN_CONTINUITY_OVERLAP = 5
-MAX_CONTINUITY_OVERLAP = 56
 # Last N frames of prev as appearance refs (hair/outfit pop at joins needs >1).
 MAX_CONTINUITY_REF_FRAMES = 2
 # Leading-body MAD skip disabled: on successful rv2v/SCAIL handoff the body
@@ -236,7 +239,7 @@ def timeline_row_for_index(timeline: dict | None, index: int) -> dict:
 def resolve_continuity_lock_pixels(overlap_frames: int) -> int:
     """SCAIL prefix length in pixels (Wan 4n+1, for clean VAE round-trip)."""
     ov = max(MIN_CONTINUITY_OVERLAP, min(MAX_CONTINUITY_OVERLAP, int(overlap_frames)))
-    return wan_align_frame_count(ov)
+    return minimax_align_frame_count(ov)
 
 
 def resolve_continuity_guide_frames(overlap_frames: int) -> tuple[int, int, int, int, int]:
@@ -262,13 +265,13 @@ def resolve_segment_generation_frames(
     """
     body = max(1, int(segment_frame_count))
     if not continuity_enabled or segment_index <= 0:
-        return wan_align_frame_count(body), 0
+        return minimax_align_frame_count(body), 0
     lock_px = resolve_continuity_lock_pixels(continuity_overlap)
     if lock_px <= 0:
-        return wan_align_frame_count(body), 0
+        return minimax_align_frame_count(body), 0
     settling = max(0, int(CONTINUITY_SETTLING_FRAMES))
     raw = lock_px + settling + body + CONTINUITY_SOURCE_LOOKAHEAD
-    return wan_align_frame_count(raw), lock_px + settling
+    return minimax_align_frame_count(raw), lock_px + settling
 
 
 def resolve_continuity_settling_frames() -> int:
@@ -1478,7 +1481,7 @@ def encode_tail_clip(
 ) -> torch.Tensor:
     """VAE-encode prev-tail clip for SCAIL lock (must already be Wan 4n+1 length)."""
     clip = fit_canvas(tail_clip, width, height)
-    aligned = wan_align_frame_count(int(clip.shape[0]))
+    aligned = minimax_align_frame_count(int(clip.shape[0]))
     if int(clip.shape[0]) > aligned:
         clip = clip[:aligned]
     elif int(clip.shape[0]) < aligned:
@@ -1523,7 +1526,7 @@ def apply_scail_prefix_to_latent(
             flat.float(), size=(h, w), mode="bilinear", align_corners=False
         )
         tail_latent = flat.to(dtype=tail_latent.dtype).reshape(b, c, f, h, w)
-    aligned_pixels = wan_align_frame_count(int(overlap_pixel_frames))
+    aligned_pixels = minimax_align_frame_count(int(overlap_pixel_frames))
     t_tail = min(
         int(tail_latent.shape[2]),
         _latent_frame_count(aligned_pixels),

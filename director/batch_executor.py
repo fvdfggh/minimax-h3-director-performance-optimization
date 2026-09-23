@@ -41,11 +41,12 @@ from .audio_export import (
 )
 from .segment_runtime import frames_label, resolve_segment_raw_clip, segment_passthrough_chunk
 from .plan import (
-    DirectorPlan, prepare_segment_clip, resolve_ref_image_size,
+    prepare_segment_clip,
     ref_audios_to_dict, ref_video_audios_to_dict, ref_videos_to_dict,
     reference_video_for_segment,
     refs_to_kwargs_for_context, reinforce_r2v_prompt, reinforce_rv2v_prompt, reinforce_v2v_prompt,
 )
+from .plan_types import DirectorPlan, resolve_ref_image_size
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
 from .h3_motion_context import (
     DEFAULT_AUDIO_CONTEXT_FRAMES, apply_motion_context,

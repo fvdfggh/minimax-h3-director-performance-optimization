@@ -260,18 +260,20 @@ def build_gen_director_plan(
 ):
     """Build DirectorPlan for generation timeline modes (lazy import avoids cycles)."""
     from .plan import (
-        DirectorPlan,
-        SegmentPlan,
         _load_ref_audios,
         _load_ref_videos,
         _load_refs,
-        _parse_run_selection,
-        _resolve_export_mode,
-        concat_common_segment_prompt,
-        merge_indexed_refs,
-        resolve_ref_image_size,
         segment_ref_audios_for_context,
         segment_refs_for_context,
+    )
+    from .plan_types import (
+        DirectorPlan,
+        SegmentPlan,
+        concat_common_segment_prompt,
+        merge_indexed_refs,
+        parse_run_selection,
+        resolve_export_mode,
+        resolve_ref_image_size,
     )
 
     global_block = timeline.get("global") or {}
@@ -340,7 +342,7 @@ def build_gen_director_plan(
 
     assert_minimax_canvas(out_w, out_h)
 
-    export_mode = _resolve_export_mode(output_block)
+    export_mode = resolve_export_mode(output_block)
     # Image prompt-batch (t2i/i2i/r2i) always merges to images list; video batch (t2v/i2v/r2v) respects export mode.
     if is_prompt_batch_timeline(timeline, task_key) and not is_video_batch_task_key(task_key):
         export_mode = "all"
@@ -544,7 +546,7 @@ def build_gen_director_plan(
         edit_mode=edit_mode,
         raw=raw,
         export_mode=export_mode,
-        run_indices=_parse_run_selection(timeline, len(segments)),
+        run_indices=parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
     )

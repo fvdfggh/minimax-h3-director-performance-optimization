@@ -7,7 +7,7 @@ import torch
 from ..lib.image_prep import fit_canvas, fit_video_long_edge
 from ..lib.video_io import load_timeline_segment
 from .frame_align import pad_or_trim_frames
-from .plan import DirectorPlan
+from .plan_types import DirectorPlan
 
 
 def needs_source_video(task_key: str) -> bool:

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import folder_paths
 from aiohttp import web
@@ -33,6 +34,9 @@ from ..lib.pathutil import (
     WIN_ILLEGAL_RE as _WIN_ILLEGAL,
     WIN_RESERVED_RE as _WIN_RESERVED,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - annotation only
+    from .plan_types import DirectorPlan
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
 
@@ -67,6 +71,28 @@ def _get_media_exts(kind: str) -> set[str]:
     if kind == "reference_audio":
         return AUDIO_EXTS | VIDEO_EXTS
     raise ValueError("kind must be image, video, audio or reference_audio")
+
+
+def _plan_from_request(body: dict, timeline_data: str) -> "DirectorPlan":
+    """Build the ``DirectorPlan`` a picker request describes.
+
+    Every picker endpoint (segment export / second sample / align-to-next)
+    rebuilds the same plan from the same request fields. Centralising it means a
+    new plan input only needs to be added here, next to the node's own defaults —
+    the five copies used to drift apart.
+    """
+    from .plan import build_director_plan
+
+    return build_director_plan(
+        str(timeline_data),
+        global_task_type=str(body.get("task_type") or ""),
+        global_prompt=str(body.get("global_prompt") or ""),
+        total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
+        frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
+        width=int(body.get("width") or DEFAULT_WIDTH),
+        height=int(body.get("height") or DEFAULT_HEIGHT),
+        ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
+    )
 
 
 def _peek_image_size(path: str) -> tuple[int, int]:
@@ -754,7 +780,6 @@ async def minimax_segment_export_status(request):
     if isinstance(timeline_data, dict):
         timeline_data = json.dumps(timeline_data, ensure_ascii=False)
     try:
-        from .plan import build_director_plan
         from .plan_types import normalize_segment_export_source
         from .segment_cache import inspect_segment_export_status, sync_segment_slots
         from .segment_slots import VARIANT_SECOND
@@ -766,16 +791,7 @@ async def minimax_segment_export_status(request):
         source = normalize_segment_export_source(body.get("source") or body.get("cacheSource"))
         variant = VARIANT_SECOND if source == "2nd" else "1st"
 
-        plan = build_director_plan(
-            str(timeline_data),
-            global_task_type=str(body.get("task_type") or ""),
-            global_prompt=str(body.get("global_prompt") or ""),
-            total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
-            frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
-            width=int(body.get("width") or DEFAULT_WIDTH),
-            height=int(body.get("height") or DEFAULT_HEIGHT),
-            ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
-        )
+        plan = _plan_from_request(body, str(timeline_data))
         # Reconcile first: the picker must not offer a render that belongs to a
         # group deleted from the middle of the timeline.
         sync_segment_slots(node_id, plan, workflow_name=workflow_name, variant=variant)
@@ -807,7 +823,6 @@ async def minimax_second_sample_status(request):
     if isinstance(timeline_data, dict):
         timeline_data = json.dumps(timeline_data, ensure_ascii=False)
     try:
-        from .plan import build_director_plan
         from .segment_cache import (
             inspect_second_sample_status,
             sync_second_segment_slots,
@@ -816,16 +831,7 @@ async def minimax_second_sample_status(request):
 
         workflow_name = str(body.get("workflow_name") or "").strip() or None
 
-        plan = build_director_plan(
-            str(timeline_data),
-            global_task_type=str(body.get("task_type") or ""),
-            global_prompt=str(body.get("global_prompt") or ""),
-            total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
-            frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
-            width=int(body.get("width") or DEFAULT_WIDTH),
-            height=int(body.get("height") or DEFAULT_HEIGHT),
-            ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
-        )
+        plan = _plan_from_request(body, str(timeline_data))
         # Reconcile both passes first so the picker never offers a segment whose
         # position belongs to a group deleted from the middle of the timeline.
         sync_segment_slots(node_id, plan, workflow_name=workflow_name)
@@ -859,22 +865,12 @@ async def minimax_align_to_next_status(request):
     if isinstance(timeline_data, dict):
         timeline_data = json.dumps(timeline_data, ensure_ascii=False)
     try:
-        from .plan import build_director_plan
         from .segment_cache import has_next_segment_av_latent, sync_segment_slots
         from .segment_continuity import is_continuity_active
 
         workflow_name = str(body.get("workflow_name") or "").strip() or None
 
-        plan = build_director_plan(
-            str(timeline_data),
-            global_task_type=str(body.get("task_type") or ""),
-            global_prompt=str(body.get("global_prompt") or ""),
-            total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
-            frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
-            width=int(body.get("width") or DEFAULT_WIDTH),
-            height=int(body.get("height") or DEFAULT_HEIGHT),
-            ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
-        )
+        plan = _plan_from_request(body, str(timeline_data))
         segments = list(getattr(plan, "segments", None) or [])
         if not segments:
             # Selection-run is ON but nothing is ticked. Align-to-next availability
@@ -884,16 +880,7 @@ async def minimax_align_to_next_status(request):
             _tl = json.loads(timeline_data) if timeline_data else {}
             for _k in ("runSelection", "run_selection", "runSelectEnabled", "run_select_enabled"):
                 _tl.pop(_k, None)
-            plan = build_director_plan(
-                json.dumps(_tl),
-                global_task_type=str(body.get("task_type") or ""),
-                global_prompt=str(body.get("global_prompt") or ""),
-                total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
-                frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
-                width=int(body.get("width") or DEFAULT_WIDTH),
-                height=int(body.get("height") or DEFAULT_HEIGHT),
-                ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
-            )
+            plan = _plan_from_request(body, json.dumps(_tl))
             segments = list(getattr(plan, "segments", None) or [])
         # The next segment's latent must be the neighbour's own render, so the
         # slot map is reconciled before anything is probed.
@@ -974,7 +961,6 @@ async def minimax_segment_export(request):
         return web.Response(status=400, text="No segment indices selected.")
 
     try:
-        from .plan import build_director_plan
         from .plan_types import normalize_segment_export_mode, normalize_segment_export_source
         from .segment_cache import run_segment_export, sync_segment_slots
         from .segment_slots import VARIANT_SECOND
@@ -987,16 +973,7 @@ async def minimax_segment_export(request):
         except (TypeError, ValueError):
             return web.Response(status=400, text="Invalid segment indices.")
 
-        plan = build_director_plan(
-            str(timeline_data),
-            global_task_type=str(body.get("task_type") or ""),
-            global_prompt=str(body.get("global_prompt") or ""),
-            total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
-            frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
-            width=int(body.get("width") or DEFAULT_WIDTH),
-            height=int(body.get("height") or DEFAULT_HEIGHT),
-            ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
-        )
+        plan = _plan_from_request(body, str(timeline_data))
         workflow_name = str(body.get("workflow_name") or "").strip() or None
         # Reconcile before exporting: never copy out a file group that belongs
         # to a group already deleted from the timeline.

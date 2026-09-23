@@ -438,8 +438,6 @@ def _frames_to_headtail(tensor: torch.Tensor) -> dict[str, Any]:
     }
 
 
-def _headtail_to_disk(tensor: torch.Tensor) -> dict[str, Any]:
-    return _frames_to_headtail(tensor)
 
 
 def _load_headtail(ht_path: Path) -> tuple[torch.Tensor | None, torch.Tensor | None, int]:
@@ -1136,9 +1134,6 @@ def _fingerprint_matches(
 # decode overwrites it in place.
 # --------------------------------------------------------------------------
 
-CLIP_CACHE_SUFFIX = "clip.mp4"
-
-
 def clip_cache_path(
     node_id: str | None,
     seg_index: int,
@@ -1276,18 +1271,6 @@ def save_segment_clip(
         return None
 
 
-def clear_segment_clip(
-    node_id: str | None,
-    seg_index: int,
-    workflow_name: str | None = None,
-    *,
-    variant: str = segment_slots.VARIANT_FIRST,
-) -> bool:
-    """Drop one segment's clip so a stale file can never be exported."""
-    path = clip_cache_path(node_id, seg_index, workflow_name=workflow_name, variant=variant)
-    if path is None:
-        return False
-    return _safe_unlink(path)
 
 
 def segment_export_availability(
@@ -1403,23 +1386,6 @@ def _second_slot_paths(
     )
 
 
-def _has_text_conditioning_cache(node_id: str | None, workflow_name: str | None) -> bool:
-    """Best-effort text-cache probe: any ``cond_text_*.pt`` under this node.
-
-    The exact per-segment key cannot be recomputed here — its ``ref_images`` are
-    pixel tensors that only exist during encoding — so the availability probe
-    treats "the node has text encodings on disk" as the gate, and the runtime
-    :func:`load_conditioning_cache` does the precise hit/miss per segment.
-    """
-    if not node_id:
-        return False
-    root = _cache_root(node_id, workflow_name)
-    if root is None or not root.is_dir():
-        return False
-    try:
-        return any(root.glob(f"{cache_layout.TEXT_PREFIX}_*.pt"))
-    except OSError:
-        return False
 
 
 def _has_segment_text_conditioning(
@@ -1559,24 +1525,6 @@ def resolve_second_stem(
     )
 
 
-def load_second_pass_av_latent(
-    node_id: str | None,
-    seg_index: int,
-    *,
-    workflow_name: str | None = None,
-) -> dict | None:
-    """Load the cached second-pass AV latent at a timeline position."""
-    second = _second_slot_paths(node_id, workflow_name, int(seg_index))
-    if second is None or not second["latent"].is_file():
-        return None
-    try:
-        payload = torch.load(second["latent"], map_location="cpu", weights_only=False)
-    except Exception as exc:
-        log.warning("Failed to load second-pass latent #%d: %s", int(seg_index) + 1, exc)
-        return None
-    if not isinstance(payload, dict) or "samples" not in payload:
-        return None
-    return payload
 
 
 def save_second_pass_cache(
@@ -3060,34 +3008,6 @@ def load_segment_audio(
         return None
 
 
-def prune_orphan_segment_files(node_id: str | None, workflow_name: str | None = None) -> int:
-    """Delete per-segment files that no slot in the map claims.
-
-    The slot-aware successor to the old index-based ``prune_segment_cache``:
-    orphan detection is driven by the slot map instead of by which numeric
-    indices still exist, so a file displaced by a mid-timeline deletion is
-    removed rather than silently inherited by the segment that slid into its
-    place. Never raises.
-    """
-    if not node_id:
-        return 0
-    try:
-        root = cache_layout.node_cache_dir(str(node_id), workflow_name, create=False)
-        if not root.is_dir():
-            return 0
-        keep: set[str] = set()
-        for variant in (segment_slots.VARIANT_FIRST, segment_slots.VARIANT_SECOND):
-            for slot in segment_slots.read_slots(root, variant=variant):
-                keep.add(str(slot.get("stem") or ""))
-                if slot.get("prev"):
-                    keep.add(str(slot["prev"]))
-        removed = 0
-        for variant in (segment_slots.VARIANT_FIRST, segment_slots.VARIANT_SECOND):
-            removed += segment_slots.gc_orphan_files(root, keep, variant=variant)
-        return removed
-    except Exception as exc:
-        log.debug("Segment cache prune skipped (%s).", exc)
-        return 0
 
 
 

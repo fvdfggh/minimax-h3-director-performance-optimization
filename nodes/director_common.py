@@ -17,6 +17,12 @@ from ..director.frame_align import pad_or_trim_frames
 from ..director.gen_timeline import is_prompt_batch_timeline, is_video_batch_task_key
 from ..director.plan import build_director_plan, count_all_timeline_segments, count_timeline_segments, plan_summary, _parse_second_sample
 from ..director.progress import report_director_planning
+from ..lib.constants import (
+    DEFAULT_HEIGHT,
+    DEFAULT_REF_MAX_SIZE,
+    DEFAULT_TOTAL_FRAMES,
+    DEFAULT_WIDTH,
+)
 from ..lib.image_prep import fit_canvas, fit_video_long_edge
 from ..lib.video_io import load_timeline_segment
 from ..lib.task_prompts import task_type_combo_options
@@ -71,13 +77,13 @@ def timeline_required_inputs() -> dict:
             "FLOAT",
             {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.01, "tooltip": "Timeline / output FPS (H3 trained at 24)."},
         ),
-        "width": ("INT", {"default": 864, "min": 32, "max": 8192, "step": 32}),
-        "height": ("INT", {"default": 480, "min": 32, "max": 8192, "step": 32}),
-        "ref_max_size": ("INT", {"default": 864, "min": 32, "max": 8192, "step": 32}),
+        "width": ("INT", {"default": DEFAULT_WIDTH, "min": 32, "max": 8192, "step": 32}),
+        "height": ("INT", {"default": DEFAULT_HEIGHT, "min": 32, "max": 8192, "step": 32}),
+        "ref_max_size": ("INT", {"default": DEFAULT_REF_MAX_SIZE, "min": 32, "max": 8192, "step": 32}),
         "total_frames": (
             "INT",
             {
-                "default": 124,
+                "default": DEFAULT_TOTAL_FRAMES,
                 "min": 5,
                 "max": 100000,
                 "tooltip": "Timeline total frames (fl2v = sum of shots). Per-shot generation still capped near 512.",

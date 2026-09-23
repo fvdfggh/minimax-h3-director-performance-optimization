@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from ..lib.constants import EVENT_PREVIEW, EVENT_PROGRESS
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director")
 
 DIRECTOR_PHASES = (
@@ -93,7 +95,7 @@ def report_director_progress(
 
         srv = PromptServer.instance
         if srv:
-            srv.send_sync("minimax_director_opt_progress", payload, srv.client_id)
+            srv.send_sync(EVENT_PROGRESS, payload, srv.client_id)
             srv.send_progress_text("", str(node_id))
     except Exception as exc:
         log.debug("Director progress send skipped: %s", exc)
@@ -141,7 +143,7 @@ def report_director_segment_preview(
 
         srv = PromptServer.instance
         if srv:
-            srv.send_sync("minimax_director_opt_preview", payload, srv.client_id)
+            srv.send_sync(EVENT_PREVIEW, payload, srv.client_id)
     except Exception as exc:
         log.debug("Director preview send skipped: %s", exc)
 

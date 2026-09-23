@@ -17,6 +17,7 @@ from PIL import Image
 import folder_paths
 
 from ..lib.audio_io import load_reference_audio
+from ..lib.constants import FALLBACK_LONG_EDGE
 from ..lib.ref_audios import MAX_REFERENCE_AUDIOS, ref_audios_dict
 from ..lib.ref_images import MAX_REFERENCE_IMAGES, REF_IMAGE_KEY_PREFIX
 from ..lib.ref_videos import MAX_REFERENCE_VIDEOS, ref_videos_dict
@@ -854,7 +855,7 @@ def build_director_plan(
         loaded_w or meta_w or int(width),
         loaded_h or meta_h or int(height),
         mode=str(output_block.get("mode") or "long_edge"),
-        long_edge=int(output_block.get("longEdge") or output_block.get("long_edge") or ref_max_size or 848),
+        long_edge=int(output_block.get("longEdge") or output_block.get("long_edge") or ref_max_size or FALLBACK_LONG_EDGE),
         fixed_width=int(output_block.get("width") or timeline.get("width") or width),
         fixed_height=int(output_block.get("height") or timeline.get("height") or height),
     )

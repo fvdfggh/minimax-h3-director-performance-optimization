@@ -12,6 +12,7 @@ from ..director.second_sampling import (
     DEFAULT_SECOND_SIGMAS,
     SECOND_SEED_FIXED,
 )
+from ..lib.constants import DEFAULT_HEIGHT, DEFAULT_TOTAL_FRAMES, DEFAULT_WIDTH
 from .director_common import (
     CLEAR_VRAM_BETWEEN_SEGMENTS,
     EXPORT_SOURCE_IMAGES,
@@ -73,13 +74,13 @@ def _sanitize_timeline(width, height, total_frames):
             return default, True
         return iv, False
 
-    width, c1 = _clamp_int(width, 64, 4096, 864, "width")
+    width, c1 = _clamp_int(width, 64, 4096, DEFAULT_WIDTH, "width")
     if c1:
         changed.append("width")
-    height, c2 = _clamp_int(height, 64, 4096, 480, "height")
+    height, c2 = _clamp_int(height, 64, 4096, DEFAULT_HEIGHT, "height")
     if c2:
         changed.append("height")
-    total_frames, c3 = _clamp_int(total_frames, 1, 500, 124, "total_frames")
+    total_frames, c3 = _clamp_int(total_frames, 1, 500, DEFAULT_TOTAL_FRAMES, "total_frames")
     if c3:
         changed.append("total_frames")
     if changed:
@@ -105,7 +106,7 @@ def director_timeline_required_inputs() -> dict:
     )
 
     frames_meta = dict(inputs["total_frames"][1])
-    frames_meta["default"] = 124
+    frames_meta["default"] = DEFAULT_TOTAL_FRAMES
     frames_meta["tooltip"] = (
         "Frame count at 24 fps; snapped to MiniMax 17k+5 grid (124 ≈ 5s)."
     )

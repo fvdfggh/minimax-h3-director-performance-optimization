@@ -16,6 +16,14 @@ import folder_paths
 from aiohttp import web
 from server import PromptServer
 
+from ..lib.constants import (
+    DEFAULT_FRAME_RATE,
+    DEFAULT_HEIGHT,
+    DEFAULT_REF_MAX_SIZE,
+    DEFAULT_TOTAL_FRAMES,
+    DEFAULT_WIDTH,
+    ROUTE_PREFIX,
+)
 from ..lib.pathutil import (
     AUDIO_EXTS,
     IMAGE_EXTS,
@@ -761,11 +769,11 @@ async def minimax_segment_export_status(request):
             str(timeline_data),
             global_task_type=str(body.get("task_type") or ""),
             global_prompt=str(body.get("global_prompt") or ""),
-            total_frames=int(body.get("total_frames") or 124),
-            frame_rate=float(body.get("frame_rate") or 24.0),
-            width=int(body.get("width") or 864),
-            height=int(body.get("height") or 480),
-            ref_max_size=int(body.get("ref_max_size") or 864),
+            total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
+            frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
+            width=int(body.get("width") or DEFAULT_WIDTH),
+            height=int(body.get("height") or DEFAULT_HEIGHT),
+            ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
         )
         # Reconcile first: the picker must not offer a render that belongs to a
         # group deleted from the middle of the timeline.
@@ -811,11 +819,11 @@ async def minimax_second_sample_status(request):
             str(timeline_data),
             global_task_type=str(body.get("task_type") or ""),
             global_prompt=str(body.get("global_prompt") or ""),
-            total_frames=int(body.get("total_frames") or 124),
-            frame_rate=float(body.get("frame_rate") or 24.0),
-            width=int(body.get("width") or 864),
-            height=int(body.get("height") or 480),
-            ref_max_size=int(body.get("ref_max_size") or 864),
+            total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
+            frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
+            width=int(body.get("width") or DEFAULT_WIDTH),
+            height=int(body.get("height") or DEFAULT_HEIGHT),
+            ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
         )
         # Reconcile both passes first so the picker never offers a segment whose
         # position belongs to a group deleted from the middle of the timeline.
@@ -860,11 +868,11 @@ async def minimax_align_to_next_status(request):
             str(timeline_data),
             global_task_type=str(body.get("task_type") or ""),
             global_prompt=str(body.get("global_prompt") or ""),
-            total_frames=int(body.get("total_frames") or 124),
-            frame_rate=float(body.get("frame_rate") or 24.0),
-            width=int(body.get("width") or 864),
-            height=int(body.get("height") or 480),
-            ref_max_size=int(body.get("ref_max_size") or 864),
+            total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
+            frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
+            width=int(body.get("width") or DEFAULT_WIDTH),
+            height=int(body.get("height") or DEFAULT_HEIGHT),
+            ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
         )
         segments = list(getattr(plan, "segments", None) or [])
         if not segments:
@@ -879,11 +887,11 @@ async def minimax_align_to_next_status(request):
                 json.dumps(_tl),
                 global_task_type=str(body.get("task_type") or ""),
                 global_prompt=str(body.get("global_prompt") or ""),
-                total_frames=int(body.get("total_frames") or 124),
-                frame_rate=float(body.get("frame_rate") or 24.0),
-                width=int(body.get("width") or 864),
-                height=int(body.get("height") or 480),
-                ref_max_size=int(body.get("ref_max_size") or 864),
+                total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
+                frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
+                width=int(body.get("width") or DEFAULT_WIDTH),
+                height=int(body.get("height") or DEFAULT_HEIGHT),
+                ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
             )
             segments = list(getattr(plan, "segments", None) or [])
         # The next segment's latent must be the neighbour's own render, so the
@@ -982,11 +990,11 @@ async def minimax_segment_export(request):
             str(timeline_data),
             global_task_type=str(body.get("task_type") or ""),
             global_prompt=str(body.get("global_prompt") or ""),
-            total_frames=int(body.get("total_frames") or 124),
-            frame_rate=float(body.get("frame_rate") or 24.0),
-            width=int(body.get("width") or 864),
-            height=int(body.get("height") or 480),
-            ref_max_size=int(body.get("ref_max_size") or 864),
+            total_frames=int(body.get("total_frames") or DEFAULT_TOTAL_FRAMES),
+            frame_rate=float(body.get("frame_rate") or DEFAULT_FRAME_RATE),
+            width=int(body.get("width") or DEFAULT_WIDTH),
+            height=int(body.get("height") or DEFAULT_HEIGHT),
+            ref_max_size=int(body.get("ref_max_size") or DEFAULT_REF_MAX_SIZE),
         )
         workflow_name = str(body.get("workflow_name") or "").strip() or None
         # Reconcile before exporting: never copy out a file group that belongs
@@ -1085,63 +1093,63 @@ def register_routes() -> bool:
         return False
 
     routes = server.routes
-    _register_route(routes, "POST", "/minimax/director_opt/upload_chunk", minimax_upload_video_chunk)
+    _register_route(routes, "POST", f"{ROUTE_PREFIX}/upload_chunk", minimax_upload_video_chunk)
     _register_route(
         routes,
         "POST",
-        "/minimax/director_opt/extract_reference_audio",
+        f"{ROUTE_PREFIX}/extract_reference_audio",
         minimax_extract_reference_audio,
     )
     _register_route(
         routes,
         "POST",
-        "/minimax/director_opt/prepare_reference_audio_chunk",
+        f"{ROUTE_PREFIX}/prepare_reference_audio_chunk",
         minimax_prepare_reference_audio_chunk,
     )
-    _register_route(routes, "POST", "/minimax/director_opt/probe_video", minimax_probe_video)
-    _register_route(routes, "GET", "/minimax/director_opt/probe_video", minimax_probe_video)
-    _register_route(routes, "GET", "/minimax/director_opt/list_input_media", minimax_list_input_media)
-    _register_route(routes, "POST", "/minimax/director_opt/clear_cache", minimax_clear_cache)
-    _register_route(routes, "POST", "/minimax/director_opt/detect_shots", minimax_detect_shots)
+    _register_route(routes, "POST", f"{ROUTE_PREFIX}/probe_video", minimax_probe_video)
+    _register_route(routes, "GET", f"{ROUTE_PREFIX}/probe_video", minimax_probe_video)
+    _register_route(routes, "GET", f"{ROUTE_PREFIX}/list_input_media", minimax_list_input_media)
+    _register_route(routes, "POST", f"{ROUTE_PREFIX}/clear_cache", minimax_clear_cache)
+    _register_route(routes, "POST", f"{ROUTE_PREFIX}/detect_shots", minimax_detect_shots)
     _register_route(
         routes,
         "POST",
-        "/minimax/director_opt/segment_export_status",
+        f"{ROUTE_PREFIX}/segment_export_status",
         minimax_segment_export_status,
     )
     _register_route(
         routes,
         "POST",
-        "/minimax/director_opt/second_sample_status",
+        f"{ROUTE_PREFIX}/second_sample_status",
         minimax_second_sample_status,
     )
     _register_route(
         routes,
         "POST",
-        "/minimax/director_opt/align_to_next_status",
+        f"{ROUTE_PREFIX}/align_to_next_status",
         minimax_align_to_next_status,
     )
     # HEAD 无需注册：RouteTableDef.get() 走 UrlDispatcher.add_get()，默认
     # allow_head=True 会自动挂上 HEAD；再显式注册一次会直接 RuntimeError
     # （"Added route will never be executed, method HEAD is already registered"）。
-    _register_route(routes, "GET", "/minimax/director_opt/segment_clip", minimax_segment_clip)
+    _register_route(routes, "GET", f"{ROUTE_PREFIX}/segment_clip", minimax_segment_clip)
     _register_route(
         routes,
         "POST",
-        "/minimax/director_opt/segment_export",
+        f"{ROUTE_PREFIX}/segment_export",
         minimax_segment_export,
     )
     _register_route(
         routes,
         "POST",
-        "/minimax/director_opt/remove_segment_slot",
+        f"{ROUTE_PREFIX}/remove_segment_slot",
         minimax_remove_segment_slot,
     )
     from .pack import minimax_download_pack, minimax_export_pack, minimax_import_pack
 
-    _register_route(routes, "POST", "/minimax/director_opt/export_pack", minimax_export_pack)
-    _register_route(routes, "GET", "/minimax/director_opt/download_pack", minimax_download_pack)
-    _register_route(routes, "POST", "/minimax/director_opt/import_pack", minimax_import_pack)
+    _register_route(routes, "POST", f"{ROUTE_PREFIX}/export_pack", minimax_export_pack)
+    _register_route(routes, "GET", f"{ROUTE_PREFIX}/download_pack", minimax_download_pack)
+    _register_route(routes, "POST", f"{ROUTE_PREFIX}/import_pack", minimax_import_pack)
     _ROUTES_REGISTERED = True
     log.info("MiniMax H3 Director Opt HTTP routes registered")
     return True

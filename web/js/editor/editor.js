@@ -2,21 +2,21 @@
 
 
 import { api } from "../../../scripts/api.js";
-import { coerceTimelineFps, resolveOutputDimensions, snapDim } from "../core/dims.js";
+import { coerceTimelineFps } from "../core/dims.js";
 import { healOversizedDirectorNode, hideWidget, parseTimeline, syncDirectorNodeSize } from "../core/editor_lifecycle.js";
 import { buildIdentityFrameMap, deletedSourceRanges, normalizeFrameMapEntry, sourceToLogicalFrame } from "../core/frame_map.js";
-import { getStableWorkflowId } from "../core/graph_refs.js";
+
 import { HIDDEN_WIDGETS, MIN_SEG, RULER_H, SEG_LABEL_H, THUMB_JPEG_Q, THUMB_MAX_W, THUMB_PREFETCH_BATCH, TRACK_H } from "../core/layout_spec.js";
-import { formatProbeFps } from "../core/ruler.js";
-import { DEFAULT_CONTINUITY_FRAMES, isContinuityEligible, isContinuityEnabled, normalizeAudioMode, snapContinuityFrames } from "../core/timeline_sanitize.js";
+
+
 import { UPLOAD_SOFT_LIMIT, formatUploadError, uploadToInput, uploadToInputSmart } from "../core/upload.js";
 import { clamp, relPath, uid } from "../core/utils.js";
-import { applyDirectorWidgetLabels } from "../core/widget_labels.js";
+
 
 import { inputViewUrl, refViewUrl, videoRelativePath } from "./urls.js";
-import { getFl2vSampleFrames, normalizeFl2vSegments, openFl2vUpload, removeFl2vShot, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../minimax_fl2v.js";
-import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, MINIMAX_CANVAS_MULTIPLE, NO_VIDEO_UPLOAD_TASKS, clampMegapixels, defaultFrameCount, getDirectorMode, isContinuityMasterEnabled, isCustomAspectRatio, isSegmentContinuityFromPrev, isVideoBatchTask, normalizeAspectRatioLabel, normalizeRefImageSize, refAudioLabel, refImageLabel, refVideoLabel, resolutionFromSelector, resolveSegmentRefImageSize, resolveTaskKey, snapResolutionDim, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../minimax_gen_timeline.js";
-import { applyI18nDom, aspectDisplayLabel, getLocale, onLocaleChange, t, taskDisplayLabel } from "../minimax_i18n.js";
+import { openFl2vUpload, removeFl2vShot, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../minimax_fl2v.js";
+import { MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, defaultFrameCount, getDirectorMode, isVideoBatchTask, refAudioLabel, refImageLabel, refVideoLabel, resolveTaskKey, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../minimax_gen_timeline.js";
+import { onLocaleChange, t } from "../minimax_i18n.js";
 import { bindDomWidgetContentComputeSize, bindR2vMediaPlayback, deleteImageBatchGroup, ensureImageBatchTimeline, formatMediaDuration, isBatchDetailSolo, rebaseR2vGroupSlotsForCommon, syncBatchPanelFillHeight, updateR2vToolbarBtns, wireMediaDuration } from "../minimax_image_batch.js";
 
 import { refreshPromptTokenEditors } from "../minimax_prompt_mentions.js";
@@ -39,6 +39,9 @@ import { media_thumbsMixin } from "./mixins/media_thumbs.js";
 import { video_loadMixin } from "./mixins/video_load.js";
 import { segments_modelMixin } from "./mixins/segments_model.js";
 import { frame_map_ioMixin } from "./mixins/frame_map_io.js";
+import { task_uiMixin } from "./mixins/task_ui.js";
+import { output_uiMixin } from "./mixins/output_ui.js";
+import { widget_syncMixin } from "./mixins/widget_sync.js";
 
 export class MiniMaxH3DirectorOptEditor {
     constructor(node, container, domWidget) {
@@ -366,27 +369,14 @@ export class MiniMaxH3DirectorOptEditor {
 
 
 
-    isGlobalMode() { return (this.timeline.editMode || "global") === "global"; }
 
-    /** r2v batch: show timeline.global as shared params for all asset groups. */
-    usesR2vCommonPanel() {
-        return !!this.isR2vBatch?.();
-    }
 
     /**
      * Shared params are always on in r2v — there is no「启用公共参数」toggle any
      * more: the shared asset page is a permanent page of the paginator, so the
      * runtime merge (concat prompt + merge refs) must always see it.
      */
-    isR2vCommonEnabled() {
-        if (!this.usesR2vCommonPanel()) return false;
-        return true;
-    }
 
-    /** UI-only fold; shared page is always expanded (no fold state any more). */
-    isR2vCommonCollapsed() {
-        return false;
-    }
 
     /**
      * Stable workflow id used by every cache path (``<root>/<slug>/node_<id>``).
@@ -394,766 +384,32 @@ export class MiniMaxH3DirectorOptEditor {
      * the hidden ``workflow_name`` widget is only synced at queue time, so
      * reading it here can still yield "" and point at the bare ``node_<id>`` dir.
      */
-    getWorkflowId() {
-        return getStableWorkflowId();
-    }
 
-    /** Global / shared-ref panel owns timeline.global refs + prompt when enabled. */
-    usesGlobalRefPanel() {
-        return this.isGlobalMode() || this.isR2vCommonEnabled();
-    }
 
-    syncR2vCommonCollapse() {
-        const r2v = this.usesR2vCommonPanel();
-        this.globalPanel?.classList.toggle("bd-r2v-common-panel", r2v);
-        this.globalPanel?.classList.toggle("bd-r2v-common-collapsed", false);
-        // r2v: the whole 公共参数 block is removed — shared assets/prompt live on
-        // their own paginator page inside the batch card instead.
-        this.splitEl?.classList.toggle("hidden", !!r2v);
-        this.r2vCommonHint?.classList.toggle("hidden", true);
-        this.r2vCommonFold?.classList.toggle("hidden", true);
-        this.r2vCommonToggle?.classList.toggle("hidden", true);
-        this.r2vCommonStatus?.classList.toggle("hidden", true);
-        if (r2v && this.timeline?.global) {
-            // Keep the persisted flag in sync so the backend merge always runs.
-            this.timeline.global.commonEnabled = true;
-            this.timeline.global.commonCollapsed = false;
-        }
-        if (r2v && this.globalPrompt) {
-            this.globalPrompt.placeholder = t("placeholder.r2vCommonPrompt");
-            this.globalPrompt.setAttribute("data-i18n-placeholder", "placeholder.r2vCommonPrompt");
-        }
-        // Keep shared layout class in sync so image/audio slot chrome paints correctly.
-        // Shared assets are always on in r2v, so the layout class is always applied.
-        if (r2v) {
-            this.globalPromptLayout?.classList.toggle("bd-rv2v-layout", true);
-            this.globalPanel?.classList.toggle("bd-rv2v-panel", true);
-        }
-    }
 
-    setEditMode(mode) {
-        this.timeline.editMode = mode;
-        this.root.querySelector('[data-a="mode-global"]').classList.toggle("active", mode === "global");
-        this.root.querySelector('[data-a="mode-segment"]').classList.toggle("active", mode === "segment");
-        this.updateModeUI();
-        this.commit();
-    }
 
-    updateModeUI() {
-        const global = this.isGlobalMode();
-        const r2vCommon = this.usesR2vCommonPanel();
-        const r2vOn = this.isR2vCommonEnabled();
-        this.globalPanel.style.display = (global || r2vCommon) ? "flex" : "none";
-        this.segmentPanel.style.display = (global || r2vCommon) ? "none" : "flex";
-        this.syncR2vCommonCollapse();
-        this.updateReferenceImageVisibility({
-            // Show shared ref chrome only when r2v common is enabled (expanded).
-            hideTimeline: (this.isImageBatch() && !r2vOn) || this.isGenMode(),
-            seg: (global || r2vOn) ? null : this.timeline.segments[this.selectedIndex],
-        });
-        if (!global && !r2vCommon) this.updateSelectionUI();
-        else {
-            this.updateSelectionUI();
-            if (taskUsesReferenceVideo(this.getTaskKey())) this.renderRefVideoSlot();
-        }
-        this.updateLiveSamplePanel();
-    }
 
-    getRefTarget() {
-        if (this.usesGlobalRefPanel()) return this.timeline.global;
-        const seg = this.timeline.segments[this.selectedIndex];
-        return seg || this.timeline.global;
-    }
 
-    getDisplayPrompt(seg) {
-        if (this.isGlobalMode()) return this.timeline.global?.prompt || "";
-        return seg?.prompt || "";
-    }
 
-    populateTaskSelect(el, selected) {
-        if (!el) return;
-        const opts = this.taskTypeWidget?.options?.values || [];
-        const prev = selected || el.value;
-        el.innerHTML = "";
-        for (const v of opts) {
-            const o = document.createElement("option");
-            o.value = v;
-            const key = resolveTaskKey(v);
-            o.textContent = taskDisplayLabel(key) || v;
-            el.appendChild(o);
-        }
-        if (prev) el.value = prev;
-    }
 
-    refreshAspectSelectLabels() {
-        if (!this.outAspect) return;
-        const cur = this.outAspect.value;
-        for (const opt of this.outAspect.options || []) {
-            opt.textContent = aspectDisplayLabel(opt.value);
-        }
-        if (cur) this.outAspect.value = cur;
-    }
 
-    applyLocale() {
-        this.root?.classList.toggle("locale-en", getLocale() === "en");
-        this.root?.classList.toggle("locale-zh", getLocale() !== "en");
-        applyI18nDom(this.root);
-        applyDirectorWidgetLabels(this.node);
-        this.populateTaskSelect(this.globalTask, this.taskTypeWidget?.value || this.globalTask?.value);
-        this.refreshAspectSelectLabels();
-        // Re-apply dynamic UI strings that overwrite data-i18n nodes.
-        this.updateVideoNameLabel?.();
-        this.updateRunSelectUI?.();
-        this.updateOutputPreview?.();
-        this.updateSelectionUI?.();
-        this.refreshLoopButtonTitle?.();
-        this.refreshLiveTaePreviewButton?.();
-        this.updateLiveSamplePanel?.();
-        this.syncTimelineZoomUI?.();
-        this.syncExternalGroupsTimeline?.();
-        updateFl2vDetailUI?.(this);
-        updateFl2vToolbarBtns?.(this);
-        updateR2vToolbarBtns?.(this);
-        this.renderImageBatchGroups?.();
-        const r2vOn = this.isR2vCommonEnabled?.();
-        this.syncR2vCommonCollapse?.();
-        this.syncRv2vRefLayoutClasses?.({
-            hideTimeline: (this.isImageBatch?.() && !r2vOn) || this.isGenMode?.(),
-            seg: this.usesGlobalRefPanel?.() ? null : this.timeline?.segments?.[this.selectedIndex],
-        });
-        if (this.usesGlobalRefPanel?.() && taskUsesReferenceImages(this.getTaskKey())) {
-            if (this.timeline?.global) this.timeline.global.refs = this.timeline.global.refs || [];
-            this.renderRefSlots?.(this.timeline.global?.refs, this.globalRefsBox, true);
-        } else if (!this.usesGlobalRefPanel?.()) {
-            const seg = this.timeline?.segments?.[this.selectedIndex];
-            if (seg && taskUsesReferenceImages(resolveTaskKey(seg.taskType || this.getTaskKey()))) {
-                this.renderRefSlots?.(seg.refs, this.segRefsBox, false);
-            }
-        }
-        if (taskUsesReferenceAudios(this.getTaskKey())) this.renderRefAudioSlots?.();
-        if (this.usesR2vCommonPanel?.()) this.renderR2vCommonVideoSlots?.();
-        this.scheduleRender?.();
-        this.node?.setDirtyCanvas?.(true, true);
-    }
 
-    getI2iSourceDimensions() {
-        for (const seg of this.timeline.segments || []) {
-            const gi = seg.genImage || {};
-            const w = +(gi.width || 0);
-            const h = +(gi.height || 0);
-            if (w > 0 && h > 0) return { width: w, height: h };
-        }
-        const out = this.timeline.output || {};
-        if (+(out.sourceWidth || 0) > 0 && +(out.sourceHeight || 0) > 0) {
-            return { width: +out.sourceWidth, height: +out.sourceHeight };
-        }
-        return { width: 0, height: 0 };
-    }
 
-    getSourceDimensions() {
-        const clips = this.getVideoClips?.() || [];
-        const video = clips[0] || this.timeline.video || {};
-        // Prefer native clip/source size — never fall back to output canvas W×H
-        // (that makes long_edge look like a no-op and keeps a cropped 16:9).
-        if (+(video.width || 0) > 0 && +(video.height || 0) > 0) {
-            return { width: +video.width, height: +video.height };
-        }
-        for (const clip of clips) {
-            if (+(clip?.width || 0) > 0 && +(clip?.height || 0) > 0) {
-                return { width: +clip.width, height: +clip.height };
-            }
-        }
-        return { width: 0, height: 0 };
-    }
 
-    _refreshVideoStorageDimensions(resolved) {
-        if (!resolved?.width || !resolved?.height) return;
-        this._storageWidth = resolved.width;
-        this._storageHeight = resolved.height;
-        if (this.timeline.video) {
-            this.timeline.video.storageWidth = resolved.width;
-            this.timeline.video.storageHeight = resolved.height;
-        }
-        for (const clip of this.getVideoClips()) {
-            clip.storageWidth = resolved.width;
-            clip.storageHeight = resolved.height;
-        }
-    }
 
-    syncOutputUIFromTimeline() {
-        const out = this.timeline.output || {
-            mode: "long_edge",
-            aspectRatio: DEFAULT_ASPECT_RATIO,
-            megapixels: DEFAULT_MEGAPIXELS,
-            multiple: MINIMAX_CANVAS_MULTIPLE,
-            longEdge: 848, width: 848, height: 480,
-            maxExportFrames: 0, exportMode: "all",
-            audioMode: "generate",
-            refImageSize: "match",
-            continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
-        };
-        // Prefer ResolutionSelector fields; backfill from width/height when missing.
-        // Custom keeps explicit width/height and does not recompute from megapixels.
-        if (!isCustomAspectRatio(out.aspectRatio) && (out.aspectRatio == null || out.megapixels == null)) {
-            const resolved = resolutionFromSelector(
-                out.aspectRatio || DEFAULT_ASPECT_RATIO,
-                out.megapixels ?? DEFAULT_MEGAPIXELS,
-                out.multiple ?? MINIMAX_CANVAS_MULTIPLE,
-            );
-            if (resolved) {
-                out.aspectRatio = resolved.aspectRatio;
-                out.megapixels = resolved.megapixels;
-                out.multiple = resolved.multiple;
-                if (out.width == null) out.width = resolved.width;
-                if (out.height == null) out.height = resolved.height;
-                this.timeline.output = { ...out };
-            }
-        }
-        if (this.outMode) this.outMode.value = out.mode || "long_edge";
-        if (this.outAspect) {
-            const ar = isCustomAspectRatio(out.aspectRatio)
-                ? CUSTOM_ASPECT_RATIO
-                : normalizeAspectRatioLabel(out.aspectRatio || DEFAULT_ASPECT_RATIO);
-            this.outAspect.value = ar;
-            if (out.aspectRatio !== ar) {
-                out.aspectRatio = ar;
-                this.timeline.output = { ...out };
-            }
-        }
-        if (this.outMp) this.outMp.value = String(out.megapixels ?? DEFAULT_MEGAPIXELS);
-        if (this.outLong) this.outLong.value = String(out.longEdge ?? 864);
-        if (this.outW) this.outW.value = String(out.width ?? 864);
-        if (this.outH) this.outH.value = String(out.height ?? 480);
-        if (this.outMaxFrames) this.outMaxFrames.value = String(out.maxExportFrames ?? 0);
-        if (this.outExportMode) this.outExportMode.value = out.exportMode === "segments" ? "segments" : "all";
-        if (this.outAudioMode) {
-            const am = normalizeAudioMode(out.audioMode);
-            this.outAudioMode.value = am;
-            if (out.audioMode !== am) {
-                out.audioMode = am;
-                this.timeline.output = { ...out };
-            }
-        }
-        if (this.segmentContinuityCb) this.segmentContinuityCb.checked = isContinuityEnabled(out);
-        if (this.segmentContinuityOverlap) {
-            this.segmentContinuityOverlap.value = String(
-                snapContinuityFrames(out.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES),
-            );
-        }
-        this.syncFrameRateUI(this.timeline.frameRate);
-        this.updateOutputModeUI();
-        this.updateSegmentContinuityUI();
-        this.updateOutputPreview();
-    }
 
-    updateSegmentContinuityUI() {
-        const show = isContinuityEligible(this);
-        if (this.segmentContinuityWrap) {
-            this.segmentContinuityWrap.classList.toggle("hidden", !show);
-            this.segmentContinuityWrap.hidden = !show;
-            this.segmentContinuityWrap.setAttribute("aria-hidden", show ? "false" : "true");
-            this.segmentContinuityWrap.title = show
-                ? t("tooltip.segmentContinuity")
-                : "";
-        }
-        if (!show && this.timeline?.output) {
-            // Hide only — keep saved preference so it returns when multi-segment again.
-        }
-        if (this.segmentContinuityOverlap && this.timeline?.output) {
-            const frames = snapContinuityFrames(
-                this.timeline.output.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
-            );
-            this.segmentContinuityOverlap.value = String(frames);
-            this.timeline.output.continuityOverlapFrames = frames;
-        }
-        if (this.segmentContinuityCb && this.timeline?.output) {
-            // Keep DOM aligned with timeline; eligibility only gates visibility.
-            this.segmentContinuityCb.checked = isContinuityEnabled(this.timeline.output);
-        }
-        this.syncSegmentContinuityFromPrevUI();
-        this.syncSegmentRefImageSizeUI();
-    }
 
-    /** Per-segment「引用上段」on v2v/rv2v segment panel (index>0 + master on). */
-    syncSegmentContinuityFromPrevUI() {
-        const wrap = this.segContinuityFromPrevWrap;
-        const cb = this.segContinuityFromPrevCb;
-        if (!wrap || !cb) return;
-        const idx = this.selectedIndex ?? 0;
-        const masterOn = isContinuityEligible(this)
-            && isContinuityMasterEnabled(this.timeline?.output);
-        const show = masterOn && idx > 0 && !this.isImageBatch() && !this.isFl2vMode();
-        wrap.classList.toggle("hidden", !show);
-        wrap.hidden = !show;
-        if (!show) return;
-        const seg = this.timeline.segments?.[idx];
-        cb.checked = isSegmentContinuityFromPrev(seg, idx);
-        wrap.title = t("tooltip.segmentContinuityFromPrev");
-    }
 
-    /** Per-segment ref_image_size for rv2v (r2v uses the group card control). */
-    syncSegmentRefImageSizeUI() {
-        const wrap = this.segRefImageSizeWrap;
-        const sel = this.segRefImageSize;
-        if (!wrap || !sel) return;
-        const show = this.getTaskKey() === "rv2v" && !this.isImageBatch() && !this.isFl2vMode();
-        wrap.classList.toggle("hidden", !show);
-        wrap.hidden = !show;
-        if (!show) return;
-        const seg = this.timeline.segments?.[this.selectedIndex ?? 0];
-        const value = resolveSegmentRefImageSize(seg, this.timeline.output);
-        sel.value = value;
-        if (seg && seg.refImageSize !== value) seg.refImageSize = value;
-        wrap.title = t("tooltip.refImageSize");
-    }
 
-    /** Apply ResolutionSelector → fixed width/height on timeline + node widgets. */
-    applyResolutionSelector(aspectRatio = null, megapixels = null) {
-        const out = this.timeline.output || {};
-        const ar = aspectRatio ?? out.aspectRatio ?? this.outAspect?.value ?? DEFAULT_ASPECT_RATIO;
-        if (isCustomAspectRatio(ar)) {
-            return this.applyCustomResolution(out.width, out.height);
-        }
-        const resolved = resolutionFromSelector(
-            ar,
-            megapixels ?? out.megapixels ?? this.outMp?.value ?? DEFAULT_MEGAPIXELS,
-            out.multiple ?? MINIMAX_CANVAS_MULTIPLE,
-        );
-        if (!resolved) {
-            return this.applyCustomResolution(out.width, out.height);
-        }
-        this.timeline.output = {
-            ...out,
-            mode: "fixed",
-            aspectRatio: resolved.aspectRatio,
-            megapixels: resolved.megapixels,
-            multiple: resolved.multiple,
-            width: resolved.width,
-            height: resolved.height,
-            longEdge: Math.max(resolved.width, resolved.height),
-        };
-        if (this.widthWidget) this.widthWidget.value = resolved.width;
-        if (this.heightWidget) this.heightWidget.value = resolved.height;
-        if (this.refMaxWidget) this.refMaxWidget.value = Math.max(resolved.width, resolved.height);
-        if (this.outW) this.outW.value = String(resolved.width);
-        if (this.outH) this.outH.value = String(resolved.height);
-        if (this.outAspect) this.outAspect.value = resolved.aspectRatio;
-        // Keep the in-progress typed text while the field is focused.
-        if (this.outMp && document.activeElement !== this.outMp) {
-            this.outMp.value = String(resolved.megapixels);
-        }
-        return resolved;
-    }
 
-    /** Apply explicit custom width × height (snapped to canvas multiple). */
-    applyCustomResolution(width = null, height = null) {
-        const out = this.timeline.output || {};
-        const mult = out.multiple ?? MINIMAX_CANVAS_MULTIPLE;
-        const w = snapResolutionDim(width ?? out.width ?? this.outW?.value ?? this.widthWidget?.value ?? 864, mult);
-        const h = snapResolutionDim(height ?? out.height ?? this.outH?.value ?? this.heightWidget?.value ?? 480, mult);
-        this.timeline.output = {
-            ...out,
-            mode: "fixed",
-            aspectRatio: CUSTOM_ASPECT_RATIO,
-            megapixels: out.megapixels ?? DEFAULT_MEGAPIXELS,
-            multiple: mult,
-            width: w,
-            height: h,
-            longEdge: Math.max(w, h),
-        };
-        if (this.widthWidget) this.widthWidget.value = w;
-        if (this.heightWidget) this.heightWidget.value = h;
-        if (this.refMaxWidget) this.refMaxWidget.value = Math.max(w, h);
-        if (this.outW) this.outW.value = String(w);
-        if (this.outH) this.outH.value = String(h);
-        if (this.outAspect) this.outAspect.value = CUSTOM_ASPECT_RATIO;
-        if (this.outMp) this.outMp.value = String(this.timeline.output.megapixels);
-        return {
-            width: w,
-            height: h,
-            megapixels: this.timeline.output.megapixels,
-            aspectRatio: CUSTOM_ASPECT_RATIO,
-            multiple: mult,
-        };
-    }
 
-    updateOutputModeUI() {
-        const taskKey = this.getTaskKey();
-        const useSelector = this.isImageBatch() || this.isGenMode() || this.isFl2vMode()
-            || NO_VIDEO_UPLOAD_TASKS.has(taskKey);
-        // Gen / batch / fl2v: aspect + megapixels, or Custom width/height.
-        // Video edit (v2v): long_edge / fixed — must toggle .hidden (CSS uses !important).
-        if (this.outAspect) this.outAspect.classList.toggle("hidden", !useSelector);
-        if (this.outMode) this.outMode.classList.toggle("hidden", useSelector);
-        if (this.outLongWrap) this.outLongWrap.style.display = "";
-        if (useSelector) {
-            const custom = isCustomAspectRatio(this.timeline.output?.aspectRatio ?? this.outAspect?.value);
-            if (this.outMpWrap) this.outMpWrap.classList.toggle("hidden", custom);
-            if (this.outLongWrap) this.outLongWrap.classList.add("hidden");
-            if (this.outFixedWrap) this.outFixedWrap.classList.toggle("hidden", !custom);
-            if (custom) this.applyCustomResolution();
-            else this.applyResolutionSelector();
-            return;
-        }
-        if (this.outMpWrap) this.outMpWrap.classList.add("hidden");
-        const mode = this.timeline.output?.mode || "long_edge";
-        const isFixed = mode === "fixed";
-        if (this.outLongWrap) this.outLongWrap.classList.toggle("hidden", isFixed);
-        if (this.outFixedWrap) this.outFixedWrap.classList.toggle("hidden", !isFixed);
-    }
 
-    updateOutputPreview() {
-        if (!this.outPreview) return;
-        if (this.isImageBatch() && (this.getTaskKey() === "i2i" || this.getTaskKey() === "i2v")) {
-            const out = this.timeline.output || {};
-            if ((out.mode || "long_edge") === "long_edge") {
-                const src = this.getI2iSourceDimensions();
-                const resolved = resolveOutputDimensions(src.width, src.height, out, {
-                    refMaxSize: this.refMaxWidget?.value,
-                });
-                const note = src.width > 0 ? "" : t("output.preview.needSourceForLongEdge");
-                this.outPreview.textContent = `→ ${resolved.width}×${resolved.height}${note}${this._exportPreviewSuffix()}`;
-            } else {
-                const w = snapDim(+(out.width ?? this.outW?.value ?? 864));
-                const h = snapDim(+(out.height ?? this.outH?.value ?? 480));
-                this.outPreview.textContent = `→ ${w}×${h}${this._exportPreviewSuffix()}`;
-            }
-            return;
-        }
-        if (this.isGenBlank() || this.isImageBatch() || this.isFl2vMode()) {
-            const out = this.timeline.output || {};
-            if (isCustomAspectRatio(out.aspectRatio)) {
-                const w = snapResolutionDim(out.width ?? this.outW?.value ?? 864, out.multiple ?? MINIMAX_CANVAS_MULTIPLE);
-                const h = snapResolutionDim(out.height ?? this.outH?.value ?? 480, out.multiple ?? MINIMAX_CANVAS_MULTIPLE);
-                this.outPreview.textContent = t("output.preview.custom", { w, h }) + this._exportPreviewSuffix();
-                return;
-            }
-            const resolved = resolutionFromSelector(
-                out.aspectRatio || DEFAULT_ASPECT_RATIO,
-                out.megapixels ?? DEFAULT_MEGAPIXELS,
-                out.multiple ?? MINIMAX_CANVAS_MULTIPLE,
-            );
-            if (!resolved) {
-                const w = snapResolutionDim(out.width ?? 864);
-                const h = snapResolutionDim(out.height ?? 480);
-                this.outPreview.textContent = `→ ${w}×${h}${this._exportPreviewSuffix()}`;
-                return;
-            }
-            const w = resolved.width;
-            const h = resolved.height;
-            const ar = resolved.aspectRatio.split(" ")[0];
-            this.outPreview.textContent = `→ ${w}×${h} · ${ar} · ${resolved.megapixels}MP${this._exportPreviewSuffix()}`;
-            return;
-        }
-        const src = this.getSourceDimensions();
-        const out = this.timeline.output || {};
-        const resolved = resolveOutputDimensions(src.width, src.height, out, {
-            width: this.widthWidget?.value,
-            height: this.heightWidget?.value,
-            refMaxSize: this.refMaxWidget?.value,
-        });
-        if (src.width > 0 && src.height > 0) {
-            const mode = (out.mode || "long_edge").toLowerCase();
-            const note = mode === "long_edge"
-                ? t("output.preview.scaleKeepAspect")
-                : t("output.preview.fixedCrop");
-            this.outPreview.textContent = `${src.width}×${src.height} → ${resolved.width}×${resolved.height}${note}${this._exportPreviewSuffix()}`;
-        } else {
-            this.outPreview.textContent = `→ ${resolved.width}×${resolved.height}${t("output.preview.needSourceForLongEdge")}${this._exportPreviewSuffix()}`;
-        }
-    }
 
-    _exportPreviewSuffix() {
-        const cap = this.getMaxExportFrames();
-        const exportMode = this.timeline.output?.exportMode === "segments"
-            ? t("output.preview.segmentExport")
-            : "";
-        const dur = this.getTimelineDurationSec().toFixed(2);
-        const fps = formatProbeFps(this.getFrameRate());
-        const timeHint = t("output.preview.timeFps", { dur, fps });
-        if (cap <= 0) return `${timeHint}${exportMode}`;
-        const total = this.getTotalFrames();
-        const exportTotal = this.getExportFrameTotal();
-        if (exportTotal >= total) {
-            return `${timeHint}${t("output.preview.exportFrames", { n: exportTotal })}${exportMode}`;
-        }
-        return `${timeHint}${t("output.preview.exportFramesPartial", { n: exportTotal, total })}${exportMode}`;
-    }
 
-    onOutputField(key, value) {
-        this.timeline.output = this.timeline.output || {
-            mode: "long_edge",
-            aspectRatio: DEFAULT_ASPECT_RATIO,
-            megapixels: DEFAULT_MEGAPIXELS,
-            multiple: MINIMAX_CANVAS_MULTIPLE,
-            longEdge: 848, width: 848, height: 480,
-            maxExportFrames: 0, exportMode: "all",
-            audioMode: "generate",
-            refImageSize: "match",
-            continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
-        };
-        if (key === "aspectRatio") {
-            if (isCustomAspectRatio(value)) {
-                // Keep current computed size when entering custom mode.
-                this.applyCustomResolution(
-                    this.timeline.output.width ?? this.outW?.value,
-                    this.timeline.output.height ?? this.outH?.value,
-                );
-            } else {
-                this.applyResolutionSelector(value, null);
-            }
-        } else if (key === "megapixels") {
-            const mp = clampMegapixels(value);
-            if (!isCustomAspectRatio(this.timeline.output.aspectRatio)) {
-                this.applyResolutionSelector(null, mp);
-            } else {
-                this.timeline.output.megapixels = mp;
-            }
-        } else if (key === "mode") {
-            this.timeline.output.mode = value;
-        } else if (key === "longEdge") {
-            // Long-edge is a size budget, not a canvas dim — do not snap to 32
-            // (848 would become 864). Final W/H still snap via resolveOutputDimensions.
-            const n = Math.round(Number(value) || 864);
-            this.timeline.output.longEdge = Math.max(32, n);
-        } else if (key === "width") {
-            const useSelector = this.isImageBatch() || this.isGenMode() || this.isFl2vMode()
-                || NO_VIDEO_UPLOAD_TASKS.has(this.getTaskKey());
-            if (useSelector) {
-                this.applyCustomResolution(value, this.timeline.output.height ?? this.outH?.value);
-            } else {
-                this.timeline.output.width = snapDim(value || 864);
-            }
-        } else if (key === "height") {
-            const useSelector = this.isImageBatch() || this.isGenMode() || this.isFl2vMode()
-                || NO_VIDEO_UPLOAD_TASKS.has(this.getTaskKey());
-            if (useSelector) {
-                this.applyCustomResolution(this.timeline.output.width ?? this.outW?.value, value);
-            } else {
-                this.timeline.output.height = snapDim(value || 480);
-            }
-        } else if (key === "maxExportFrames") {
-            const n = parseInt(value, 10);
-            this.timeline.output.maxExportFrames = Number.isFinite(n) && n > 0 ? n : 0;
-        } else if (key === "exportMode") {
-            this.timeline.output.exportMode = value === "segments" ? "segments" : "all";
-        } else if (key === "audioMode") {
-            this.timeline.output.audioMode = normalizeAudioMode(value);
-        } else if (key === "continuityEnabled") {
-            this.timeline.output.continuityEnabled = !!value;
-        } else if (key === "continuityOverlapFrames") {
-            this.timeline.output.continuityOverlapFrames = snapContinuityFrames(value);
-        }
-        this.syncOutputUIFromTimeline();
-        if (this.isFl2vMode()) updateFl2vDetailUI(this);
-        // Refresh per-segment「引用上段」checkboxes when master toggle changes.
-        if (key === "continuityEnabled") {
-            if (this.isImageBatch()) this.renderImageBatchGroups?.();
-            this.syncSegmentContinuityFromPrevUI?.();
-        }
-        this.commit();
-        this.flushTimelineSync();
-    }
 
-    syncOutputToWidgets() {
-        if (this.isImageBatch() && (this.getTaskKey() === "i2i" || this.getTaskKey() === "i2v")) {
-            const out = this.timeline.output || {};
-            const mode = (out.mode || "long_edge").toLowerCase();
-            if (mode === "long_edge") {
-                const src = this.getI2iSourceDimensions();
-                const resolved = resolveOutputDimensions(src.width, src.height, out, {
-                    width: this.widthWidget?.value,
-                    height: this.heightWidget?.value,
-                    refMaxSize: this.refMaxWidget?.value,
-                });
-                this.timeline.output = {
-                    ...out,
-                    mode: "long_edge",
-                    longEdge: out.longEdge ?? resolved.refMaxSize,
-                    width: resolved.width,
-                    height: resolved.height,
-                };
-                if (this.widthWidget) this.widthWidget.value = resolved.width;
-                if (this.heightWidget) this.heightWidget.value = resolved.height;
-                if (this.refMaxWidget) this.refMaxWidget.value = resolved.refMaxSize;
-                this.timeline.width = resolved.width;
-                this.timeline.height = resolved.height;
-                this.timeline.refMaxSize = resolved.refMaxSize;
-            } else {
-                const w = snapDim(+(out.width ?? this.widthWidget?.value ?? 864));
-                const h = snapDim(+(out.height ?? this.heightWidget?.value ?? 480));
-                this.timeline.output = { ...out, mode: "fixed", width: w, height: h };
-                if (this.widthWidget) this.widthWidget.value = w;
-                if (this.heightWidget) this.heightWidget.value = h;
-                this.timeline.width = w;
-                this.timeline.height = h;
-            }
-            this.updateOutputPreview();
-            return;
-        }
-        if (this.isGenBlank() || this.isImageBatch() || this.isFl2vMode()) {
-            const out = this.timeline.output || {};
-            const resolved = isCustomAspectRatio(out.aspectRatio)
-                ? this.applyCustomResolution(out.width, out.height)
-                : this.applyResolutionSelector();
-            this.timeline.width = resolved.width;
-            this.timeline.height = resolved.height;
-            this.timeline.refMaxSize = Math.max(resolved.width, resolved.height);
-            this.updateOutputPreview();
-            return;
-        }
-        const src = this.getSourceDimensions();
-        const prevOut = this.timeline.output || {};
-        const resolved = resolveOutputDimensions(src.width, src.height, prevOut, {
-            width: this.timeline.width,
-            height: this.timeline.height,
-            refMaxSize: this.timeline.refMaxSize,
-        });
-        // Preserve audioMode / aspect / megapixels etc. — do not rebuild a bare object.
-        this.timeline.output = {
-            ...prevOut,
-            mode: resolved.mode,
-            longEdge: prevOut.longEdge ?? resolved.refMaxSize,
-            width: resolved.width,
-            height: resolved.height,
-            maxExportFrames: prevOut.maxExportFrames ?? 0,
-            exportMode: prevOut.exportMode ?? "all",
-            audioMode: normalizeAudioMode(prevOut.audioMode),
-            refImageSize: normalizeRefImageSize(prevOut.refImageSize ?? prevOut.ref_image_size),
-            continuityEnabled: isContinuityEnabled(prevOut),
-            continuityOverlapFrames: snapContinuityFrames(
-                prevOut.continuityOverlapFrames ?? DEFAULT_CONTINUITY_FRAMES,
-            ),
-        };
-        if (this.widthWidget) this.widthWidget.value = resolved.width;
-        if (this.heightWidget) this.heightWidget.value = resolved.height;
-        if (this.refMaxWidget) this.refMaxWidget.value = resolved.refMaxSize;
-        this.timeline.width = resolved.width;
-        this.timeline.height = resolved.height;
-        this.timeline.refMaxSize = resolved.refMaxSize;
-        this._refreshVideoStorageDimensions(resolved);
-        this.updateOutputPreview();
-    }
 
-    syncFromWidgets() {
-        this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {}, continuousReference: false };
-        this.timeline.global.taskType = this.globalTask?.value || this.taskTypeWidget?.value || "";
-        // r2v：公共提示词在素材组「公共素材页」里编辑，面板那个 textarea 已随
-        // bd-split 隐藏（值永远是旧的）。这里再读它会把公共页的输入回滚掉。
-        if (!this.usesR2vCommonPanel?.()) {
-            this.timeline.global.prompt = this.globalPrompt?.value ?? this.globalPromptWidget?.value ?? "";
-        }
-        if (this.continuousRefCb) {
-            this.timeline.global.continuousReference = !!this.continuousRefCb.checked;
-        }
-        // fl2v: totalFrames stores the sampling window (总时长), not visual overflow length.
-        this.timeline.totalFrames = this.isFl2vMode()
-            ? getFl2vSampleFrames(this)
-            : this.getTotalFrames();
-        this.timeline.frameRate = this.getFrameRate();
-        this.timeline.output = this.timeline.output || {
-            mode: "long_edge", longEdge: 864, width: 864, height: 480,
-            maxExportFrames: 0, exportMode: "all",
-            audioMode: "generate",
-            refImageSize: "match",
-            continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
-        };
-        if (this.timeline.output.audioMode == null) {
-            this.timeline.output.audioMode = "generate";
-        }
-        // Sync from DOM when task+segments are eligible — do not rely on CSS
-        // "hidden" class (can lag behind equal-split / task changes at queue time).
-        const continuityEligible = isContinuityEligible(this);
-        if (continuityEligible && this.segmentContinuityCb) {
-            this.timeline.output.continuityEnabled = !!this.segmentContinuityCb.checked;
-        } else {
-            // Normalize stored flag without clearing preference while ineligible.
-            this.timeline.output.continuityEnabled = isContinuityEnabled(this.timeline.output);
-        }
-        if (continuityEligible && this.segmentContinuityOverlap) {
-            this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
-                this.segmentContinuityOverlap.value
-                    ?? this.timeline.output.continuityOverlapFrames
-                    ?? DEFAULT_CONTINUITY_FRAMES,
-            );
-        } else if (this.timeline.output.continuityOverlapFrames != null) {
-            this.timeline.output.continuityOverlapFrames = snapContinuityFrames(
-                this.timeline.output.continuityOverlapFrames,
-            );
-        }
-        this.syncOutputToWidgets();
-    }
 
-    commit(skipRender = false, { syncTimeline = true } = {}) {
-        this.syncFromWidgets();
-        this.normalizeSegments();
-        if (this.isRunSelectEnabled()) this.normalizeRunSelection();
-        this.updateRunSelectUI();
-        this.updateSegmentContinuityUI();
-        if (this.taskTypeWidget) this.taskTypeWidget.value = this.timeline.global.taskType;
-        if (this.globalPromptWidget) this.globalPromptWidget.value = this.timeline.global.prompt;
-        if (this.negativePromptWidget) {
-            const neg = this.globalNegative?.value ?? this.segNegative?.value ?? this.negativePromptWidget.value ?? "";
-            this.negativePromptWidget.value = neg;
-        }
-        if (this.totalFramesWidget) {
-            this.totalFramesWidget.value = Math.max(
-                0,
-                this.isFl2vMode() ? getFl2vSampleFrames(this) : this.getTotalFrames(),
-            );
-        }
-        this.seekBar.max = Math.max(0, this.getTotalFrames() - 1);
-        if (syncTimeline) this.scheduleTimelineSync();
-        if (!skipRender) this.scheduleRender();
-        if (this.usesGlobalRefPanel() && taskUsesReferenceImages(this.getTaskKey())) {
-            this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
-        }
-        if (this.usesGlobalRefPanel() && taskUsesReferenceAudios(this.getTaskKey())) {
-            this.renderRefAudioSlots();
-        }
-        if (this.isImageBatch()) this.renderImageBatchGroups();
-        else this.updateSelectionUI();
-    }
 
-    normalizeSegments() {
-        if (this.isImageBatch()) {
-            this.normalizeImageBatchSegments();
-            return;
-        }
-        if (this.isFl2vMode()) {
-            normalizeFl2vSegments(this);
-            const n = this.timeline.segments?.length || 0;
-            this.selectedIndex = clamp(this.selectedIndex, 0, Math.max(0, n - 1));
-            return;
-        }
-        if (this.isGenMode()) {
-            this.normalizeGenSegments();
-            return;
-        }
-        const total = this.getTotalFrames();
-        let segs = [...this.timeline.segments].sort((a, b) => a.start - b.start);
-        if (!total) {
-            this.timeline.segments = [];
-            this.timeline.totalFrames = 0;
-            return;
-        }
-        if (!segs.length) segs = [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], referenceVideo: {} }];
-        const fixed = [];
-        let cursor = 0;
-        for (const seg of segs) {
-            const start = clamp(seg.start, cursor, total);
-            let length = Math.max(MIN_SEG, seg.length ?? (total - start));
-            if (start + length > total) length = total - start;
-            if (length < MIN_SEG) continue;
-            fixed.push({ ...seg, start, length, refs: seg.refs || [] });
-            cursor = start + length;
-        }
-        if (fixed.length && cursor < total) fixed[fixed.length - 1].length += total - cursor;
-        this.timeline.segments = fixed;
-        this.timeline.totalFrames = total;
-        this.selectedIndex = clamp(this.selectedIndex, 0, Math.max(0, fixed.length - 1));
-        this.updateSegmentContinuityUI();
-    }
 
     getVideoViewUrl() {
         return this.getClipViewUrl(0);
@@ -4514,6 +3770,12 @@ export class MiniMaxH3DirectorOptEditor {
         this._playRaf = requestAnimationFrame(tick);
     }
 }
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, widget_syncMixin);
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, output_uiMixin);
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, task_uiMixin);
 
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, frame_map_ioMixin);
 

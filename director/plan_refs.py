@@ -106,16 +106,6 @@ def load_reference_tensor(ref: dict) -> torch.Tensor | None:
         return None
 
 
-def load_source_video_from_timeline(timeline: dict) -> torch.Tensor:
-    """Load all logical frames (legacy). Prefer load_timeline_segment for long videos."""
-    total = logical_frame_count(timeline)
-    if total <= 0:
-        video = timeline.get("video") or {}
-        if not (video.get("frames") or []):
-            raise ValueError("No frames in MiniMax H3 Director Opt timeline.")
-    return load_timeline_segment(timeline, 0, max(1, total))
-
-
 def _load_refs(ref_list: list[dict]) -> list[SegmentRef]:
     refs: list[SegmentRef] = []
     for item in ref_list or []:

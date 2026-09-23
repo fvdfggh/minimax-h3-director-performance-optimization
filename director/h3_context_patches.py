@@ -48,23 +48,6 @@ def _mm():
     return mm
 
 
-def layout_patch_applied() -> bool:
-    return _layout_applied
-
-
-def payload_patch_applied() -> bool:
-    return _payload_applied
-
-
-def _has_marker(fn, markers: tuple[str, ...]) -> str | None:
-    if fn is None:
-        return None
-    for name in markers:
-        if getattr(fn, name, False):
-            return name
-    return None
-
-
 def _target_origin(layout) -> float:
     """Time coordinate where the target video segment begins."""
     a, b, kind = layout.segments[-1]

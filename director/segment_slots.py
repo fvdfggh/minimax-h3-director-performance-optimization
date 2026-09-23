@@ -120,15 +120,6 @@ def stem_content_hash(stem: str) -> str | None:
     return match.group(1) if match else None
 
 
-def stem_variant(stem: str) -> str:
-    """Which pass a stem belongs to (``"1st"`` / ``"2nd"``)."""
-    return (
-        VARIANT_SECOND
-        if str(stem or "").startswith(cache_layout.SECOND_PREFIX)
-        else VARIANT_FIRST
-    )
-
-
 def content_hash_of_fingerprint(
     fingerprint: dict[str, Any],
     *,
@@ -320,33 +311,6 @@ def slot_paths(
 # Editing the list — the shared add / remove / move entry points
 # --------------------------------------------------------------------------
 
-def insert_slot(
-    root: Path,
-    position: int,
-    content_hash: str,
-    *,
-    stem: str | None = None,
-    variant: str = VARIANT_FIRST,
-) -> dict[str, Any]:
-    """Add a slot at ``position``; later slots shift down, no file is touched.
-
-    Use this when a group is inserted into the timeline: existing groups keep
-    the files they already own, the new slot starts out with none.
-    """
-    with _LOCK:
-        slots = read_slots(root, variant=variant)
-        pos = max(0, min(int(position), len(slots)))
-        entry = {
-            "hash": str(content_hash),
-            "stem": str(stem).strip()
-            if stem
-            else _allocate(root, content_hash, _used_stems(slots), variant),
-        }
-        slots.insert(pos, entry)
-        write_slots(root, slots, variant=variant)
-        return dict(entry)
-
-
 def remove_slot(
     root: Path,
     position: int,
@@ -370,25 +334,6 @@ def remove_slot(
         delete_stem(root, entry.get("stem"))
         delete_stem(root, entry.get("prev"))
     return True
-
-
-def move_slot(
-    root: Path,
-    src: int,
-    dst: int,
-    *,
-    variant: str = VARIANT_FIRST,
-) -> bool:
-    """Move a slot — and therefore its cache — to another position."""
-    with _LOCK:
-        slots = read_slots(root, variant=variant)
-        source, dest = int(src), int(dst)
-        if not 0 <= source < len(slots):
-            return False
-        entry = slots.pop(source)
-        slots.insert(max(0, min(dest, len(slots))), entry)
-        write_slots(root, slots, variant=variant)
-        return True
 
 
 def sync_slots(

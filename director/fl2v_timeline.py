@@ -264,16 +264,6 @@ def reinforce_fl2v_prompt(
     return f"{prefix}{suffix}"
 
 
-def is_fl2v_timeline(timeline: dict, task_key: str = "") -> bool:
-    mode = str(timeline.get("timelineMode") or "").lower()
-    if mode == "fl2v":
-        return True
-    key = task_key or resolve_task_key(
-        (timeline.get("global") or {}).get("taskType") or ""
-    )
-    return key == "fl2v"
-
-
 def _load_image_ref(ref: dict) -> torch.Tensor:
     from .gen_timeline import _load_gen_image_tensor
 

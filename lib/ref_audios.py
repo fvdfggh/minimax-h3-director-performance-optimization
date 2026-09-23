@@ -9,15 +9,6 @@ MAX_REFERENCE_AUDIOS = 3
 REF_AUDIO_KEY_PREFIX = "ref_audio_"
 
 
-def reference_audio_label(index: int) -> str:
-    """User-facing label for slot index (0-based) → 音频1…音频3."""
-    return f"音频{int(index) + 1}"
-
-
-def reference_audio_prompt_tag(index: int) -> str:
-    return f"<Audio {int(index) + 1}>"
-
-
 def ref_audios_dict(items: list[tuple[int, dict[str, Any]]]) -> dict[str, dict[str, Any]] | None:
     """Build official ``ref_audio_N`` mapping from (index, AUDIO) pairs."""
     out: dict[str, dict[str, Any]] = {}

@@ -334,35 +334,3 @@ def iter_legacy_headtail_files(root: Path) -> list[Path]:
                 out.append(p)
     return out
 
-
-def clear_state_path(node_id: str | None, workflow_name: str | None = None) -> Path:
-    """Marker file for the edge-triggered clear button.
-
-    Sits beside the per-node dirs rather than inside one, so clearing the cache
-    cannot delete the record of the button already having been pressed.
-    """
-    base = workflow_root(workflow_name)
-    try:
-        base.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    slug = slugify_workflow_name(workflow_name)
-    tag = f"{slug}." if slug else ""
-    return base / f".clear_button_state.{tag}node_{node_id}"
-
-
-def cache_stats(root: Path) -> dict[str, Any]:
-    """Size/count breakdown of every cache kind under ``root``."""
-    enc = iter_encoding_files(root)
-    scratch = iter_scratch_files(root)
-    seg = iter_segment_files(root)
-    size = lambda files: sum(f.stat().st_size for f in files)  # noqa: E731
-    return {
-        "encoding_files": len(enc),
-        "encoding_bytes": size(enc),
-        "scratch_files": len(scratch),
-        "scratch_bytes": size(scratch),
-        "segment_files": len(seg),
-        "segment_bytes": size(seg),
-        "nodes": len({f.parent for f in (enc + scratch + seg)}),
-    }

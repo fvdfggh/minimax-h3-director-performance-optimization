@@ -190,14 +190,6 @@ def pack_r2v_group(
     }
 
 
-def append_group(groups: list | None, group: dict[str, Any]) -> list[dict[str, Any]]:
-    out = list(groups or [])
-    if not isinstance(group, dict) or group.get("kind") is None:
-        raise ValueError("Invalid MMX_DIR_GROUP payload.")
-    out.append(group)
-    return out
-
-
 def normalize_groups_list(raw) -> list[dict[str, Any]]:
     """Accept a single group, a list of groups, or None."""
     if raw is None:

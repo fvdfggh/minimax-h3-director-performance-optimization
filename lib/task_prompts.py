@@ -99,8 +99,3 @@ def get_task_prompt_spec(task_type_value: str) -> TaskPromptSpec:
     key = resolve_task_key(task_type_value)
     return TASK_PROMPT_BY_KEY.get(key, TASK_PROMPT_BY_KEY["default"])
 
-
-def apply_task_system_prompt(task_type_value: str, positive_prompt: str) -> str:
-    """H3 nodes tokenize raw user prompt — no system prefix injection."""
-    del task_type_value
-    return positive_prompt

@@ -142,7 +142,3 @@ def resolve_output_dimensions(
     h = snap_dimension(int(round(source_h * scale)), stride)
     return w, h, long_edge, "long_edge"
 
-
-def normalize_to_vae_range(frames: torch.Tensor) -> torch.Tensor:
-    """Map [0, 1] images to [-1, 1] for Wan-style VAE encoding."""
-    return frames * 2.0 - 1.0

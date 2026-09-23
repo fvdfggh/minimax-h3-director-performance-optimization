@@ -181,10 +181,6 @@ export function resolveTaskKey(taskTypeValue) {
     return value || "t2v";
 }
 
-export function isGenTaskType(taskTypeValue) {
-    const key = resolveTaskKey(taskTypeValue);
-    return PROMPT_BATCH_TASKS.has(key);
-}
 
 export function isVideoBatchTask(taskKey) {
     return VIDEO_BATCH_TASKS.has(taskKey);

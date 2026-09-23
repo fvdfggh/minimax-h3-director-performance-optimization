@@ -127,12 +127,6 @@ def resolve_tail_context_length(
         return 0
 
 
-def recommended_context_frames(task_key: str | None = None) -> int:
-    """Official Motion Context baseline (22) for all continuity tasks."""
-    del task_key
-    return DEFAULT_CONTEXT_FRAMES
-
-
 def pixel_frames_for_latent_t(latent_t: int) -> int:
     return sum(FRAME_PER_TOKEN[k % 5] for k in range(int(latent_t)))
 

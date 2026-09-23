@@ -403,9 +403,6 @@ export function getFl2vSampleFrames(editor) {
     return DEFAULT_TOTAL;
 }
 
-export function getFl2vTotalFrames(editor) {
-    return getFl2vSampleFrames(editor);
-}
 
 export function getFl2vContentEndFrames(editor) {
     const segs = editor?._previewSegments || editor?.timeline?.segments || [];
@@ -442,49 +439,8 @@ export function getFl2vTotalDurationSec(editor) {
 }
 
 /** @deprecated — totals come from shot sum; keep for callers. */
-export function setFl2vTotalFrames(editor, value, { durationSec } = {}) {
-    editor.timeline.totalFrames = Math.max(
-        minFrameCount("fl2v"),
-        parseInt(value, 10) || DEFAULT_TOTAL,
-    );
-    if (durationSec != null && Number.isFinite(Number(durationSec))) {
-        editor.timeline.durationSec = roundDurationSec(durationSec);
-    }
-    if (editor.totalFramesWidget) editor.totalFramesWidget.value = editor.timeline.totalFrames;
-    syncFl2vFromShots(editor);
-    return editor.timeline.totalFrames;
-}
 
 /** @deprecated — edit per-shot duration instead. */
-export function setFl2vTotalDurationSec(editor, seconds) {
-    const shots = editor.timeline.shots || [];
-    if (!shots.length) {
-        editor.timeline.durationSec = clamp(
-            roundDurationSec(Number(seconds) || defaultDurationSec("fl2v")),
-            minDurationSec(),
-            maxDurationSec(),
-        );
-        syncFl2vFromShots(editor);
-        return editor.timeline.totalFrames;
-    }
-    // Proportionally scale all shots to match requested total.
-    const target = clamp(
-        roundDurationSec(Number(seconds) || defaultDurationSec("fl2v")),
-        minDurationSec(),
-        maxDurationSec(),
-    );
-    const cur = getFl2vTotalDurationSec(editor) || 1;
-    const scale = target / cur;
-    for (const shot of shots) {
-        shot.durationSec = clamp(
-            roundDurationSec((Number(shot.durationSec) || defaultDurationSec("fl2v")) * scale),
-            minDurationSec(),
-            maxDurationSec(),
-        );
-    }
-    syncFl2vFromShots(editor);
-    return editor.timeline.totalFrames;
-}
 
 export function ensureFl2vTimeline(editor) {
     const t = editor.timeline;
@@ -514,15 +470,7 @@ export function normalizeFl2vSegments(editor) {
     return syncFl2vFromShots(editor);
 }
 
-export function syncFl2vKeyframesMirror(editor) {
-    flattenFl2vShotsToKeyframes(editor);
-    recomputeFl2vTotals(editor);
-    return editor.timeline.keyframes;
-}
 
-export function packFl2vSegments(editor) {
-    return syncFl2vFromShots(editor);
-}
 
 export function fl2vStartIndices(editor) {
     // Every shot is runnable (index = shot / segment index).
@@ -530,20 +478,7 @@ export function fl2vStartIndices(editor) {
         .map((_, i) => i);
 }
 
-export function fl2vSampleFrameCount(editor, segIndex) {
-    const shots = editor.timeline.shots || [];
-    const shot = shots[segIndex];
-    if (!shot) return 0;
-    return shotFrameCount(shot, fl2vFps(editor));
-}
 
-export function fl2vShotDurationSec(editor, segIndex) {
-    const shot = editor.timeline.shots?.[segIndex];
-    if (!shot) return 0;
-    const stored = Number(shot.durationSec);
-    if (Number.isFinite(stored) && stored > 0) return roundDurationSec(stored);
-    return defaultDurationSec("fl2v");
-}
 
 export function setFl2vShotDurationSec(editor, shotIndex, seconds) {
     const shots = editor.timeline.shots || [];
@@ -558,9 +493,6 @@ export function setFl2vShotDurationSec(editor, shotIndex, seconds) {
 }
 
 /** @deprecated alias */
-export function setFl2vStartDurationSec(editor, segIndex, seconds) {
-    return setFl2vShotDurationSec(editor, segIndex, seconds);
-}
 
 /**
  * Ripple-trim right edge of shot `index` by frame end, update that shot's durationSec,
@@ -661,14 +593,9 @@ export function openFl2vUpload(editor) {
     editor.updateDomWidgetHeight?.();
 }
 
-export function openFl2vAddShot(editor) {
-    return openFl2vUpload(editor);
-}
 
 /** @deprecated — slots handle replace */
-export function openFl2vReplace() {}
 /** @deprecated */
-export function openFl2vInsert() {}
 
 export function mountFl2vPanel(parent) {
     const wrap = document.createElement("div");
@@ -704,48 +631,6 @@ export function mountFl2vPanel(parent) {
     };
 }
 
-export function stripFl2vPromptBody(text) {
-    let out = String(text || "").trim();
-    if (!out) return "";
-    const wraps = [
-        "完全保持首尾帧。",
-        "完全保持首帧。",
-        "完全保持尾帧。",
-        "视频开始完全按照image0的画面，不修改，视频结束完全保持image1的画面。",
-        "视频开始完全按照image0的画面，不修改，视频结束完全保持image1。",
-        "视频开始完全按照image0的构图，不修改，视频结束完全保持image1。",
-        "视频开始完全按照image0的画面，不修改。",
-        "视频开始完全按照image0的构图，不修改。",
-        "视频结束完全保持image1的画面。",
-        "视频结束完全保持image1。",
-        "完全保持首尾帧：开头必须是image0，结尾必须是image1。",
-        "完全保持首帧：开头必须是image0。",
-        "完全保持尾帧：结尾锁定尾帧。",
-        "完全保持首尾帧：开头锁定首帧，结尾锁定尾帧。",
-        "再次强调：开头锁定image0，结尾锁定image1。",
-        "再次强调：开头锁定image0。",
-        "再次强调：结尾锁定尾帧。",
-        "中间过程：",
-    ];
-    let changed = true;
-    while (changed && out) {
-        changed = false;
-        for (const w of wraps) {
-            if (out.startsWith(w)) {
-                out = out.slice(w.length).trim();
-                changed = true;
-            }
-            if (out.endsWith(w)) {
-                out = out.slice(0, -w.length).trim();
-                changed = true;
-            }
-        }
-    }
-    return out
-        .replace(/image0的构图/g, "image0的画面")
-        .replace(/image1的构图/g, "image1的画面")
-        .trim();
-}
 
 export function flushFl2vPromptDraft(editor) {
     const ui = editor?.fl2vUi;
@@ -1540,9 +1425,6 @@ export function buildFl2vPayloadFields(editor) {
     };
 }
 
-export function isFl2vTaskValue(taskTypeValue) {
-    return resolveTaskKey(taskTypeValue) === "fl2v";
-}
 
 export function setFl2vToolbar(editor, enabled) {
     const disable = [
@@ -1607,18 +1489,6 @@ export function updateFl2vToolbarBtns(editor) {
 }
 
 /** @deprecated */
-export function updateFl2vReplaceBtn(editor) {
-    updateFl2vToolbarBtns(editor);
-}
 /** @deprecated */
-export function updateFl2vInsertBtns(editor) {
-    updateFl2vToolbarBtns(editor);
-}
 
 /** Stubs for removed both-role seam API (timeline may still import briefly). */
-export function isFl2vBothRole() {
-    return false;
-}
-export function getFl2vSeamRatio() {
-    return 0.5;
-}

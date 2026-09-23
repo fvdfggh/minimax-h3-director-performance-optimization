@@ -63,12 +63,6 @@ export function listCommonImageRefs(editor) {
         .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0));
 }
 
-export function listCommonVideoRefs(editor) {
-    if (!editor?.isR2vCommonEnabled?.()) return [];
-    return [...(editor.timeline?.global?.refVideos || [])]
-        .filter(_refHasVideo)
-        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0));
-}
 
 /**
  * Keep group slots from colliding with common indices.
@@ -2934,9 +2928,6 @@ function syncBatchDetailModeButton(_editor) {
     // 模式切换按钮已移除，空实现。
 }
 
-export function toggleBatchDetailMode(_editor) {
-    // 模式切换已移除，空实现。
-}
 
 export function selectBatchGroup(editor, index) {
     const segs = editor?.timeline?.segments || [];

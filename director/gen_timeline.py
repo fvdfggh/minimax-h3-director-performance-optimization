@@ -52,10 +52,6 @@ def is_prompt_batch_timeline(timeline: dict, task_key: str) -> bool:
     return task_key in PROMPT_BATCH_KEYS
 
 
-def is_image_batch_timeline(timeline: dict, task_key: str) -> bool:
-    return is_prompt_batch_timeline(timeline, task_key)
-
-
 def is_video_batch_task_key(task_key: str) -> bool:
     return task_key in VIDEO_BATCH_KEYS
 
@@ -216,35 +212,6 @@ def _build_gen_source_clips(
             return []
         raise ValueError("Generation timeline has no frames.")
     return chunks
-
-
-def _build_gen_source_video(
-    ranges: list[tuple[int, int, dict]],
-    *,
-    task_key: str,
-    submode: str,
-    edit_mode: str,
-    global_block: dict,
-    height: int,
-    width: int,
-    output_mode: str,
-    ref_max_size: int,
-) -> torch.Tensor:
-    if submode == "gen_blank":
-        return torch.full((max(1, len(ranges)), 16, 16, 3), 0.5, dtype=torch.float32)
-    return cat_frames_variable_size(
-        _build_gen_source_clips(
-            ranges,
-            task_key=task_key,
-            submode=submode,
-            edit_mode=edit_mode,
-            global_block=global_block,
-            height=height,
-            width=width,
-            output_mode=output_mode,
-            ref_max_size=ref_max_size,
-        )
-    )
 
 
 def build_gen_director_plan(

@@ -12,6 +12,7 @@ import torch
 
 import folder_paths
 
+from .ffmpeg import ffprobe_bin
 from .image_prep import resolve_output_dimensions
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.video_io")
@@ -114,31 +115,6 @@ def resolve_video_path(video: dict) -> str:
     )
 
 
-def ffprobe_bin() -> str | None:
-    """Resolve ffprobe: PATH first, then imageio-ffmpeg sibling binary if present."""
-    import shutil
-
-    probe = shutil.which("ffprobe")
-    if probe:
-        return probe
-    try:
-        from imageio_ffmpeg import get_ffmpeg_exe
-        import os
-
-        ff = get_ffmpeg_exe()
-        stem = "ffprobe.exe" if os.name == "nt" else "ffprobe"
-        candidate = os.path.join(os.path.dirname(ff), stem)
-        if os.path.isfile(candidate):
-            return candidate
-    except ImportError:
-        pass
-    return None
-
-
-# Back-compat alias used by older call sites / hot-reload.
-_ffprobe_bin = ffprobe_bin
-
-
 def _parse_rate(value: str | float | int | None) -> float:
     if value is None:
         return 0.0
@@ -162,7 +138,7 @@ def _ffprobe_stream_info(path: str) -> dict | None:
     import json
     import subprocess
 
-    probe = _ffprobe_bin()
+    probe = ffprobe_bin()
     if not probe:
         return None
     try:
@@ -213,7 +189,7 @@ def peek_video_size(path: str) -> tuple[int, int]:
 def _ffprobe_count_frames(path: str) -> int | None:
     import subprocess
 
-    probe = _ffprobe_bin()
+    probe = ffprobe_bin()
     if not probe:
         return None
     try:
@@ -759,15 +735,6 @@ def resolve_logical_frame_entry(timeline: dict, logical_index: int) -> tuple[int
     last = clips[-1]
     last_count = max(1, int(last.get("sourceFrameCount") or 1))
     return len(clips) - 1, last_count - 1
-
-
-def frame_indices_from_timeline(timeline: dict) -> list[int]:
-    """Legacy helper: source-frame indices for single-clip timelines."""
-    total = logical_frame_count(timeline)
-    entries = [resolve_logical_frame_entry(timeline, i) for i in range(total)]
-    if entries and all(c == 0 for c, _ in entries):
-        return [f for _, f in entries]
-    return list(range(total))
 
 
 def _decode_timeline_entries(

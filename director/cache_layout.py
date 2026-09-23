@@ -57,13 +57,6 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.cache_layout")
 #: Unified cache root under ComfyUI's output directory.
 CACHE_ROOT = "minimax_director_opt_cache"
 
-#: Legacy roots, kept only so diagnostics and one-off cleanups can find them.
-LEGACY_ROOTS = (
-    "minimax_seg_cache",
-    "minimax_batch_cache",
-    "minimax_conditioning_cache",
-)
-
 # --- encoding cache prefixes (shared across segments, keyed by content hash) --
 #
 # Only text is cached here. ``cond_image_`` / ``cond_video_`` used to be listed
@@ -217,11 +210,6 @@ def node_cache_dir(
         except OSError as exc:
             log.warning("Cache dir unavailable (%s); caching disabled for this run.", exc)
     return base
-
-
-def legacy_stem(seg_index: int) -> str:
-    """``seg_0003`` — the pre-slot-map name, kept for migration and fallbacks."""
-    return f"{SCRATCH_PREFIX}{int(seg_index):04d}"
 
 
 def segment_paths(root: Path, stem: str) -> dict[str, Path]:

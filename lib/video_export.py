@@ -14,16 +14,9 @@ from typing import Any
 import numpy as np
 import torch
 
+from .ffmpeg import ffmpeg_bin
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.video_export")
-
-
-def _ffmpeg_bin() -> str | None:
-    try:
-        from imageio_ffmpeg import get_ffmpeg_exe
-
-        return get_ffmpeg_exe()
-    except ImportError:
-        return shutil.which("ffmpeg")
 
 
 def _even(n: int) -> int:
@@ -106,7 +99,7 @@ def write_frames_to_mp4(
     window wants a different quality point than a rendered clip; the defaults
     reproduce exactly what every caller encoded before they existed.
     """
-    ffmpeg = _ffmpeg_bin()
+    ffmpeg = ffmpeg_bin()
     if not ffmpeg:
         raise RuntimeError(
             "ffmpeg unavailable (install FFmpeg on PATH or `pip install imageio-ffmpeg`)"

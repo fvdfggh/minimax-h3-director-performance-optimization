@@ -25,14 +25,13 @@ from __future__ import annotations
 import logging
 import os
 import re
-import shutil
 import subprocess
 from typing import Any
 
 import torch
 
+from .ffmpeg import ffmpeg_bin, ffprobe_bin
 from .video_io import (
-    ffprobe_bin,
     resolve_logical_frame_entry,
     resolve_video_path,
     video_clips_from_timeline,
@@ -46,15 +45,6 @@ _FULL_AUDIO_CACHE: dict[str, dict[str, Any]] = {}
 _FILE_FPS_CACHE: dict[str, float] = {}
 # path -> (video_pts0, audio_start, frame_dur)
 _AV_TIMING_CACHE: dict[str, tuple[float, float, float]] = {}
-
-
-def _ffmpeg_bin() -> str | None:
-    try:
-        from imageio_ffmpeg import get_ffmpeg_exe
-
-        return get_ffmpeg_exe()
-    except ImportError:
-        return shutil.which("ffmpeg")
 
 
 def video_has_audio(path: str) -> bool | None:
@@ -330,7 +320,7 @@ def _load_full_audio(path: str) -> dict[str, Any] | None:
     cached = _FULL_AUDIO_CACHE.get(path)
     if cached is not None:
         return cached
-    ffmpeg = _ffmpeg_bin()
+    ffmpeg = ffmpeg_bin()
     if not ffmpeg or not path or not os.path.isfile(path):
         return None
     ar, _ac = _probe_audio_stream(path)
@@ -568,7 +558,7 @@ def extract_timeline_audio(
     spans = _timeline_audio_spans(timeline, logical_start, logical_end, frame_rate)
     if not spans:
         return None
-    if not _ffmpeg_bin():
+    if not ffmpeg_bin():
         log.warning(
             "Source audio skipped: ffmpeg unavailable "
             "(install FFmpeg on PATH or `pip install imageio-ffmpeg`)."
@@ -633,29 +623,13 @@ def extract_timeline_audio(
     return {"waveform": merged, "sample_rate": sr}
 
 
-def extract_audio_segment(path: str, start_sec: float, duration_sec: float) -> dict[str, Any] | None:
-    """Extract a time range from a file (legacy helper)."""
-    if duration_sec <= 0:
-        return None
-    full = _load_full_audio(path)
-    if full is None:
-        return None
-    sr = int(full["sample_rate"])
-    i0 = max(0, int(round(float(start_sec) * sr)))
-    n = max(1, int(round(float(duration_sec) * sr)))
-    return {
-        "waveform": _slice_samples(full["waveform"], src_start=i0, n_samples=n),
-        "sample_rate": sr,
-    }
-
-
 def diagnose_source_audio_failure(
     timeline: dict,
     logical_start: int,
     logical_end: int,
     frame_rate: float,
 ) -> str:
-    if not _ffmpeg_bin():
+    if not ffmpeg_bin():
         return (
             "ffmpeg unavailable (install FFmpeg on PATH or `pip install imageio-ffmpeg`)"
         )

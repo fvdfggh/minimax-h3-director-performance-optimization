@@ -20,7 +20,6 @@ precision / VRAM handling) is byte-for-byte the same as the original node.
 from __future__ import annotations
 
 import gc
-import glob  # noqa: F401  (kept for parity with the original module)
 import os
 import re
 

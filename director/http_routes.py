@@ -359,9 +359,9 @@ def _prepare_reference_audio(source_path: str, display_name: str) -> dict:
     output_name = f"{safe_stem}.flac"
     output_dir = folder_paths.get_input_directory()
 
-    from ..lib.audio_io import _ffmpeg_bin
+    from ..lib.ffmpeg import ffmpeg_bin
 
-    ffmpeg = _ffmpeg_bin()
+    ffmpeg = ffmpeg_bin()
     if not ffmpeg:
         raise RuntimeError("ffmpeg is unavailable; cannot extract audio from video.")
     tmp_path = os.path.join(output_dir, f".minimax_ref_audio_{uuid.uuid4().hex}.flac")

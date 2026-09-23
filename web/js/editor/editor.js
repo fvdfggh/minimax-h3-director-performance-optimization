@@ -4,18 +4,18 @@
 import { api } from "../../../scripts/api.js";
 import { coerceTimelineFps, resolveOutputDimensions, snapDim } from "../core/dims.js";
 import { healOversizedDirectorNode, hideWidget, parseTimeline, syncDirectorNodeSize } from "../core/editor_lifecycle.js";
-import { buildClipFrameMap, buildIdentityFrameMap, deletedSourceRanges, logicalToSourceFrame, normalizeFrameMapEntry, sourceToLogicalFrame } from "../core/frame_map.js";
+import { buildIdentityFrameMap, deletedSourceRanges, logicalToSourceFrame, normalizeFrameMapEntry, sourceToLogicalFrame } from "../core/frame_map.js";
 import { getStableWorkflowId } from "../core/graph_refs.js";
 import { HIDDEN_WIDGETS, MIN_SEG, RULER_H, SEG_LABEL_H, THUMB_JPEG_Q, THUMB_MAX_W, THUMB_PREFETCH_BATCH, TRACK_H } from "../core/layout_spec.js";
 import { formatProbeFps } from "../core/ruler.js";
 import { DEFAULT_CONTINUITY_FRAMES, isContinuityEligible, isContinuityEnabled, normalizeAudioMode, snapContinuityFrames } from "../core/timeline_sanitize.js";
 import { UPLOAD_SOFT_LIMIT, formatUploadError, uploadToInput, uploadToInputSmart } from "../core/upload.js";
-import { clamp, relPath, uid, viewUrl } from "../core/utils.js";
+import { clamp, relPath, uid } from "../core/utils.js";
 import { applyDirectorWidgetLabels } from "../core/widget_labels.js";
 
 import { inputViewUrl, refViewUrl, videoRelativePath } from "./urls.js";
 import { getFl2vSampleFrames, getFl2vTotalDurationSec, getFl2vVisualFrames, normalizeFl2vSegments, openFl2vUpload, removeFl2vShot, syncFl2vFromShots, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../minimax_fl2v.js";
-import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_GEN_FRAMES, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, MINIMAX_CANVAS_MULTIPLE, NO_VIDEO_UPLOAD_TASKS, clampMegapixels, defaultFrameCount, durationToClampedMiniMaxFrames, framesToDurationSec, getDirectorMode, isContinuityMasterEnabled, isCustomAspectRatio, isSegmentContinuityFromPrev, isVideoBatchTask, minFrameCount, normalizeAspectRatioLabel, normalizeRefImageSize, preferredDurationSecFromFrames, refAudioLabel, refImageLabel, refVideoLabel, resolutionFromSelector, resolveSegmentRefImageSize, resolveTaskKey, roundDurationSec, snapResolutionDim, sumFrameCounts, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../minimax_gen_timeline.js";
+import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, MINIMAX_CANVAS_MULTIPLE, NO_VIDEO_UPLOAD_TASKS, clampMegapixels, defaultFrameCount, getDirectorMode, isContinuityMasterEnabled, isCustomAspectRatio, isSegmentContinuityFromPrev, isVideoBatchTask, minFrameCount, normalizeAspectRatioLabel, normalizeRefImageSize, preferredDurationSecFromFrames, refAudioLabel, refImageLabel, refVideoLabel, resolutionFromSelector, resolveSegmentRefImageSize, resolveTaskKey, roundDurationSec, snapResolutionDim, sumFrameCounts, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../minimax_gen_timeline.js";
 import { applyI18nDom, aspectDisplayLabel, getLocale, onLocaleChange, t, taskDisplayLabel } from "../minimax_i18n.js";
 import { bindDomWidgetContentComputeSize, bindR2vMediaPlayback, deleteImageBatchGroup, ensureImageBatchTimeline, formatMediaDuration, isBatchDetailSolo, normalizeImageBatchSegments, rebaseR2vGroupSlotsForCommon, syncBatchPanelFillHeight, updateR2vToolbarBtns, wireMediaDuration } from "../minimax_image_batch.js";
 
@@ -34,6 +34,9 @@ import { fieldsMixin } from "./mixins/fields.js";
 import { modesMixin } from "./mixins/modes.js";
 import { workspacesMixin } from "./mixins/workspaces.js";
 import { task_layoutMixin } from "./mixins/task_layout.js";
+import { ref_video_slotMixin } from "./mixins/ref_video_slot.js";
+import { media_thumbsMixin } from "./mixins/media_thumbs.js";
+import { video_loadMixin } from "./mixins/video_load.js";
 
 export class MiniMaxH3DirectorOptEditor {
     constructor(node, container, domWidget) {
@@ -166,182 +169,24 @@ export class MiniMaxH3DirectorOptEditor {
 
 
 
-    _videoIdentityFromParts(video, clips) {
-        const list = Array.isArray(clips) && clips.length ? clips : [];
-        if (list.length) {
-            return list
-                .map((c) => `${c?.type || "input"}:${c?.videoFile || c?.fileName || ""}`)
-                .filter((id) => id && id !== "input:");
-        }
-        const v = video || {};
-        const id = `${v.type || "input"}:${v.videoFile || v.fileName || ""}`;
-        return id && id !== "input:" ? [id] : [];
-    }
 
-    _clipThumbIdentity(clipIndex = 0) {
-        const clips = this.getVideoClips();
-        const c = clips[clipIndex] || clips[0] || this.timeline?.video || {};
-        const id = `${c.type || "input"}:${c.videoFile || c.fileName || ""}`;
-        return id === "input:" ? "" : id;
-    }
 
-    _videoThumbIdentity() {
-        return this._videoIdentityFromParts(this.timeline?.video, this.timeline?.videoClips).join("|");
-    }
 
-    _liveVideoFileIdentities() {
-        return this._videoIdentityFromParts(this.timeline?.video, this.timeline?.videoClips);
-    }
 
-    _knownVideoFileIdentities() {
-        const ids = new Set(this._liveVideoFileIdentities());
-        for (const ws of Object.values(this._videoWsMem || {})) {
-            for (const id of this._videoIdentityFromParts(ws?.video, ws?.videoClips)) ids.add(id);
-        }
-        for (const ws of Object.values(this.timeline?.videoWorkspaces || {})) {
-            for (const id of this._videoIdentityFromParts(ws?.video, ws?.videoClips)) ids.add(id);
-        }
-        return ids;
-    }
 
-    _frameThumbKey(logicalFrame) {
-        const entry = this.getFrameMapEntry(logicalFrame);
-        const id = this._clipThumbIdentity(entry.clip) || this._videoThumbIdentity() || "none";
-        if (this._legacyFrames.length) return `${id}#legacy:${logicalFrame}`;
-        return `${id}#${entry.clip}:${entry.frame}`;
-    }
 
-    _dropThumbsForIdentity(identity) {
-        if (!identity) return;
-        const prefix = `${identity}#`;
-        for (const key of [...this._thumbCache.keys()]) {
-            if (key === identity || String(key).startsWith(prefix)) this._thumbCache.delete(key);
-        }
-        for (const key of [...this._thumbPending]) {
-            if (key === identity || String(key).startsWith(prefix)) this._thumbPending.delete(key);
-        }
-    }
 
-    _dropThumbsIfUnused(identities) {
-        const list = Array.isArray(identities) ? identities : [identities];
-        const used = this._knownVideoFileIdentities();
-        for (const id of list) {
-            if (!id || used.has(id)) continue;
-            this._dropThumbsForIdentity(id);
-        }
-    }
 
-    _flushPendingThumbDrops() {
-        this._dropThumbsIfUnused(this._thumbIdsPendingDrop);
-        this._thumbIdsPendingDrop = [];
-    }
 
-    _invalidateVideoThumbs() {
-        this._thumbCache.clear();
-        this._thumbPending.clear();
-    }
 
-    _usesSourceVideoThumbs() {
-        return this.getDirectorMode() === "video";
-    }
 
-    hasVideo() {
-        const v = this.timeline?.video || {};
-        return !!(this.getVideoClips().length || v.videoFile || this._legacyFrames.length || v.frames?.length);
-    }
 
-    /** v2v / rv2v empty canvas: placeholder says click to upload. */
-    needsSourceVideoUpload() {
-        return this.getDirectorMode() === "video" && !this.hasVideo();
-    }
 
-    getVideoClips() {
-        if (this.timeline.videoClips?.length) return this.timeline.videoClips;
-        const v = this.timeline?.video || {};
-        if (v.videoFile || v.fileName) {
-            return [{
-                id: v.id || "c0",
-                fileName: v.fileName || "",
-                videoFile: v.videoFile || v.fileName || "",
-                subfolder: v.subfolder || "",
-                type: v.type || "input",
-                width: v.width || 0,
-                height: v.height || 0,
-                duration: v.duration || 0,
-                nativeFps: v.nativeFps || v.native_fps || 0,
-                nativeFrameCount: v.nativeFrameCount || v.native_frame_count || 0,
-                sourceFrameCount: v.sourceFrameCount || this.getFrameMap().length,
-                storageWidth: v.storageWidth,
-                storageHeight: v.storageHeight,
-            }];
-        }
-        return [];
-    }
 
-    _ensureVideoClipsArray() {
-        if (!this.timeline.videoClips?.length) {
-            const v = this.timeline?.video || {};
-            if (v.videoFile || v.fileName) {
-                this.timeline.videoClips = [{
-                    id: v.id || uid(),
-                    fileName: v.fileName || "",
-                    videoFile: v.videoFile || v.fileName || "",
-                    subfolder: v.subfolder || "",
-                    type: v.type || "input",
-                    width: v.width || 0,
-                    height: v.height || 0,
-                    duration: v.duration || 0,
-                    nativeFps: v.nativeFps || v.native_fps || 0,
-                    nativeFrameCount: v.nativeFrameCount || v.native_frame_count || 0,
-                    sourceFrameCount: v.sourceFrameCount || this.getFrameMap().length,
-                    storageWidth: v.storageWidth,
-                    storageHeight: v.storageHeight,
-                }];
-            } else {
-                this.timeline.videoClips = [];
-            }
-        }
-    }
 
-    getClipViewUrl(clipIndex) {
-        const clip = this.getVideoClips()[clipIndex];
-        if (!clip?.videoFile) return "";
-        return inputViewUrl(clip.videoFile, clip.type || "input");
-    }
 
-    getRefVideoTarget() {
-        if (this.isGlobalMode()) {
-            this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {} };
-            if (!this.timeline.global.referenceVideo) this.timeline.global.referenceVideo = {};
-            return this.timeline.global;
-        }
-        const seg = this.timeline.segments[this.selectedIndex];
-        if (seg) {
-            if (!seg.referenceVideo) seg.referenceVideo = {};
-            return seg;
-        }
-        this.timeline.global = this.timeline.global || { refs: [], referenceVideo: {} };
-        return this.timeline.global;
-    }
 
-    getReferenceVideoViewUrl(ref) {
-        const block = ref || {};
-        const file = block.videoFile || block.fileName;
-        if (!file) return "";
-        return inputViewUrl(file, block.type || "input");
-    }
 
-    _stopRefVideoPreviews(onlyEls = null) {
-        const targets = onlyEls || [this.globalRefVideo, this.segRefVideo];
-        for (const el of targets) {
-            const v = el?.querySelector("video");
-            if (v) {
-                v.pause();
-                v.removeAttribute("src");
-                v.load();
-            }
-        }
-    }
 
 
 
@@ -475,391 +320,20 @@ export class MiniMaxH3DirectorOptEditor {
 
 
 
-    renderGenSrcSlot(el, imageFile, label) {
-        if (!el) return;
-        el.classList.toggle("has-img", !!imageFile);
-        if (imageFile) {
-            el.innerHTML = `<img src="${refViewUrl(imageFile)}" alt="">`;
-        } else {
-            el.textContent = label;
-        }
-    }
 
-    _paintRefVideoSlot(el, nameEl, refBlock) {
-        if (!el) return;
-        const ref = refBlock || {};
-        const has = !!(ref.videoFile || ref.fileName);
-        el.classList.toggle("has-img", false);
-        el.classList.toggle("has-video", has);
-        if (nameEl) {
-            if (has) {
-                const dur = ref.duration > 0 ? ` · ${ref.duration.toFixed(2)}s` : "";
-                const fps = ref.nativeFps > 0 ? ` · ${Math.round(ref.nativeFps)}fps` : "";
-                const dim = ref.width && ref.height ? ` · ${ref.width}×${ref.height}` : "";
-                nameEl.textContent = `${ref.fileName || ref.videoFile || ""}${dim}${dur}${fps}`;
-            } else {
-                nameEl.textContent = "";
-            }
-        }
-        if (!has) {
-            el.innerHTML = "";
-            el.textContent = t("panel.uploadRefVideo");
-            el.onclick = () => this.pickReferenceVideoFile();
-            return;
-        }
-        const viewUrl = this.getReferenceVideoViewUrl(ref);
-        el.innerHTML = `
-            <video class="bd-ref-video-preview" muted playsinline preload="metadata" controls></video>
-            <button type="button" class="bd-ref-replace" title="${t("ref.replace")}">${t("ref.replace")}</button>
-            <span class="x" title="${t("ref.removeVideo")}">×</span>`;
-        el.onclick = null;
-        const video = el.querySelector("video");
-        if (video && viewUrl) {
-            video.src = viewUrl;
-            video.addEventListener("click", (e) => e.stopPropagation());
-            video.addEventListener("dblclick", (e) => {
-                e.stopPropagation();
-                if (video.paused) video.play().catch(() => {});
-                else video.pause();
-            });
-        }
-        const replaceBtn = el.querySelector(".bd-ref-replace");
-        if (replaceBtn) {
-            replaceBtn.onclick = (e) => {
-                e.stopPropagation();
-                this.pickReferenceVideoFile();
-            };
-        }
-        const removeBtn = el.querySelector(".x");
-        if (removeBtn) {
-            removeBtn.onclick = (e) => {
-                e.stopPropagation();
-                this.clearReferenceVideo();
-            };
-        }
-    }
 
-    renderRefVideoSlot() {
-        if (this.isGlobalMode()) {
-            this._stopRefVideoPreviews([this.segRefVideo]);
-            this._paintRefVideoSlot(
-                this.globalRefVideo,
-                this.globalRefVideoNameEl,
-                this.timeline.global?.referenceVideo || {},
-            );
-        } else {
-            this._stopRefVideoPreviews([this.globalRefVideo]);
-            const seg = this.timeline.segments[this.selectedIndex];
-            this._paintRefVideoSlot(this.segRefVideo, this.segRefVideoNameEl, seg?.referenceVideo || {});
-        }
-    }
 
-    _activeRefVideoTaskKey() {
-        if (this.isGlobalMode()) return this.getTaskKey();
-        const seg = this.timeline.segments[this.selectedIndex];
-        return resolveTaskKey(seg?.taskType || this.timeline.global?.taskType || this.getTaskKey());
-    }
 
-    pickReferenceVideoFile() {
-        if (!taskUsesReferenceVideo(this._activeRefVideoTaskKey())) return;
-        const input = document.createElement("input");
-        input.type = "file";
-        input.accept = "video/*";
-        input.onchange = () => {
-            if (input.files?.[0]) this.loadReferenceVideoFile(input.files[0]);
-        };
-        input.click();
-    }
 
-    async pickExistingReferenceVideo() {
-        if (!taskUsesReferenceVideo(this._activeRefVideoTaskKey())) return;
-        const currentValue = this.getRefVideoTarget()?.referenceVideo?.videoFile || "";
-        const picked = await this.chooseVideoInput({
-            title: t("mediaPicker.pickReferenceVideo"),
-            currentValue,
-        });
-        if (!picked?.relPath) return;
-        const slotEl = this.isGlobalMode() ? this.globalRefVideo : this.segRefVideo;
-        const nameEl = this.isGlobalMode() ? this.globalRefVideoNameEl : this.segRefVideoNameEl;
-        const status = t("upload.inProgress", { name: picked.fileName || picked.relPath });
-        if (slotEl) {
-            slotEl.classList.remove("has-img", "has-video");
-            slotEl.textContent = status;
-        }
-        if (nameEl) nameEl.textContent = status;
-        try {
-            const prep = await this._prepareVideoFrames({
-                fileName: picked.fileName || picked.relPath,
-                relPath: picked.relPath,
-                subfolder: picked.subfolder || "",
-                type: picked.type || "input",
-                statusPrefix: t("parse.refVideo"),
-                syncNativeFps: false,
-            });
-            this.getRefVideoTarget().referenceVideo = this._buildClipRecord(prep);
-            this.renderRefVideoSlot();
-            this.commit(false, { syncTimeline: true });
-        } catch (err) {
-            console.error("[MiniMax H3Director] reference video load failed:", err);
-            if (nameEl) nameEl.textContent = t("upload.refVideoFailed", { err: formatUploadError(err) });
-            this.renderRefVideoSlot();
-        }
-    }
 
-    clearReferenceVideo() {
-        const target = this.getRefVideoTarget();
-        this._stopRefVideoPreviews();
-        target.referenceVideo = {};
-        this.renderRefVideoSlot();
-        this.commit();
-    }
 
-    async loadReferenceVideoFile(file) {
-        const slotEl = this.isGlobalMode() ? this.globalRefVideo : this.segRefVideo;
-        const nameEl = this.isGlobalMode() ? this.globalRefVideoNameEl : this.segRefVideoNameEl;
-        const status = t("upload.inProgress", { name: file.name });
-        if (slotEl) {
-            slotEl.classList.remove("has-img", "has-video");
-            slotEl.textContent = status;
-        }
-        if (nameEl) nameEl.textContent = status;
-        try {
-            const uploaded = await uploadToInputSmart(file, (frac, cur, total) => {
-                const pct = Math.round(frac * 100);
-                const mode = file.size > UPLOAD_SOFT_LIMIT ? t("upload.chunkMode") : t("upload.mode");
-                if (nameEl) {
-                    nameEl.textContent = t("upload.refVideoProgress", {
-                        mode, name: file.name, cur, total, pct,
-                    });
-                }
-            });
-            const relPath = videoRelativePath(uploaded);
-            const prep = await this._prepareVideoFrames({
-                fileName: file.name,
-                relPath,
-                subfolder: uploaded.subfolder || "",
-                type: uploaded.type || "input",
-                statusPrefix: t("parse.refVideo"),
-                syncNativeFps: false,
-            });
-            this.getRefVideoTarget().referenceVideo = this._buildClipRecord(prep);
-            this.renderRefVideoSlot();
-            this.commit(false, { syncTimeline: true });
-        } catch (err) {
-            console.error("[MiniMax H3Director] reference video load failed:", err);
-            if (nameEl) nameEl.textContent = t("upload.refVideoFailed", { err: formatUploadError(err) });
-            this.renderRefVideoSlot();
-        }
-    }
 
-    pickGenSrcImage(isGlobal) {
-        if (!this.isGenImage()) return;
-        const input = document.createElement("input");
-        input.type = "file";
-        input.accept = "image/*";
-        input.onchange = async () => {
-            const file = input.files?.[0];
-            if (!file) return;
-            try {
-                const uploaded = await uploadToInput(file);
-                const relPath = videoRelativePath(uploaded);
-                if (isGlobal) {
-                    this.timeline.global = this.timeline.global || { refs: [] };
-                    this.timeline.global.genImage = { imageFile: relPath };
-                } else {
-                    const seg = this.timeline.segments[this.selectedIndex];
-                    if (seg) {
-                        seg.genImage = { imageFile: relPath };
-                        seg.imageFile = relPath;
-                    }
-                }
-                this.commit();
-            } catch (err) {
-                console.error("[MiniMax H3Director] gen image upload failed:", err);
-            }
-        };
-        input.click();
-    }
 
-    onGenDefaultFcChange() {
-        const fc = clamp(parseInt(this.genDefaultFc?.value, 10) || 1, minFrameCount(this.getTaskKey()), MAX_GEN_FRAMES);
-        if (this.genDefaultFc) this.genDefaultFc.value = fc;
-        this.timeline.gen = this.timeline.gen || {};
-        this.timeline.gen.defaultFrameCount = fc;
-        if (this.timeline.segments.length === 1) {
-            this.timeline.segments[0].frameCount = fc;
-            this.timeline.segments[0].length = fc;
-        }
-        this.commit();
-    }
 
-    onGenSegFcChange() {
-        const seg = this.timeline.segments[this.selectedIndex];
-        if (!seg) return;
-        const minFc = minFrameCount(this.getTaskKey());
-        seg.frameCount = clamp(parseInt(this.genSegFc?.value, 10) || minFc, minFc, MAX_GEN_FRAMES);
-        if (this.genSegFc) this.genSegFc.value = seg.frameCount;
-        this.commit();
-    }
 
-    genSplitAtFrame(frame) {
-        const total = this.getTotalFrames();
-        const minFc = minFrameCount(this.getTaskKey());
-        if (frame <= minFc || frame >= total - minFc) return;
-        const newSegs = [];
-        let cursor = 0;
-        for (const seg of this.timeline.segments) {
-            const fc = seg.frameCount ?? seg.length;
-            const end = cursor + fc;
-            if (frame > cursor && frame < end) {
-                const left = frame - cursor;
-                const right = end - frame;
-                newSegs.push({ ...seg, frameCount: left, length: left });
-                newSegs.push({
-                    id: uid(), start: frame, frameCount: right, length: right,
-                    prompt: "", taskType: "", refs: [], genImage: { imageFile: "" },
-                });
-            } else {
-                newSegs.push({ ...seg });
-            }
-            cursor = end;
-        }
-        this.timeline.segments = newSegs;
-        this.commit();
-    }
 
-    genEqualSplit() {
-        const n = parseInt(this.equalCountInput?.value || "2", 10);
-        if (!n || n < 2) return;
-        const total = this.getTotalFrames();
-        const minFc = minFrameCount(this.getTaskKey());
-        const count = clamp(n, 2, Math.max(2, Math.floor(total / minFc)));
-        const base = Math.floor(total / count);
-        let rem = total - base * count;
-        this.timeline.segments = Array.from({ length: count }, () => {
-            const fc = base + (rem > 0 ? 1 : 0);
-            if (rem > 0) rem -= 1;
-            return {
-                id: uid(), frameCount: fc, length: fc, prompt: "", taskType: "", refs: [],
-                genImage: { imageFile: "" },
-            };
-        });
-        this.commit();
-    }
 
-    genDeleteSelectedSegment() {
-        if (this.timeline.segments.length <= 1) return;
-        const removed = this.selectedIndex;
-        this.timeline.segments.splice(removed, 1);
-        this.selectedIndex = clamp(this.selectedIndex, 0, this.timeline.segments.length - 1);
-        this.onSegmentRemoved(removed);
-        this.commit();
-    }
 
-    updateVideoNameLabel() {
-        if (this.isFl2vMode()) {
-            const shots = this.timeline.shots || [];
-            const n = shots.length;
-            const total = this.getTotalFrames();
-            const withEnd = shots.filter((s) => s.endImage?.imageFile).length;
-            const withStart = shots.filter((s) => s.startImage?.imageFile).length;
-            const sec = getFl2vTotalDurationSec(this);
-            if (!n) {
-                this.videoNameEl.textContent = t("videoName.fl2vEmpty", { sec, frames: total });
-            } else {
-                this.videoNameEl.textContent = t("videoName.fl2vSummary", {
-                    n, start: withStart, end: withEnd, sec, frames: total,
-                });
-            }
-            return;
-        }
-        if (this.isImageBatch()) {
-            // Prefer live drag preview so toolbar totals track the divider.
-            const segs = this._previewSegments || this.timeline.segments || [];
-            const n = segs.length || 0;
-            const key = this.getTaskKey();
-            if (isVideoBatchTask(key)) {
-                let sec = 0;
-                let total = 0;
-                for (const seg of segs) {
-                    const fc = Math.max(1, parseInt(seg.frameCount ?? seg.length, 10) || 1);
-                    const raw = Number(seg.durationSec);
-                    // During edge drag, frames are authoritative; durationSec may be stale.
-                    const resolved = this._previewSegments
-                        ? {
-                            frames: fc,
-                            durationSec: preferredDurationSecFromFrames(fc, 24),
-                        }
-                        : durationToClampedMiniMaxFrames(
-                            Number.isFinite(raw)
-                                ? raw
-                                : preferredDurationSecFromFrames(fc || defaultFrameCount(key), 24),
-                            24,
-                        );
-                    sec += resolved.durationSec;
-                    total += resolved.frames;
-                }
-                sec = roundDurationSec(sec);
-                const play = framesToDurationSec(total, 24);
-                this.videoNameEl.textContent = total
-                    ? t("videoName.batchVideo", {
-                        key,
-                        n,
-                        sec: sec || play,
-                        frames: total,
-                        play,
-                    })
-                    : t("videoName.batchVideoEmpty", { key, n });
-            } else {
-                this.videoNameEl.textContent = t("videoName.batchImage", { key, n });
-            }
-            return;
-        }
-        if (this.isGenMode()) {
-            const total = this.getTotalFrames();
-            const key = this.getTaskKey();
-            if (this.isGenBlank()) {
-                this.videoNameEl.textContent = total
-                    ? t("videoName.blankCanvas", { frames: total })
-                    : t("videoName.blankCanvasNeedFrames");
-            } else {
-                this.videoNameEl.textContent = total
-                    ? `${key} · ${total}f`
-                    : t("videoName.genNeedSource", { key });
-            }
-            return;
-        }
-        const clips = this.getVideoClips();
-        const total = this.getTotalFrames();
-        if (!clips.length || !total) {
-            this.videoNameEl.textContent = t("toolbar.noVideo");
-            return;
-        }
-        if (clips.length === 1) {
-            const c = clips[0];
-            const nativeWh = c.width && c.height ? `${c.width}×${c.height}` : "";
-            const storeW = c.storageWidth || this._storageWidth;
-            const storeH = c.storageHeight || this._storageHeight;
-            const storeWh = storeW && storeH ? `${storeW}×${storeH}` : "";
-            let dim = "";
-            if (nativeWh && storeWh && nativeWh !== storeWh) dim = ` · ${nativeWh} → ${storeWh}`;
-            else if (nativeWh) dim = ` · ${nativeWh}`;
-            else if (storeWh) dim = ` · ${storeWh}`;
-            const nativeHint = c.nativeFps > 0 ? t("canvas.nativeFps", { fps: formatProbeFps(c.nativeFps) }) : "";
-            const tlFps = this.getFrameRate();
-            const dur = this.getTimelineDurationSec().toFixed(2);
-            const name = c.fileName || c.videoFile;
-            this.videoNameEl.textContent = t("videoName.singleClip", {
-                name, total, fps: formatProbeFps(tlFps), dur, native: nativeHint, dim,
-            });
-            return;
-        }
-        const tlFps = this.getFrameRate();
-        const dur = this.getTimelineDurationSec().toFixed(2);
-        this.videoNameEl.textContent = t("videoName.multiClip", {
-            n: clips.length, total, fps: formatProbeFps(tlFps), dur,
-        });
-    }
 
     getFrameMapEntry(logicalFrame) {
         const map = this.getFrameMap();
@@ -3607,200 +3081,12 @@ export class MiniMaxH3DirectorOptEditor {
         };
     }
 
-    async _prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix, syncNativeFps = true }) {
-        this.videoNameEl.textContent = `${statusPrefix}: ${fileName}…`;
-        const viewUrl = inputViewUrl(relPath, type || "input");
 
-        let serverProbe = null;
-        try {
-            serverProbe = await this.probeVideoFile(relPath, subfolder, type);
-        } catch (err) {
-            console.warn("[MiniMax H3Director] video probe failed, using browser estimate:", err);
-        }
-        const browserMeta = await this.probeVideoMetadata(viewUrl);
-        const nativeFps = Number(serverProbe?.native_fps || 0);
-        const nativeFrameCount = Number(serverProbe?.frame_count || 0);
-        const meta = {
-            width: Number(serverProbe?.width || browserMeta.width || 0),
-            height: Number(serverProbe?.height || browserMeta.height || 0),
-            duration: Number(serverProbe?.duration ?? browserMeta.duration ?? 0),
-            nativeFps,
-            nativeFrameCount,
-            probeMethod: serverProbe?.probe_method || "browser_estimate",
-        };
 
-        if (syncNativeFps && nativeFps > 0) {
-            this.syncFrameRateUI(nativeFps);
-        }
 
-        const fps = this.getFrameRate();
-        const totalFrames = Math.max(
-            1,
-            Math.round(meta.duration * fps) || nativeFrameCount,
-        );
 
-        const store = resolveOutputDimensions(meta.width, meta.height, this.timeline.output || { mode: "long_edge", longEdge: 864 }, {
-            refMaxSize: this.refMaxWidget?.value,
-        });
 
-        return { fileName, relPath, subfolder, type, meta, totalFrames, store, viewUrl };
-    }
 
-    async probeVideoFile(relPath, subfolder = "", type = "input") {
-        const resp = await api.fetchApi("/minimax/director_opt/probe_video", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ videoFile: relPath, subfolder, type: type || "input" }),
-        });
-        if (!resp.ok) {
-            throw new Error(await resp.text());
-        }
-        return resp.json();
-    }
-
-    _buildClipRecord({ fileName, relPath, subfolder, type, meta, totalFrames, store }) {
-        return {
-            id: uid(),
-            fileName,
-            videoFile: relPath,
-            subfolder: subfolder || "",
-            type: type || "input",
-            width: meta.width,
-            height: meta.height,
-            duration: meta.duration,
-            nativeFps: meta.nativeFps || null,
-            nativeFrameCount: meta.nativeFrameCount || null,
-            sourceFrameCount: totalFrames,
-            storageWidth: store.width,
-            storageHeight: store.height,
-        };
-    }
-
-    _syncPrimaryVideoFromClips(frameMap) {
-        const clips = this.getVideoClips();
-        const primary = clips[0] || {};
-        const prev = this.timeline.video || {};
-        const map = Array.isArray(frameMap) ? frameMap : (prev.frameMap || []);
-        this.timeline.video = {
-            ...prev,
-            ...primary,
-            // Keep path/type from the clip record, but never drop timeline edits.
-            fileName: primary.fileName || prev.fileName || "",
-            videoFile: primary.videoFile || prev.videoFile || "",
-            subfolder: primary.subfolder ?? prev.subfolder ?? "",
-            type: primary.type || prev.type || "input",
-            frames: prev.frames || [],
-            frameMap: map,
-            // Explicit map already encodes deletes; sparse mode keeps ranges.
-            deletedSourceRanges: map.length ? [] : (prev.deletedSourceRanges || []),
-            sourceFrameCount: prev.sourceFrameCount || primary.sourceFrameCount || map.length || 0,
-        };
-        if (map.length) this.timeline.totalFrames = map.length;
-    }
-
-    async _applyLoadedVideo({ fileName, relPath, subfolder, type, statusPrefix }) {
-        const prep = await this._prepareVideoFrames({ fileName, relPath, subfolder, type, statusPrefix });
-        const { totalFrames, store, viewUrl } = prep;
-
-        this._storageWidth = store.width;
-        this._storageHeight = store.height;
-        const clip = this._buildClipRecord(prep);
-
-        this.timeline.videoClips = [clip];
-        this.setSparseVideoFrames(totalFrames);
-        this._syncPrimaryVideoFromClips([]);
-        this._setSingleSegment(totalFrames);
-
-        this._clearPreviewVideos(true);
-        this._previewVideo = this._getPreviewVideoForClip(0);
-        if (this._previewVideo && viewUrl) this._previewVideo.src = viewUrl;
-
-        // Force stage to drop any previous media before binding the new clip.
-        this._stageClipIndex = -1;
-        if (this.stageVideo) {
-            this.stageVideo.pause();
-            this.stageVideo.removeAttribute("src");
-            this.stageVideo.load();
-        }
-        this.currentFrame = 0;
-
-        if (this.totalFramesWidget) this.totalFramesWidget.value = totalFrames;
-        this.syncOutputUIFromTimeline();
-        this.updateVideoNameLabel();
-        this._flushPendingThumbDrops();
-        this._prefetchSegmentThumbs(0, Math.min(totalFrames, THUMB_PREFETCH_BATCH * 4));
-        this.updateStageVisibility();
-        this._syncStagePreview(this.currentFrame, { force: true });
-        this.commit(false, { syncTimeline: true });
-    }
-
-    async _applyAppendedVideo({ fileName, relPath, subfolder, type, statusPrefix }) {
-        const prep = await this._prepareVideoFrames({
-            fileName, relPath, subfolder, type, statusPrefix,
-            syncNativeFps: false,
-        });
-        const { totalFrames, store } = prep;
-
-        this._ensureVideoClipsArray();
-        const clipIndex = this.timeline.videoClips.length;
-        const clip = this._buildClipRecord(prep);
-        this.timeline.videoClips.push(clip);
-
-        const prevTotal = this.getTotalFrames();
-        if (!this.getFrameMap().length && prevTotal > 0) {
-            this.materializeFrameMap();
-        }
-        const newEntries = buildClipFrameMap(clipIndex, totalFrames);
-        const map = [...this.getFrameMap(), ...newEntries];
-        this.setFrameMap(map);
-        this.timeline.totalFrames = map.length;
-        this._syncPrimaryVideoFromClips(map);
-
-        this._getPreviewVideoForClip(clipIndex);
-
-        this.timeline.segments.push({
-            id: uid(),
-            start: prevTotal,
-            length: totalFrames,
-            prompt: "",
-            taskType: "",
-            refs: [],
-            referenceVideo: {},
-            videoClipId: clip.id,
-        });
-
-        if (this.totalFramesWidget) this.totalFramesWidget.value = map.length;
-        this.selectedIndex = this.timeline.segments.length - 1;
-        this.currentFrame = prevTotal;
-        if (this.seekBar) {
-            this.seekBar.max = Math.max(0, map.length - 1);
-            this.seekBar.value = this.currentFrame;
-        }
-
-        this.normalizeSegments();
-        this.syncOutputUIFromTimeline();
-        this.updateVideoNameLabel();
-        this._prefetchSegmentThumbs(prevTotal, Math.min(prevTotal + totalFrames, prevTotal + THUMB_PREFETCH_BATCH * 4));
-        this.updateStageVisibility();
-        this.commit(false, { syncTimeline: true });
-    }
-
-    async probeVideoMetadata(url) {
-        const video = document.createElement("video");
-        video.src = url;
-        video.muted = true;
-        video.playsInline = true;
-        video.preload = "metadata";
-        await new Promise((res, rej) => {
-            video.onloadedmetadata = () => res();
-            video.onerror = () => rej(new Error(t("upload.metaReadFailed")));
-        });
-        return {
-            width: video.videoWidth || 0,
-            height: video.videoHeight || 0,
-            duration: video.duration || 0,
-        };
-    }
 
     onNodeResize() {
         if (this.isPlaying || this._pauseSettling) return;
@@ -5672,6 +4958,12 @@ export class MiniMaxH3DirectorOptEditor {
         this._playRaf = requestAnimationFrame(tick);
     }
 }
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, video_loadMixin);
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, media_thumbsMixin);
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, ref_video_slotMixin);
 
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, task_layoutMixin);
 

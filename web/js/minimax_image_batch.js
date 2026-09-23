@@ -2771,7 +2771,7 @@ export function renderRefStat(editor, seg, prompts) {
     const total = document.createElement("span");
     total.className = "bd-ref-stat-item bd-ref-stat-total";
     if (u.total?.over) total.classList.add("over");
-    total.textContent = `${t("r2v.kind.total") || "总"} ${u.total.used}/${u.total.max}`;
+    total.textContent = `${t("r2v.kind.total")} ${u.total.used}/${u.total.max}`;
     host.appendChild(total);
     prompts.classList.toggle("over", !!u.over);
     return u;

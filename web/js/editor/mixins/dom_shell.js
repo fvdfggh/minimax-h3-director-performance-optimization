@@ -36,7 +36,7 @@ export const dom_shellMixin = {
                         <span data-i18n="toolbar.selectAll">全选</span>
                     </label>
                     <button type="button" class="bd-btn" data-a="seg-export" data-i18n="toolbar.segmentExport" data-i18n-title="tooltip.segmentExport">分段导出</button>
-                    <button type="button" class="bd-btn" data-a="second-sample" title="二次采样：对已有缓存片段做 放大+重采样+连续出片">二次采样</button>
+                    <button type="button" class="bd-btn" data-a="second-sample" data-i18n="toolbar.secondSample" data-i18n-title="tooltip.secondSample">二次采样</button>
                     <button type="button" class="bd-btn bd-btn-danger" data-a="del" data-i18n="toolbar.deleteSegment" data-i18n-title="tooltip.deleteSegment">删除片段</button>
                     <div class="bd-mode">
                         <button type="button" data-a="mode-global" class="active" data-i18n="toolbar.modeGlobal">全局模式</button>

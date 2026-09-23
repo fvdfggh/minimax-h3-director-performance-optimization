@@ -4,7 +4,7 @@
 import { api } from "../../../scripts/api.js";
 import { coerceTimelineFps, resolveOutputDimensions, snapDim } from "../core/dims.js";
 import { healOversizedDirectorNode, hideWidget, parseTimeline, syncDirectorNodeSize } from "../core/editor_lifecycle.js";
-import { buildIdentityFrameMap, deletedSourceRanges, logicalToSourceFrame, normalizeFrameMapEntry, sourceToLogicalFrame } from "../core/frame_map.js";
+import { buildIdentityFrameMap, deletedSourceRanges, normalizeFrameMapEntry, sourceToLogicalFrame } from "../core/frame_map.js";
 import { getStableWorkflowId } from "../core/graph_refs.js";
 import { HIDDEN_WIDGETS, MIN_SEG, RULER_H, SEG_LABEL_H, THUMB_JPEG_Q, THUMB_MAX_W, THUMB_PREFETCH_BATCH, TRACK_H } from "../core/layout_spec.js";
 import { formatProbeFps } from "../core/ruler.js";
@@ -14,10 +14,10 @@ import { clamp, relPath, uid } from "../core/utils.js";
 import { applyDirectorWidgetLabels } from "../core/widget_labels.js";
 
 import { inputViewUrl, refViewUrl, videoRelativePath } from "./urls.js";
-import { getFl2vSampleFrames, getFl2vTotalDurationSec, getFl2vVisualFrames, normalizeFl2vSegments, openFl2vUpload, removeFl2vShot, syncFl2vFromShots, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../minimax_fl2v.js";
-import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, MINIMAX_CANVAS_MULTIPLE, NO_VIDEO_UPLOAD_TASKS, clampMegapixels, defaultFrameCount, getDirectorMode, isContinuityMasterEnabled, isCustomAspectRatio, isSegmentContinuityFromPrev, isVideoBatchTask, minFrameCount, normalizeAspectRatioLabel, normalizeRefImageSize, preferredDurationSecFromFrames, refAudioLabel, refImageLabel, refVideoLabel, resolutionFromSelector, resolveSegmentRefImageSize, resolveTaskKey, roundDurationSec, snapResolutionDim, sumFrameCounts, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../minimax_gen_timeline.js";
+import { getFl2vSampleFrames, normalizeFl2vSegments, openFl2vUpload, removeFl2vShot, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../minimax_fl2v.js";
+import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, MINIMAX_CANVAS_MULTIPLE, NO_VIDEO_UPLOAD_TASKS, clampMegapixels, defaultFrameCount, getDirectorMode, isContinuityMasterEnabled, isCustomAspectRatio, isSegmentContinuityFromPrev, isVideoBatchTask, normalizeAspectRatioLabel, normalizeRefImageSize, refAudioLabel, refImageLabel, refVideoLabel, resolutionFromSelector, resolveSegmentRefImageSize, resolveTaskKey, snapResolutionDim, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../minimax_gen_timeline.js";
 import { applyI18nDom, aspectDisplayLabel, getLocale, onLocaleChange, t, taskDisplayLabel } from "../minimax_i18n.js";
-import { bindDomWidgetContentComputeSize, bindR2vMediaPlayback, deleteImageBatchGroup, ensureImageBatchTimeline, formatMediaDuration, isBatchDetailSolo, normalizeImageBatchSegments, rebaseR2vGroupSlotsForCommon, syncBatchPanelFillHeight, updateR2vToolbarBtns, wireMediaDuration } from "../minimax_image_batch.js";
+import { bindDomWidgetContentComputeSize, bindR2vMediaPlayback, deleteImageBatchGroup, ensureImageBatchTimeline, formatMediaDuration, isBatchDetailSolo, rebaseR2vGroupSlotsForCommon, syncBatchPanelFillHeight, updateR2vToolbarBtns, wireMediaDuration } from "../minimax_image_batch.js";
 
 import { refreshPromptTokenEditors } from "../minimax_prompt_mentions.js";
 import { extractReferenceAudioFromExistingVideo, hasDuplicateReferenceAudio, prepareLocalReferenceAudio } from "../minimax_ref_audio.js";
@@ -37,6 +37,8 @@ import { task_layoutMixin } from "./mixins/task_layout.js";
 import { ref_video_slotMixin } from "./mixins/ref_video_slot.js";
 import { media_thumbsMixin } from "./mixins/media_thumbs.js";
 import { video_loadMixin } from "./mixins/video_load.js";
+import { segments_modelMixin } from "./mixins/segments_model.js";
+import { frame_map_ioMixin } from "./mixins/frame_map_io.js";
 
 export class MiniMaxH3DirectorOptEditor {
     constructor(node, container, domWidget) {
@@ -335,480 +337,34 @@ export class MiniMaxH3DirectorOptEditor {
 
 
 
-    getFrameMapEntry(logicalFrame) {
-        const map = this.getFrameMap();
-        if (map.length) return normalizeFrameMapEntry(map[clamp(logicalFrame, 0, map.length - 1)]);
-        return { clip: 0, frame: logicalToSourceFrame(logicalFrame, this.timeline.video || {}) };
-    }
 
-    getSegmentClipIndex(seg) {
-        return this.getFrameMapEntry(seg.start).clip;
-    }
 
-    getClipBoundaries() {
-        const map = this.getFrameMap();
-        const boundaries = [];
-        for (let i = 1; i < map.length; i++) {
-            const a = normalizeFrameMapEntry(map[i - 1]);
-            const b = normalizeFrameMapEntry(map[i]);
-            if (b.clip !== a.clip) boundaries.push(i);
-        }
-        return boundaries;
-    }
 
-    _segmentMetaAtFrame(frame) {
-        const segs = [...this.timeline.segments].sort((a, b) => a.start - b.start);
-        for (const seg of segs) {
-            if (frame >= seg.start && frame < seg.start + seg.length) {
-                return {
-                    prompt: seg.prompt || "",
-                    taskType: seg.taskType || "",
-                    refs: seg.refs ? JSON.parse(JSON.stringify(seg.refs)) : [],
-                };
-            }
-        }
-        const last = segs[segs.length - 1];
-        if (last) {
-            return {
-                prompt: last.prompt || "",
-                taskType: last.taskType || "",
-                refs: last.refs ? JSON.parse(JSON.stringify(last.refs)) : [],
-            };
-        }
-        return { prompt: "", taskType: "", refs: [] };
-    }
 
-    _buildSegmentsFromSplitPoints(points, forcedPoints = null) {
-        const forced = new Set(forcedPoints || []);
-        forced.add(0);
-        const sorted = [...new Set(points)].sort((a, b) => a - b);
-        forced.add(sorted[sorted.length - 1]);
-        const newSegs = [];
-        for (let i = 0; i < sorted.length - 1; i++) {
-            const start = sorted[i];
-            const length = sorted[i + 1] - start;
-            const endsForced = forced.has(sorted[i + 1]);
-            const startsForced = forced.has(start);
-            if (length < MIN_SEG && !endsForced && !startsForced) continue;
-            if (length < 1) continue;
-            const meta = this._segmentMetaAtFrame(start);
-            newSegs.push({
-                id: uid(),
-                start,
-                length,
-                prompt: meta.prompt,
-                taskType: meta.taskType,
-                refs: meta.refs,
-            });
-        }
-        if (!newSegs.length) return null;
-        let cursor = 0;
-        return newSegs.map((seg) => {
-            const s = { ...seg, start: cursor, length: seg.length };
-            cursor += s.length;
-            return s;
-        });
-    }
 
-    _getReorderInsertFrame(dropRank, fromRank) {
-        const ordered = [...this.timeline.segments].sort((a, b) => a.start - b.start);
-        const lengths = ordered.map((s) => s.length);
-        const without = lengths.filter((_, i) => i !== fromRank);
-        let frame = 0;
-        for (let i = 0; i < dropRank && i < without.length; i++) frame += without[i];
-        return frame;
-    }
 
-    _orderedSegmentsWithRank() {
-        return [...this.timeline.segments]
-            .map((seg, arrayIndex) => ({ seg, arrayIndex }))
-            .sort((a, b) => a.seg.start - b.seg.start)
-            .map((item, visualRank) => ({ ...item, visualRank }));
-    }
 
-    _visualRankFromArrayIndex(arrayIndex) {
-        const ordered = this._orderedSegmentsWithRank();
-        return ordered.find((o) => o.arrayIndex === arrayIndex)?.visualRank ?? arrayIndex;
-    }
 
-    _computeReorderDropRank(frame, fromRank) {
-        const ordered = this._orderedSegmentsWithRank();
-        if (!ordered.length) return fromRank;
 
-        // fl2v: swap slots — drop target = the clip currently under the pointer.
-        if (this.isFl2vMode()) {
-            for (const item of ordered) {
-                const lo = item.seg.start;
-                const hi = item.seg.start + item.seg.length;
-                if (frame >= lo && frame < hi) return item.visualRank;
-            }
-            // In a gap / past the end: snap to nearest clip by center distance.
-            let best = fromRank;
-            let bestDist = Infinity;
-            for (const item of ordered) {
-                const mid = item.seg.start + item.seg.length / 2;
-                const d = Math.abs(frame - mid);
-                if (d < bestDist) {
-                    bestDist = d;
-                    best = item.visualRank;
-                }
-            }
-            return best;
-        }
 
-        // Video / gen / batch: return the final insertion index after removing
-        // the dragged item. This keeps forward moves from collapsing to no-op.
-        const remaining = ordered.filter((item) => item.visualRank !== fromRank);
-        for (let index = 0; index < remaining.length; index++) {
-            const item = remaining[index];
-            const mid = item.seg.start + item.seg.length / 2;
-            if (frame < mid) return index;
-        }
-        return remaining.length;
-    }
 
-    reorderSegmentsByRank(fromRank, toRank) {
-        const ordered = [...this.timeline.segments]
-            .map((seg) => ({ seg }))
-            .sort((a, b) => a.seg.start - b.seg.start);
-        if (fromRank < 0 || fromRank >= ordered.length) return;
-        if (toRank < 0 || toRank >= ordered.length) return;
-        if (fromRank === toRank) return;
-        // Ticks are positions, not identities — carry them across the move.
-        this.moveRunSelectionIndex(fromRank, toRank);
 
-        // fl2v: reorder shots[] (source of truth), then rebuild segments.
-        if (this.isFl2vMode()) {
-            const shots = [...(this.timeline.shots || [])];
-            if (fromRank < 0 || fromRank >= shots.length) return;
-            if (toRank < 0 || toRank >= shots.length) return;
-            const [moved] = shots.splice(fromRank, 1);
-            const insertRank = toRank;
-            shots.splice(insertRank, 0, moved);
-            this.timeline.shots = shots;
-            syncFl2vFromShots(this);
-            this.selectedIndex = insertRank;
-            updateFl2vDetailUI(this);
-            this.updateVideoNameLabel();
-            return;
-        }
-        // r2v / t2v / i2v: move whole groups then renumber starts.
-        if (this.usesBatchTimeline()) {
-            const metas = ordered.map((o) => ({
-                ...o.seg,
-                refs: o.seg.refs ? JSON.parse(JSON.stringify(o.seg.refs)) : [],
-                refAudios: o.seg.refAudios ? JSON.parse(JSON.stringify(o.seg.refAudios)) : [],
-                refVideos: o.seg.refVideos ? JSON.parse(JSON.stringify(o.seg.refVideos)) : [],
-            }));
-            const [mMeta] = metas.splice(fromRank, 1);
-            const insertRank = toRank;
-            metas.splice(insertRank, 0, mMeta);
-            this.timeline.segments = metas;
-            normalizeImageBatchSegments(this);
-            this.selectedIndex = insertRank;
-            this.updateVideoNameLabel();
-            return;
-        }
-        // gen: no video frameMap — reorder by segment metadata only.
-        if (this.isGenMode()) {
-            const metas = ordered.map((o) => ({
-                ...o.seg,
-                refs: o.seg.refs ? JSON.parse(JSON.stringify(o.seg.refs)) : [],
-            }));
-            const slots = ordered.map((o) => ({
-                start: o.seg.start,
-                length: o.seg.length || o.seg.frameCount || minFrameCount(this.getTaskKey()),
-            }));
-            const [mMeta] = metas.splice(fromRank, 1);
-            const insertRank = toRank;
-            metas.splice(insertRank, 0, mMeta);
-            for (let i = 0; i < metas.length; i++) {
-                const slot = slots[i] || slots[slots.length - 1];
-                metas[i].start = slot.start;
-                metas[i].length = slot.length;
-                metas[i].frameCount = slot.length;
-            }
-            this.timeline.segments = metas;
-            this.normalizeGenSegments();
-            this.selectedIndex = insertRank;
-            this.updateVideoNameLabel();
-            return;
-        }
 
-        if (!this.getFrameMap().length && this.getTotalFrames() > 0) {
-            this.materializeFrameMap();
-        }
-        const map = [...this.getFrameMap()];
-        const slices = ordered.map((o) => map.slice(o.seg.start, o.seg.start + o.seg.length));
-        const metas = ordered.map((o) => ({
-            ...o.seg,
-            refs: o.seg.refs ? JSON.parse(JSON.stringify(o.seg.refs)) : [],
-        }));
 
-        const [mSlice] = slices.splice(fromRank, 1);
-        const [mMeta] = metas.splice(fromRank, 1);
-        const insertRank = toRank;
-        slices.splice(insertRank, 0, mSlice);
-        metas.splice(insertRank, 0, mMeta);
 
-        const newMap = slices.flat();
-        let start = 0;
-        const newSegs = metas.map((seg, idx) => {
-            const s = { ...seg, start, length: slices[idx].length };
-            start += s.length;
-            return s;
-        });
 
-        this.setFrameMap(newMap);
-        this.timeline.segments = newSegs;
-        this._syncPrimaryVideoFromClips(newMap);
-        this.selectedIndex = insertRank;
-        this._prefetchSegmentThumbs(0, Math.min(newMap.length, THUMB_PREFETCH_BATCH * 4));
-    }
 
-    materializeFrameMap() {
-        const total = this.getTotalFrames();
-        const video = this.timeline.video || {};
-        if (video.frameMap?.length === total) return;
-        const map = [];
-        for (let i = 0; i < total; i++) map.push(this.getFrameMapEntry(i));
-        video.frameMap = map;
-        video.deletedSourceRanges = [];
-        this.timeline.video = video;
-        this.timeline.totalFrames = total;
-    }
 
-    getFrameMap() {
-        const v = this.timeline?.video || {};
-        if (v.frameMap?.length) return v.frameMap;
-        if (this._legacyFrames.length) return buildIdentityFrameMap(this._legacyFrames.length);
-        if (v.frames?.length) return buildIdentityFrameMap(v.frames.length);
-        return [];
-    }
 
-    setFrameMap(map) {
-        this.timeline.video = this.timeline.video || {};
-        this.timeline.video.frameMap = map;
-        if (map.length) {
-            this.timeline.totalFrames = map.length;
-            this.timeline.video.deletedSourceRanges = [];
-        }
-    }
 
-    setSparseVideoFrames(totalFrames) {
-        this.timeline.video = this.timeline.video || {};
-        this.timeline.video.frameMap = [];
-        this.timeline.video.sourceFrameCount = totalFrames;
-        this.timeline.video.deletedSourceRanges = [];
-        this.timeline.totalFrames = totalFrames;
-    }
 
-    logicalToSourceFrame(logical) {
-        return logicalToSourceFrame(logical, this.timeline.video || {});
-    }
 
-    getTotalFrames() {
-        // fl2v: visual canvas may be longer than the sampling window (overflow = dashed).
-        if (this.isFl2vMode()) return getFl2vVisualFrames(this);
-        if (this.isImageBatch() || this.isGenMode()) {
-            // t2v/i2v: never use drag preview for totals (inputs are the source of truth).
-            // r2v may temporarily use _previewSegments while resizing on the timeline.
-            if (this.usesBatchTimeline() && this._previewSegments) {
-                return sumFrameCounts(this._previewSegments);
-            }
-            return sumFrameCounts(this.timeline.segments);
-        }
-        const mapLen = this.timeline?.video?.frameMap?.length || 0;
-        if (mapLen > 0) return mapLen;
-        // Sparse deletes: sourceFrameCount − ranges beats a stale totalFrames.
-        const src = parseInt(this.timeline?.video?.sourceFrameCount || 0, 10);
-        if (src > 0) {
-            const removed = deletedSourceRanges(this.timeline.video).reduce((s, [a, b]) => s + (b - a), 0);
-            return Math.max(0, src - removed);
-        }
-        const total = Math.max(0, parseInt(this.timeline?.totalFrames || this.totalFramesWidget?.value || 0, 10));
-        if (total > 0) return total;
-        if (!this.hasVideo()) return 0;
-        return 0;
-    }
 
-    getMaxExportFrames() {
-        const n = parseInt(this.timeline.output?.maxExportFrames ?? 0, 10);
-        return Number.isFinite(n) && n > 0 ? n : 0;
-    }
 
-    getExportFrameTotal() {
-        const total = this.getTotalFrames();
-        const cap = this.getMaxExportFrames();
-        return cap > 0 ? Math.min(total, cap) : total;
-    }
 
-    getFrameRate() {
-        return coerceTimelineFps(this.fpsInput?.value ?? this.frameRateWidget?.value ?? this.timeline.frameRate ?? 24);
-    }
 
-    syncFrameRateUI(value = null) {
-        const fps = coerceTimelineFps(value ?? this.fpsInput?.value ?? this.frameRateWidget?.value ?? this.timeline.frameRate ?? 24);
-        this.timeline.frameRate = fps;
-        if (this.frameRateWidget) this.frameRateWidget.value = fps;
-        if (this.fpsInput) this.fpsInput.value = fps;
-        return fps;
-    }
 
-    _clipFrameCountAtFps(clip, fps, fallback = 0) {
-        const nativeFps = Number(clip?.nativeFps || 0);
-        const nativeCount = Number(clip?.nativeFrameCount || 0);
-        if (nativeFps > 0 && nativeCount > 0) {
-            return Math.max(1, Math.round((nativeCount / nativeFps) * fps));
-        }
-        const duration = Number(clip?.duration || 0);
-        if (duration > 0) return Math.max(1, Math.round(duration * fps));
-        return Math.max(1, Math.round(fallback || Number(clip?.sourceFrameCount || 0) || 1));
-    }
 
-    _timelineFrameCountAtFps(fps, oldFps = null, oldTotal = null) {
-        const nextFps = coerceTimelineFps(fps);
-        const prevTotal = Number(oldTotal ?? this.getTotalFrames() ?? 0);
-        const prevFps = coerceTimelineFps(oldFps ?? this.timeline.frameRate ?? this.frameRateWidget?.value ?? 24);
-        // When user changes timeline FPS, preserve wall-clock duration: T = N/fps → N' = T * fps'.
-        if (prevTotal > 0 && oldFps != null && Math.abs(prevFps - nextFps) >= 0.001) {
-            return Math.max(1, Math.round(prevTotal * nextFps / prevFps));
-        }
-        const clips = this.getVideoClips();
-        if (clips.length && clips.some((c) => Number(c.duration || 0) > 0 || Number(c.nativeFrameCount || 0) > 0)) {
-            return clips.reduce((sum, clip) => sum + this._clipFrameCountAtFps(clip, nextFps), 0);
-        }
-        if (prevTotal > 0) {
-            return Math.max(1, Math.round(prevTotal * nextFps / Math.max(prevFps, 0.001)));
-        }
-        return 1;
-    }
-
-    _rescaleSegmentsForTotal(oldTotal, newTotal) {
-        if (!oldTotal || !newTotal || !this.timeline.segments?.length) {
-            this._setSingleSegment(newTotal);
-            return;
-        }
-        const ordered = [...this.timeline.segments].sort((a, b) => a.start - b.start);
-        let cursor = 0;
-        this.timeline.segments = ordered.map((seg, idx) => {
-            const rawStart = idx === 0 ? 0 : Math.round((seg.start / oldTotal) * newTotal);
-            const rawEnd = idx === ordered.length - 1
-                ? newTotal
-                : Math.round(((seg.start + seg.length) / oldTotal) * newTotal);
-            const start = clamp(rawStart, cursor, newTotal);
-            const end = clamp(rawEnd, start + 1, newTotal);
-            cursor = end;
-            return {
-                ...seg,
-                start,
-                length: Math.max(1, end - start),
-                frameCount: Math.max(1, end - start),
-            };
-        });
-    }
-
-    _syncClipFrameCountsForFps(fps, oldFps = null) {
-        const clips = this.getVideoClips();
-        if (!clips.length) return;
-        const prevFps = coerceTimelineFps(oldFps ?? this.timeline.frameRate ?? 24);
-        this.timeline.videoClips = clips.map((clip) => {
-            const fallback = Number(clip.sourceFrameCount || 0) * fps / Math.max(prevFps, 0.001);
-            return { ...clip, sourceFrameCount: this._clipFrameCountAtFps(clip, fps, fallback) };
-        });
-    }
-
-    _resampleFrameMapForFps(oldFps, newFps, newTotal) {
-        const oldTotal = this.getTotalFrames();
-        if (!oldTotal || !newTotal) return [];
-        const oldEntries = Array.from({ length: oldTotal }, (_, i) => this.getFrameMapEntry(i));
-        const clips = this.getVideoClips();
-        const map = [];
-        for (let i = 0; i < newTotal; i++) {
-            const oldLogical = clamp(Math.round((i / newFps) * oldFps), 0, oldTotal - 1);
-            const entry = normalizeFrameMapEntry(oldEntries[oldLogical]);
-            const clip = clips[entry.clip] || clips[0] || {};
-            const maxFrame = this._clipFrameCountAtFps(clip, newFps) - 1;
-            const sourceTime = Number(entry.frame || 0) / Math.max(oldFps, 0.001);
-            map.push({
-                clip: entry.clip,
-                frame: clamp(Math.round(sourceTime * newFps), 0, Math.max(0, maxFrame)),
-            });
-        }
-        return map;
-    }
-
-    _resampleTimelineForFrameRate(oldFps, newFps) {
-        if (this.isImageBatch() || this.isGenMode() || !this.hasVideo()) return;
-        const oldTotal = this.getTotalFrames();
-        const newTotal = this._timelineFrameCountAtFps(newFps, oldFps, oldTotal);
-        const hasExplicitMap = this.getFrameMap().length > 0;
-        const hasSparseDeletes = deletedSourceRanges(this.timeline.video || {}).length > 0;
-
-        if (hasExplicitMap || hasSparseDeletes || this.getVideoClips().length > 1) {
-            const newMap = this._resampleFrameMapForFps(oldFps, newFps, newTotal);
-            this.setFrameMap(newMap);
-            this._syncClipFrameCountsForFps(newFps, oldFps);
-            this._syncPrimaryVideoFromClips(newMap);
-        } else {
-            this._syncClipFrameCountsForFps(newFps, oldFps);
-            this.setSparseVideoFrames(newTotal);
-            this._syncPrimaryVideoFromClips([]);
-        }
-
-        this._rescaleSegmentsForTotal(oldTotal, newTotal);
-        this.currentFrame = clamp(Math.round((this.currentFrame / Math.max(oldTotal, 1)) * newTotal), 0, Math.max(0, newTotal - 1));
-        if (this.totalFramesWidget) this.totalFramesWidget.value = newTotal;
-        if (this.seekBar) {
-            this.seekBar.max = Math.max(0, newTotal - 1);
-            this.seekBar.value = this.currentFrame;
-        }
-        this._prefetchSegmentThumbs(0, Math.min(newTotal, THUMB_PREFETCH_BATCH * 4));
-    }
-
-    onFrameRateChanged(value) {
-        const oldFps = coerceTimelineFps(this.timeline.frameRate ?? this.frameRateWidget?.value ?? 24);
-        const newFps = this.syncFrameRateUI(value);
-        if (Math.abs(oldFps - newFps) < 0.001) {
-            this.commit(false, { syncTimeline: true });
-            return;
-        }
-        this._resampleTimelineForFrameRate(oldFps, newFps);
-        this.updateVideoNameLabel();
-        this.updateOutputPreview();
-        this.scheduleRender();
-        this.commit(false, { syncTimeline: true });
-    }
-
-    getTimelineDurationSec() {
-        if (this.isFl2vMode()) return getFl2vTotalDurationSec(this);
-        const total = this.getTotalFrames();
-        const fps = this.getFrameRate();
-        return total / Math.max(fps, 0.001);
-    }
-
-    /** User-facing seconds for ruler ticks (batch 秒数, not MiniMax-aligned play length). */
-    getRulerDurationSec() {
-        if (this.isFl2vMode()) return Math.max(0.001, getFl2vTotalDurationSec(this));
-        if (this.usesBatchTimeline()) {
-            const segs = this._previewSegments || this.timeline.segments || [];
-            let sec = 0;
-            const dragging = !!this._previewSegments;
-            for (const seg of segs) {
-                const fc = Math.max(0, parseInt(seg.frameCount ?? seg.length, 10) || 0);
-                const raw = Number(seg.durationSec);
-                if (dragging) {
-                    sec += preferredDurationSecFromFrames(fc, 24);
-                } else if (Number.isFinite(raw) && raw > 0) {
-                    sec += raw;
-                } else if (fc > 0) {
-                    sec += preferredDurationSecFromFrames(fc, 24);
-                }
-            }
-            return Math.max(0.001, roundDurationSec(sec));
-        }
-        return Math.max(0.001, this.getTimelineDurationSec());
-    }
 
     isGlobalMode() { return (this.timeline.editMode || "global") === "global"; }
 
@@ -4958,6 +4514,10 @@ export class MiniMaxH3DirectorOptEditor {
         this._playRaf = requestAnimationFrame(tick);
     }
 }
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, frame_map_ioMixin);
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, segments_modelMixin);
 
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, video_loadMixin);
 

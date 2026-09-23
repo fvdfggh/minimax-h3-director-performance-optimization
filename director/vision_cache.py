@@ -47,6 +47,7 @@ from pathlib import Path
 
 import torch
 
+from ..lib.fs import write_via_temp
 from . import cache_layout
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.vision_cache")
@@ -107,18 +108,11 @@ def _key_for(model_type: str, embed: dict, data: torch.Tensor) -> str:
 
 def _write_atomic(path: Path, payload: dict) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
     try:
-        torch.save(payload, tmp)
-        os.replace(tmp, path)
+        write_via_temp(path, lambda tmp: torch.save(payload, tmp))
         return True
     except Exception as exc:
         log.debug("ViT cache write failed for %s: %s", path.name, exc)
-        try:
-            if tmp.is_file():
-                tmp.unlink()
-        except Exception:
-            pass
         return False
 
 

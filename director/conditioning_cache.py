@@ -5,15 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from ..lib.fs import write_json_atomic
 from . import cache_layout
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director-Cached.conditioning_cache")
@@ -530,14 +529,8 @@ def _read_seg_params_map(node_id: str | None, workflow_name: str | None) -> dict
 def _write_seg_params_map(node_id: str | None, workflow_name: str | None, segments: dict) -> None:
     path = _seg_params_map_path(node_id, workflow_name)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"updated": int(time.time()), "segments": segments}
-        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        tmp.write_text(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True),
-            encoding="utf-8",
-        )
-        os.replace(tmp, path)
+        write_json_atomic(path, payload)
     except OSError as exc:
         log.warning("Segment params map write skipped (%s).", exc)
 

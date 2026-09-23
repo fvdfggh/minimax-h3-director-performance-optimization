@@ -39,14 +39,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from ..lib.fs import write_json_atomic
 from . import cache_layout
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.slots")
@@ -239,17 +238,7 @@ def write_slots(
     }
     try:
         Path(root).mkdir(parents=True, exist_ok=True)
-        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, path)
-        finally:
-            if tmp.is_file():
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
+        write_json_atomic(path, payload)
     except OSError as exc:
         log.warning("Slot map write skipped (%s); this run keeps it in memory only.", exc)
     with _LOCK:

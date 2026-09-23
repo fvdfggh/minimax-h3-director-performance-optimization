@@ -13,12 +13,17 @@ import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import torch
 
 import folder_paths
 
+from ..lib.fs import (
+    atomic_publish as _atomic_publish,
+    safe_unlink as _safe_unlink,
+    write_via_temp as _write_via_temp,
+)
 from . import cache_layout
 from . import segment_slots
 from .h3_motion_context import CONTINUITY_PIPELINE_ID
@@ -317,48 +322,6 @@ def _slot_paths(
     if root is None:
         return None
     return segment_slots.slot_paths(root, position, stale=stale, variant=variant)
-
-
-def _safe_unlink(path: Path) -> bool:
-    try:
-        if path.is_file() or path.is_symlink():
-            path.unlink()
-        return True
-    except OSError:
-        return False
-
-
-def _atomic_publish(tmp: Path, dest: Path) -> None:
-    """Move ``tmp`` 鈫?``dest``, tolerating clouds that block same-name overwrite."""
-    try:
-        os.replace(tmp, dest)
-        return
-    except OSError:
-        pass
-    # Some cloud mounts reject overwrite of an existing name 鈥?remove then rename.
-    _safe_unlink(dest)
-    try:
-        os.replace(tmp, dest)
-        return
-    except OSError:
-        pass
-    try:
-        tmp.rename(dest)
-        return
-    except OSError:
-        # Last resort: keep the unique temp as the published file name is blocked.
-        # Caller may still fail if even create-new is denied.
-        raise
-
-
-def _write_via_temp(dest: Path, write_fn: Callable[[Path], None]) -> None:
-    """Write to a unique temp name in the same folder, then publish to ``dest``."""
-    tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        write_fn(tmp)
-        _atomic_publish(tmp, dest)
-    finally:
-        _safe_unlink(tmp)
 
 
 def _audio_payload_to_cpu(audio: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2695,20 +2658,13 @@ def _write_export_mp4(
     stamp = uuid.uuid4().hex[:6]
     base = f"segment_export_{tag}_{stamp}.mp4"
     path = os.path.join(export_dir, base)
-    tmp = path + ".tmp"
-    try:
-        # No ``.float()``: that turns uint8 [0,255] into float [0,255] rather
-        # than [0,1], and the encoder then clips nearly every pixel to white.
-        # The writer handles both domains.
-        write_frames_to_mp4(
-            tmp,
-            frames.detach().cpu(),
-            fps=fps,
-            audio=audio,
-        )
-        os.replace(tmp, path)
-    finally:
-        _safe_unlink(Path(tmp))
+    # No ``.float()``: that turns uint8 [0,255] into float [0,255] rather than
+    # [0,1], and the encoder then clips nearly every pixel to white. The writer
+    # handles both domains.
+    _write_via_temp(
+        Path(path),
+        lambda tmp: write_frames_to_mp4(tmp, frames.detach().cpu(), fps=fps, audio=audio),
+    )
     return path
 
 

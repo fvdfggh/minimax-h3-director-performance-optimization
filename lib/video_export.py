@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from .ffmpeg import ffmpeg_bin
+from .fs import write_via_temp
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.video_export")
 
@@ -177,19 +178,8 @@ def write_frames_to_mp4(
             err = (stderr or b"").decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"ffmpeg encode failed (code={proc.returncode}): {err or 'unknown'}")
 
-        # Atomic-ish publish: write to sibling temp then replace.
-        publish_tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
-        try:
-            if publish_tmp.exists():
-                publish_tmp.unlink()
-            shutil.copy2(tmp_mp4, publish_tmp)
-            os.replace(publish_tmp, dest)
-        finally:
-            if publish_tmp.exists():
-                try:
-                    publish_tmp.unlink()
-                except OSError:
-                    pass
+        # Atomic publish: copy to a sibling temp, then replace.
+        write_via_temp(dest, lambda publish: shutil.copy2(tmp_mp4, publish))
         return dest
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

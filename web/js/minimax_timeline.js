@@ -9,7 +9,7 @@ import { DIRECTOR_DOM_WIDGET_NAME } from "./core/layout_spec.js";
 import { clearAllDirectorRunStatus, isDirectorNodeDef, isMiniMaxH3DirectorOptNode, normalizeDirectorOutputs, sanitizeAllWidgetValues, sanitizeWidgetValues } from "./core/node_migrations.js";
 import { clamp } from "./core/utils.js";
 import { DIRECTOR_GROUP_LABEL_KEYS, applyDirectorWidgetLabels } from "./core/widget_labels.js";
-import { t } from "./minimax_i18n.js";
+import { onLocaleChange, t } from "./minimax_i18n.js";
 import { ensureImageBatchTimeline, renderImageBatchGroups, setImageBatchPreview } from "./minimax_image_batch.js";
 
 
@@ -477,25 +477,25 @@ app.registerExtension({
             const runClearCache = (clearAll) => {
                 const nodeId = String(this.id ?? "");
                 const wfName = getStableWorkflowId();
-                const scope = clearAll ? "本节点的全部缓存" : "本节点的文本缓存与中间缓存";
+                const scope = t(clearAll ? "cache.scopeAll" : "cache.scopeTextBatch");
                 const willDelete = clearAll
                     ? [
-                        "· 文本编码缓存（conditioning）",
-                        "· batch 中间缓存（scratch）",
-                        "· 片段帧 / 音频 / AV latent / clip（统一缓存目录内）",
+                        t("cache.itemConditioning"),
+                        t("cache.itemBatchScratch"),
+                        t("cache.itemSegments"),
                     ]
                     : [
-                        "· 文本编码缓存（conditioning）",
-                        "· batch 中间缓存（scratch）",
-                        "· 旧版首尾帧缓存（*_frames_ht.pt，已改为 mp4，可安全回收）",
+                        t("cache.itemConditioning"),
+                        t("cache.itemBatchScratch"),
+                        t("cache.itemLegacyHeadtail"),
                     ];
                 if (!window.confirm(
-                    "确认清空" + scope + "吗？\n\n" +
-                    (wfName ? "工作流：" + wfName + "\n" : "") +
-                    "节点 ID：" + nodeId + "\n\n" +
-                    "将删除：\n" +
+                    t("cache.confirmClear", { scope }) + "\n\n" +
+                    (wfName ? t("cache.labelWorkflow") + wfName + "\n" : "") +
+                    t("cache.labelNodeId") + nodeId + "\n\n" +
+                    t("cache.labelWillDelete") + "\n" +
                     willDelete.join("\n") +
-                    (clearAll ? "\n\n警告：片段缓存删除后需重新渲染所有片段！" : "\n\n不影响片段帧 / 音频 / AV latent / clip，仅回收旧版首尾帧张量占用的空间。")
+                    (clearAll ? "\n\n" + t("cache.warnRerender") : "\n\n" + t("cache.noteKeepSegments"))
                 )) {
                     return;
                 }
@@ -509,7 +509,7 @@ app.registerExtension({
                         const data = resp.ok ? await resp.json() : { error: (await resp.text()).slice(0, 200) };
                         if (!resp.ok) {
                             console.error("[MiniMax H3Director] clear cache failed:", data);
-                            window.alert("清空缓存失败：" + (data.error || resp.status));
+                            window.alert(t("cache.clearFailed", { detail: data.error || resp.status }));
                             return;
                         }
                         const cond = data.cleared?.conditioning ?? 0;
@@ -517,12 +517,12 @@ app.registerExtension({
                         const segments = data.cleared?.segments ?? 0;
                         const headtail = data.cleared?.headtail ?? 0;
                         const msg = [
-                            "缓存已清空",
-                            "工作流：" + (wfName || "（未命名）"),
-                            "删除文本缓存：" + cond + " 个文件",
-                            "删除中间缓存：" + (batch ? "已删除" : "无"),
-                            ...(headtail ? ["删除旧版首尾帧缓存：" + headtail + " 个文件"] : []),
-                            ...(clearAll ? ["删除片段缓存：" + (segments ? "已删除" : "无")] : []),
+                            t("cache.clearedTitle"),
+                            t("cache.labelWorkflow") + (wfName || t("cache.unnamedWorkflow")),
+                            t("cache.deletedConditioning", { count: cond }),
+                            t("cache.deletedBatch", { status: batch ? t("cache.removed") : t("cache.none") }),
+                            ...(headtail ? [t("cache.deletedHeadtail", { count: headtail })] : []),
+                            ...(clearAll ? [t("cache.deletedSegments", { status: segments ? t("cache.removed") : t("cache.none") })] : []),
                         ].join("\n");
                         console.log(
                             `[MiniMax H3Director] cache cleared: ${cond} conditioning file(s), ` +
@@ -533,12 +533,25 @@ app.registerExtension({
                         window.alert(msg);
                     } catch (err) {
                         console.error("[MiniMax H3Director] clear cache error:", err);
-                        window.alert("清空缓存出错：" + err);
+                        window.alert(t("cache.clearError", { detail: err }));
                     }
                 })();
             };
-            this.addWidget("button", "清空缓存", null, () => runClearCache(false));
-            this.addWidget("button", "清空节点所有缓存", null, () => runClearCache(true));
+            // A button widget's name *is* its visible text (nothing looks these two
+            // up by name), so they are built from t() and re-translated on switch.
+            const clearBtn = this.addWidget("button", t("cache.buttonClear"), null, () => runClearCache(false));
+            const clearAllBtn = this.addWidget("button", t("cache.buttonClearAll"), null, () => runClearCache(true));
+            this._unsubCacheLocale?.();
+            this._unsubCacheLocale = onLocaleChange(() => {
+                const relabel = (w, key) => {
+                    if (!w) return;
+                    w.name = t(key);
+                    w.label = t(key);
+                };
+                relabel(clearBtn, "cache.buttonClear");
+                relabel(clearAllBtn, "cache.buttonClearAll");
+                this.setDirtyCanvas?.(true, true);
+            });
 
             const existingDom = pruneDirectorDomWidgets(this);
             // Idempotent: reuse the host if onNodeCreated / graph restore already mounted one.

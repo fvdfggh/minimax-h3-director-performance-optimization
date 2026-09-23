@@ -4,7 +4,7 @@
  * trailing comma an object literal needs.
  */
 
-import { STYLES } from "../styles.js";
+import { ensureEditorStyles } from "../styles.js";
 import { bindFl2vEvents, mountFl2vPanel } from "../../minimax_fl2v.js";
 import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_GEN_FRAMES, RESOLUTION_ASPECTS } from "../../minimax_gen_timeline.js";
 import { aspectDisplayLabel } from "../../minimax_i18n.js";
@@ -14,7 +14,7 @@ export const dom_shellMixin = {
     buildDOM() {
         this.root = document.createElement("div");
         this.root.className = "bd-wrap";
-        this.root.innerHTML = `<style>${STYLES}</style>`;
+        ensureEditorStyles();
 
         const toolbarWrap = document.createElement("div");
         toolbarWrap.className = "bd-toolbar-wrap";

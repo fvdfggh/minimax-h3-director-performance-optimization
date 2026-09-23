@@ -11,8 +11,7 @@
 
 import { FL2V_STYLES } from "../minimax_fl2v.js";
 import { IMAGE_BATCH_STYLES } from "../minimax_image_batch.js";
-export const STYLES = `
-/* min-height = content only; height:100% fills LiteGraph free space without raising
+export const STYLES = `/* min-height = content only; height:100% fills LiteGraph free space without raising
    getMinHeight (avoids Vue-node ResizeObserver feedback growth).
    overflow:hidden keeps run-status from painting past the node bottom edge. */
 .mmx-host{width:100%;box-sizing:border-box;display:flex;flex-direction:column;min-height:var(--comfy-widget-min-height,0px);height:100%;max-height:100%;overflow:hidden}
@@ -439,3 +438,20 @@ ${FL2V_STYLES}
 .bd-media-td,.bd-media-th{padding:7px 8px}
 }
 `;
+
+let stylesInjected = false;
+
+/** Inject the editor stylesheet once per page.
+ *
+ * buildDOM used to inline the whole block inside every editor root, so the same ~440
+ * lines were parsed once per node on screen. ComfyUI has no CSS entry point for
+ * extensions, so this module owns both the sheet and its injection -- the same
+ * treatment minimax_prompt_mentions.js gives MENTION_STYLES.
+ */
+export function ensureEditorStyles() {
+    if (stylesInjected) return;
+    stylesInjected = true;
+    const el = document.createElement("style");
+    el.textContent = STYLES;
+    document.head.appendChild(el);
+}

@@ -1,43 +1,10 @@
 /** Multi prompt-group UI for t2i / i2i / r2i / t2v / i2v / r2v (prompt batch mode). */
 
-import { api } from "../../scripts/api.js";
-import {
-    DEFAULT_ASPECT_RATIO,
-    DEFAULT_MEGAPIXELS,
-    defaultDurationSec,
-    defaultFrameCount,
-    durationToClampedMiniMaxFrames,
-    durationToMiniMaxFrames,
-    framesToDurationSec,
-    imageBatchVariant,
-    isContinuityMasterEnabled,
-    isSegmentContinuityFromPrev,
-    isVideoBatchTask,
-    MAX_GEN_FRAMES,
-    MAX_REFERENCE_AUDIOS,
-    MAX_REFERENCE_IMAGES,
-    MAX_REFERENCE_VIDEOS,
-    maxDurationSec,
-    MINIMAX_CANVAS_MULTIPLE,
-    minDurationSec,
-    minFrameCount,
-    newBatchSegment,
-    preferredDurationSecFromFrames,
-    refAudioLabel,
-    refImageLabel,
-    refVideoLabel,
-    resolveSegmentRefImageSize,
-    resolveTaskKey,
-    roundDurationSec,
-    sumFrameCounts,
-} from "./minimax_gen_timeline.js";
+
+import { DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, defaultDurationSec, defaultFrameCount, durationToClampedMiniMaxFrames, framesToDurationSec, imageBatchVariant, isContinuityMasterEnabled, isSegmentContinuityFromPrev, isVideoBatchTask, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, maxDurationSec, MINIMAX_CANVAS_MULTIPLE, minDurationSec, newBatchSegment, preferredDurationSecFromFrames, refAudioLabel, refImageLabel, refVideoLabel, resolveSegmentRefImageSize, resolveTaskKey, roundDurationSec, sumFrameCounts } from "./minimax_gen_timeline.js";
 import { refreshPromptTokenEditors, teardownPromptImageMentions, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
-import {
-    hasDuplicateReferenceAudio,
-    isReferenceAudioSourceFile,
-    prepareLocalReferenceAudio,
-} from "./minimax_ref_audio.js";
+import { hasDuplicateReferenceAudio, isReferenceAudioSourceFile, prepareLocalReferenceAudio } from "./minimax_ref_audio.js";
 import { clamp, relPath, viewUrl } from "./core/utils.js";
 import { UPLOAD_SOFT_LIMIT, uploadChunked, uploadToInput } from "./core/upload.js";
 

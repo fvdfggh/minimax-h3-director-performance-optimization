@@ -5,15 +5,7 @@
  */
 
 import { api } from "../../scripts/api.js";
-import {
-    refAudioLabel,
-    refAudioPromptTag,
-    refImageLabel,
-    refImagePromptTag,
-    refVideoLabel,
-    refVideoPromptTag,
-    resolveTaskKey,
-} from "./minimax_gen_timeline.js";
+import { refAudioLabel, refAudioPromptTag, refImageLabel, refImagePromptTag, refVideoLabel, refVideoPromptTag, resolveTaskKey } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
 import { viewUrl } from "./core/utils.js";
 

@@ -4,20 +4,7 @@
  * Total duration = sum of shot durations. Timeline shows one block per shot.
  */
 
-import {
-    defaultDurationSec,
-    defaultFrameCount,
-    durationToMiniMaxFrames,
-    isContinuityMasterEnabled,
-    isSegmentContinuityFromPrev,
-    MAX_GEN_FRAMES,
-    maxDurationSec,
-    minDurationSec,
-    minFrameCount,
-    preferredDurationSecFromFrames,
-    resolveTaskKey,
-    roundDurationSec,
-} from "./minimax_gen_timeline.js";
+import { defaultDurationSec, defaultFrameCount, durationToMiniMaxFrames, isContinuityMasterEnabled, isSegmentContinuityFromPrev, MAX_GEN_FRAMES, maxDurationSec, minDurationSec, minFrameCount, preferredDurationSecFromFrames, resolveTaskKey, roundDurationSec } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
 import { clamp, uid, viewUrl } from "./core/utils.js";
 import { uploadToInput } from "./core/upload.js";

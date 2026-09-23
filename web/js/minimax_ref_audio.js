@@ -1,6 +1,7 @@
 import { api } from "../../scripts/api.js";
 import { fileForComfyUpload } from "./minimax_gen_timeline.js";
 import { CHUNK_SIZE, UPLOAD_SOFT_LIMIT } from "./core/upload.js";
+import { relPath } from "./core/utils.js";
 
 export function isReferenceAudioFile(file) {
     return !!file && (

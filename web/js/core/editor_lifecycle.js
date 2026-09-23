@@ -19,6 +19,9 @@ import { coerceTimelineFps } from "./dims.js";
 import { DIRECTOR_DOM_WIDGET_NAME, DIRECTOR_MIN_WIDTH, DIRECTOR_UI_RUNAWAY_ABS_H, DIRECTOR_UI_RUNAWAY_EXTRA_H, HIDDEN_WIDGETS, LIVE_SAMPLE_PREVIEW_H, MIN_SEG, RULER_H, SEG_LABEL_H, STAGE_PREVIEW_H, TRACK_H } from "./layout_spec.js";
 import { DEFAULT_CONTINUITY_FRAMES, normalizeAudioMode, normalizeOutputContinuity, sanitizeRefVideo, stripTimelineContinuityRootFields, stripTimelineEphemeralFields } from "./timeline_sanitize.js";
 import { uid } from "./utils.js";
+import { getFl2vUiHeight } from "../minimax_fl2v.js";
+import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MINIMAX_CANVAS_MULTIPLE, RESOLUTION_ASPECTS, defaultFrameCount, isPromptBatchTask, normalizeAspectRatioLabel, normalizeRefImageSize, resolveTaskKey, sumFrameCounts } from "../minimax_gen_timeline.js";
+import { DIRECTOR_UI_MAX_EXTRA_H, bindDomWidgetContentComputeSize, getImageBatchUiHeight, syncBatchPanelFillHeight } from "../minimax_image_batch.js";
 
 export function getDirectorUiHeight(editor) {
     if (editor?.getDirectorMode?.() === "prompt_batch") {

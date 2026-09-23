@@ -9,6 +9,8 @@
  */
 
 
+import { FL2V_STYLES } from "../minimax_fl2v.js";
+import { IMAGE_BATCH_STYLES } from "../minimax_image_batch.js";
 export const STYLES = `
 /* min-height = content only; height:100% fills LiteGraph free space without raising
    getMinHeight (avoids Vue-node ResizeObserver feedback growth).

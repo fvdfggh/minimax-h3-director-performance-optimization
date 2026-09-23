@@ -1,6 +1,7 @@
 /** Shared helpers for MiniMax H3 Director Opt generation tasks. */
 
 import { t } from "./minimax_i18n.js";
+import { clamp } from "./core/utils.js";
 
 /** MiniMax H3 canvas snap (official nodes use 32). */
 export const MINIMAX_CANVAS_MULTIPLE = 32;

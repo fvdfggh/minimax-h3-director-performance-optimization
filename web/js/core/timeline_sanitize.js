@@ -15,6 +15,8 @@
  * Extracted verbatim from minimax_timeline.js — no behaviour change.
  */
 
+import { normalizeRefImageSize, resolveTaskKey } from "../minimax_gen_timeline.js";
+import { t } from "../minimax_i18n.js";
 export function isContinuityEnabled(output) {
     if (!output) return false;
     const raw = output.continuityEnabled ?? output.continuity_enabled;

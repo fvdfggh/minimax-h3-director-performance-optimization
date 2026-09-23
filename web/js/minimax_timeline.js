@@ -111,16 +111,15 @@ import {
 } from "./minimax_i18n.js";
 import { bindPackActions } from "./minimax_pack.js";
 import { clamp, relPath, uid, viewUrl } from "./core/utils.js";
-import { UPLOAD_SOFT_LIMIT, uploadChunked, uploadToInput } from "./core/upload.js";
+import { UPLOAD_SOFT_LIMIT, formatUploadError, isUploadSizeError, uploadChunked, uploadToInput, uploadToInputSmart } from "./core/upload.js";
+import { buildClipFrameMap, buildIdentityFrameMap, deletedSourceRanges, logicalToSourceFrame, normalizeFrameMapEntry, sourceToLogicalFrame } from "./core/frame_map.js";
+import { coerceTimelineFps, resolveOutputDimensions, snapDim, snapScaledDim } from "./core/dims.js";
+import { RULER_MAJOR_SEC, formatProbeFps, formatRulerTime, pickRulerMajorStepSec, pickRulerMinorStepSec } from "./core/ruler.js";
 
 const RULER_H = 24;
 const SEG_LABEL_H = 20;
 const TRACK_H = 160;
 const TRACK_Y = RULER_H + SEG_LABEL_H;
-/** Nice major steps (seconds) for CapCut-style ruler labels. */
-const RULER_MAJOR_SEC = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
-const RULER_MIN_MAJOR_PX = 64;
-const RULER_MIN_MINOR_PX = 7;
 const STAGE_PREVIEW_H = 220;
 const LIVE_SAMPLE_PREVIEW_H = 320;
 const MIN_SEG = 4;
@@ -956,9 +955,6 @@ ${FL2V_STYLES}
 }
 `;
 
-function snapDim(v, stride = 32) {
-    return Math.max(stride, Math.round(v / stride) * stride);
-}
 
 /**
  * Match Python ``lib.image_prep.fit_long_edge``:
@@ -966,99 +962,17 @@ function snapDim(v, stride = 32) {
  * Stride must be 32 for MiniMax H3 (VAE 16× then 2×2 patch). Stride 16 can
  * yield 496×864 → odd latent width → patchify_video crash under continuity/v2v.
  */
-function snapScaledDim(dim, scale, stride = 32) {
-    return Math.max(stride, Math.round((dim * scale) / stride) * stride);
-}
 
-function resolveOutputDimensions(sourceW, sourceH, output, fallback = {}) {
-    const mode = String(output?.mode || "long_edge").toLowerCase();
-    const canvasStride = 32;
-    if (mode === "fixed") {
-        const w = snapDim(+(output?.width ?? fallback.width ?? 864), canvasStride);
-        const h = snapDim(+(output?.height ?? fallback.height ?? 480), canvasStride);
-        return { mode: "fixed", width: w, height: h, refMaxSize: Math.max(w, h) };
-    }
-    const longEdge = Math.max(canvasStride, +(output?.longEdge ?? output?.long_edge ?? fallback.refMaxSize ?? 848));
-    const sw = sourceW || 0;
-    const sh = sourceH || 0;
-    if (!sw || !sh) {
-        // Missing source: keep long-edge budget only — do not invent a 16:9 canvas
-        // (that would center-crop ultrawide footage later via fit_canvas).
-        return { mode: "long_edge", width: longEdge, height: canvasStride, refMaxSize: longEdge };
-    }
-    // Always recompute from source (even when already ≤ longEdge) so snapped
-    // dims stay aspect-correct; never reuse a stale fixed W×H.
-    const scale = Math.min(1, longEdge / Math.max(sw, sh));
-    return {
-        mode: "long_edge",
-        width: snapScaledDim(sw, scale, canvasStride),
-        height: snapScaledDim(sh, scale, canvasStride),
-        refMaxSize: longEdge,
-    };
-}
 
 /** Upload a file to ComfyUI input/ (videos use the same endpoint as images). */
-function isUploadSizeError(err) {
-    const msg = String(err?.message || err);
-    return /body size|413|max_upload|too large|104857600/i.test(msg);
-}
 
-function formatUploadError(err) {
-    const msg = String(err?.message || err);
-    if (isUploadSizeError(err)) return t("upload.sizeLimitDetail");
-    return msg;
-}
 
-function pickRulerMajorStepSec(pxPerSec) {
-    const pps = Math.max(0.001, Number(pxPerSec) || 0.001);
-    for (const step of RULER_MAJOR_SEC) {
-        if (step * pps >= RULER_MIN_MAJOR_PX) return step;
-    }
-    return RULER_MAJOR_SEC[RULER_MAJOR_SEC.length - 1];
-}
 
-function pickRulerMinorStepSec(majorSec, pxPerSec) {
-    const pps = Math.max(0.001, Number(pxPerSec) || 0.001);
-    for (const div of [10, 5, 4, 2]) {
-        const minor = majorSec / div;
-        if (minor >= 1 && Number.isInteger(minor) && minor * pps >= RULER_MIN_MINOR_PX) {
-            return minor;
-        }
-    }
-    return majorSec;
-}
 
 /** 0, 5, 10 … below one minute; 1:00, 1:30 … at/after 60s. */
-function formatRulerTime(sec) {
-    const s = Math.max(0, Math.round(Number(sec) || 0));
-    if (s < 60) return String(s);
-    const m = Math.floor(s / 60);
-    const r = s % 60;
-    return `${m}:${String(r).padStart(2, "0")}`;
-}
 
-function formatProbeFps(value) {
-    const fps = Math.round(Number(value) * 100) / 100;
-    if (Number.isInteger(fps)) return String(fps);
-    return fps.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
-}
 
-function coerceTimelineFps(value, fallback = 24) {
-    const fps = Number(value);
-    if (!Number.isFinite(fps) || fps <= 0) return coerceTimelineFps(fallback, 24);
-    return Math.round(clamp(fps, 1, 240) * 100) / 100;
-}
 
-async function uploadToInputSmart(file, onProgress) {
-    if (file.size <= UPLOAD_SOFT_LIMIT) {
-        try {
-            return await uploadToInput(file);
-        } catch (err) {
-            if (!isUploadSizeError(err)) throw err;
-        }
-    }
-    return uploadChunked(file, { onProgress });
-}
 
 // Thin aliases over web/js/core/utils.js. Kept as aliases (rather than renamed
 // call sites) because this file has local ``const relPath`` / ``const viewUrl``
@@ -1067,61 +981,12 @@ const videoRelativePath = relPath;
 const inputViewUrl = viewUrl;
 const refViewUrl = viewUrl;
 
-function deletedSourceRanges(video) {
-    return video?.deletedSourceRanges || video?.deleted_source_ranges || [];
-}
 
-function logicalToSourceFrame(logical, video) {
-    const map = video?.frameMap;
-    if (map?.length) {
-        return normalizeFrameMapEntry(map[clamp(logical, 0, map.length - 1)]).frame;
-    }
-    let src = logical;
-    for (const [start, end] of [...deletedSourceRanges(video)].sort((a, b) => a[0] - b[0])) {
-        if (src >= start) src += end - start;
-        else break;
-    }
-    return src;
-}
 
 /** Inverse of logicalToSourceFrame for sparse deletes; -1 if source is in a deleted gap. */
-function sourceToLogicalFrame(srcFrame, video) {
-    const map = video?.frameMap;
-    if (map?.length) {
-        let best = -1;
-        for (let i = 0; i < map.length; i++) {
-            const e = normalizeFrameMapEntry(map[i]);
-            if (e.frame === srcFrame) return i;
-            if (e.frame < srcFrame) best = i;
-            else if (best < 0) return -1; // before first kept
-        }
-        return best;
-    }
-    let logical = srcFrame;
-    for (const [start, end] of [...deletedSourceRanges(video)].sort((a, b) => a[0] - b[0])) {
-        if (srcFrame >= end) logical -= (end - start);
-        else if (srcFrame >= start) return -1;
-        else break;
-    }
-    return Math.max(0, logical);
-}
 
-function buildIdentityFrameMap(count) {
-    return Array.from({ length: count }, (_, i) => i);
-}
 
-function normalizeFrameMapEntry(entry, defaultClip = 0) {
-    if (entry == null) return { clip: defaultClip, frame: 0 };
-    if (typeof entry === "number") return { clip: defaultClip, frame: entry };
-    return {
-        clip: entry.clip ?? entry.videoClip ?? defaultClip,
-        frame: entry.frame ?? 0,
-    };
-}
 
-function buildClipFrameMap(clipIndex, count) {
-    return Array.from({ length: count }, (_, i) => ({ clip: clipIndex, frame: i }));
-}
 
 const CLIP_SEGMENT_COLORS = ["rgba(255,200,50,0.9)", "rgba(102,170,255,0.9)", "rgba(79,255,143,0.9)", "rgba(255,102,170,0.9)"];
 

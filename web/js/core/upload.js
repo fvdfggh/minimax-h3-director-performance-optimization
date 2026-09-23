@@ -59,3 +59,25 @@ export async function uploadChunked(file, {
     }
     throw new Error(t("upload.chunkIncomplete"));
 }
+
+export function isUploadSizeError(err) {
+    const msg = String(err?.message || err);
+    return /body size|413|max_upload|too large|104857600/i.test(msg);
+}
+
+export function formatUploadError(err) {
+    const msg = String(err?.message || err);
+    if (isUploadSizeError(err)) return t("upload.sizeLimitDetail");
+    return msg;
+}
+
+export async function uploadToInputSmart(file, onProgress) {
+    if (file.size <= UPLOAD_SOFT_LIMIT) {
+        try {
+            return await uploadToInput(file);
+        } catch (err) {
+            if (!isUploadSizeError(err)) throw err;
+        }
+    }
+    return uploadChunked(file, { onProgress });
+}

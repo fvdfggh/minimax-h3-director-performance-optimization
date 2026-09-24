@@ -139,6 +139,10 @@ def run_second_sampling(
     # reference frames via a tapered noise_mask so the second pass re-uses its
     # own global noise. Off by default (matches first pass default).
     conn_noise: bool = False,
+    # 「保留音频」: {timeline index: {"pcm": audio_dict, "entry_id": str}}. Built
+    # here when not supplied, so the second pass honours the same per-card switch
+    # the first pass does.
+    retain_audio_cache: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the second pass over ``selected_indices`` and cache each result.
 
@@ -162,11 +166,29 @@ def run_second_sampling(
 
     # Imported lazily: both live in batch_executor which pulls in comfy nodes.
     from .batch_executor import _decode_av_latent, _trim_decoded_to_export
+    from .batch_source_audio import align_pcm_to_frames
 
     ordered = sorted({int(i) for i in selected_indices})
     seg_by_index = {int(getattr(s, "index", -1)): s for s in (all_segments or [])}
     total = len(ordered)
     done = 0
+
+    # 「保留音频」: resolve the per-card switch once. The second pass samples a
+    # different (upscaled) canvas, but the audio stream is canvas-independent, so
+    # the very same clip applies unchanged.
+    if retain_audio_cache is None:
+        try:
+            from .audio_retain import build_retain_audio_cache
+
+            retain_audio_cache = build_retain_audio_cache(
+                node_id=node_id,
+                plan=plan,
+                workflow_name=workflow_name,
+                run_list=[seg_by_index[i] for i in ordered if i in seg_by_index],
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("二采 保留音频: 读取失败，按正常生成处理 (%s)。", exc)
+            retain_audio_cache = {}
 
     results: dict[int, dict[str, Any]] = {}
     failures: list[dict[str, Any]] = []
@@ -625,6 +647,31 @@ def run_second_sampling(
                             _fail(idx, "seam", str(exc))
                             return
 
+        # 保留音频: overwrite the whole audio stream with the retained clip and
+        # lock it. Last write wins over the seam pin, exactly like the first pass.
+        # No sample_len here — the upscaled latent already carries its own audio
+        # grid, so the encoder takes the length straight from it.
+        retain_active = False
+        retain_entry = (retain_audio_cache or {}).get(int(idx))
+        if retain_entry is not None:
+            try:
+                from .audio_retain import apply_retain_audio
+
+                new_av, retain_active = apply_retain_audio(
+                    new_av, audio_vae, retain_entry.get("pcm"),
+                )
+            except Exception as exc:
+                log.warning(
+                    "Director 二采: seg #%d 保留音频失败，按正常生成处理 (%s)。",
+                    int(idx) + 1, exc,
+                )
+                retain_active = False
+            else:
+                log.info(
+                    "二采 seg #%d: 保留音频 ON — 锁定提取音频 (%s)",
+                    int(idx) + 1, retain_entry.get("entry_id") or "?",
+                )
+
         try:
             sampled = sample_single_stage(
                 model=model,
@@ -645,6 +692,8 @@ def run_second_sampling(
         except Exception as exc:
             _fail(idx, "sample", str(exc))
             return
+        if retain_active:
+            sampled.pop("noise_mask", None)
 
         # --- Phase 2 收尾：仅保存采样结果，VAE 解码推迟到 Phase 3 统一进行 ---
         # 与一采 batch 一致：先收齐所有 latent，再在末尾一起解码。handoff 的
@@ -674,8 +723,14 @@ def run_second_sampling(
         if meta is None or sampled is None:
             _fail(idx, "decode", "采样记录缺失")
             return
+        # 保留音频: skip the audio VAE decode entirely — the soundtrack is the
+        # clip the user pinned, reused verbatim (same rule as the first pass).
+        retain_entry = (retain_audio_cache or {}).get(int(idx))
         try:
-            images, audio = _decode_av_latent(sampled, vae, audio_vae, decode_audio=decode_audio)
+            images, audio = _decode_av_latent(
+                sampled, vae, audio_vae,
+                decode_audio=False if retain_entry is not None else decode_audio,
+            )
         except Exception as exc:
             _fail(idx, "decode", str(exc))
             return
@@ -693,11 +748,17 @@ def run_second_sampling(
             )
             images, audio = _trim_decoded_to_export(
                 images,
-                audio,
+                None if retain_entry is not None else audio,
                 trim_frames=int(meta["trim_frames"] or 0),
                 export_len=export_len,
                 plan=plan,
             )
+            if retain_entry is not None:
+                audio = align_pcm_to_frames(
+                    retain_entry.get("pcm"),
+                    int(images.shape[0]),
+                    float(getattr(plan, "frame_rate", 24) or 24),
+                )
         except Exception as exc:
             warnings.append({"index": int(idx), "stage": "trim", "reason": str(exc)})
 

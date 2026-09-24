@@ -128,8 +128,30 @@ export const audio_pickersMixin = {
         return bits.join(" ");
     },
 
+    /** 这张卡片当前保留的条目 id（"" = 不保留）。 */
+    retainedAudioId(index) {
+        return String(this.timeline.segments?.[index]?.retainAudioId || "");
+    },
+
+    /** 勾选/取消「保留音频」。写进段对象本身，所以随卡片移动、随删除一起走。 */
+    setRetainAudio(index, entryId, on) {
+        const seg = this.timeline.segments?.[index];
+        if (!seg) return;
+        seg.retainAudioId = on ? String(entryId || "") : "";
+        try {
+            this.commit?.(false, { syncTimeline: true });
+        } catch (e) {
+            /* best-effort */
+        }
+        try {
+            this.flushTimelineSync?.();
+        } catch (e) {
+            /* best-effort */
+        }
+    },
+
     /** One playable row: <audio> + meta + delete. Shared by the result view. */
-    _audioExtractRow(entry, { onDeleted } = {}) {
+    _audioExtractRow(entry, { onDeleted, onRetain } = {}) {
         const row = document.createElement("div");
         row.className = "bd-audio-item";
         const dur = (entry.duration_s || 0).toFixed(2);
@@ -146,6 +168,25 @@ export const audio_pickersMixin = {
         const head = document.createElement("div");
         head.className = "bd-audio-meta";
         head.innerHTML = `<span class="bd-audio-src">${srcLabel}</span><span>${meta}</span>`;
+
+        // 保留音频：把这条提取音频设为该片段的固定音轨。同一张卡片互斥（只有一
+        // 个字段），勾上新的会自动顶掉旧的。
+        const retainWrap = document.createElement("label");
+        retainWrap.className = "bd-audio-retain";
+        retainWrap.title = t("audioExtract.retainHint");
+        const retainCb = document.createElement("input");
+        retainCb.type = "checkbox";
+        retainCb.className = "bd-audio-retain-cb";
+        retainCb.checked = this.retainedAudioId(entry.index) === String(entry.id);
+        retainCb.onchange = () => {
+            this.setRetainAudio(entry.index, entry.id, retainCb.checked);
+            if (typeof onRetain === "function") onRetain(entry.id, retainCb.checked);
+        };
+        retainWrap.appendChild(retainCb);
+        const retainText = document.createElement("span");
+        retainText.textContent = t("audioExtract.retain");
+        retainWrap.appendChild(retainText);
+        head.appendChild(retainWrap);
 
         const player = document.createElement("audio");
         player.controls = true;

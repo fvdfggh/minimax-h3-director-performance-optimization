@@ -229,6 +229,24 @@ def execute_director_batch(
         except Exception as exc:
             log.warning("Source audio cache failed: %s — continuing without it", exc, exc_info=True)
 
+    # 「保留音频」: every card whose 音频 tab has an entry ticked. Independent of
+    # audio_mode — it is an explicit per-segment choice, so it works under
+    # generate / source / mute alike.
+    retain_audio_cache: dict[int, dict] = {}
+    try:
+        from .audio_retain import build_retain_audio_cache
+
+        retain_audio_cache = build_retain_audio_cache(
+            node_id=node_id, plan=plan, workflow_name=workflow_name, run_list=run_list,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("保留音频: 读取失败，本次全部按正常生成处理 (%s)。", exc)
+    if retain_audio_cache:
+        reports.append(
+            f"Audio: 保留音频 — {len(retain_audio_cache)} 段使用提取音频"
+            "（采样时锁定，输出直接复用原音频）"
+        )
+
     cache_dir = _batch_cache_dir(node_id, workflow_name)
 
     # Report current memory
@@ -422,6 +440,7 @@ def execute_director_batch(
             timeline_seg_total=timeline_seg_total,
             vae=vae,
             workflow_name=workflow_name,
+            retain_audio_cache=retain_audio_cache,
         )
 
     reports.append(f"Phase 2 complete: {len(run_list)} latents saved")
@@ -484,6 +503,7 @@ def execute_director_batch(
             timeline_seg_total=timeline_seg_total,
             vae=vae,
             workflow_name=workflow_name,
+            retain_audio_cache=retain_audio_cache,
         )
 
     reports.append(f"Phase 3 complete: {len(run_list)} segments decoded and exported")

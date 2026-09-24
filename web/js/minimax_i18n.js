@@ -292,6 +292,8 @@ const ZH = {
     "audioExtract.srcClip": "来自视频音轨",
     "audioExtract.delete": "删除",
     "audioExtract.deleteConfirm": "删除这条提取的音频？",
+    "audioExtract.retain": "保留音频",
+    "audioExtract.retainHint": "把这条音频设为该片段的固定音轨：采样时锁定（不重绘），出片直接复用原音频，不再经过音频 VAE 解码",
 
     "videoName.fl2vEmpty": "未添加组 · {sec}s ({frames}f)",
     "videoName.fl2vSummary": "{n} 组 · {start} 首帧 · {end} 尾帧 · {sec}s ({frames}f)",
@@ -876,6 +878,8 @@ const EN = {
     "audioExtract.srcClip": "from clip audio track",
     "audioExtract.delete": "Delete",
     "audioExtract.deleteConfirm": "Delete this extracted audio?",
+    "audioExtract.retain": "Retain audio",
+    "audioExtract.retainHint": "Pin this clip as the segment's soundtrack: locked during sampling (never re-drawn) and reused verbatim on export — no audio VAE decode",
 
     "videoName.fl2vEmpty": "No groups · {sec}s ({frames}f)",
     "videoName.fl2vSummary": "{n} groups · {start} starts · {end} ends · {sec}s ({frames}f)",

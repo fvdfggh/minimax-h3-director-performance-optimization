@@ -571,6 +571,9 @@ export const IMAGE_BATCH_STYLES = `
 .bd-audio-item audio{width:100%;height:30px;min-width:0}
 .bd-audio-meta{display:flex;gap:8px;align-items:center;font-size:10px;color:#8fa3b5;font-variant-numeric:tabular-nums}
 .bd-audio-src{color:#9fb0c0}
+.bd-audio-retain{display:flex;align-items:center;gap:4px;margin-left:auto;cursor:pointer;user-select:none}
+.bd-audio-retain-cb{cursor:pointer}
+.bd-audio-retain:hover{color:#eaf6ff}
 .bd-audio-del{align-self:flex-start;font-size:10px;padding:2px 8px;border:1px solid #4a3a3a;background:#241a1a;color:#c98a8a;cursor:pointer;border-radius:4px}
 .bd-audio-del:hover:not(:disabled){border-color:#8a5a5a;color:#ffdada}
 .bd-r2v-clip-body:has(.bd-audio-item){flex-direction:column;align-items:stretch;justify-content:flex-start;overflow-y:auto}
@@ -2672,9 +2675,24 @@ async function mountAudioTab(body, editor, index, tab) {
         return;
     }
     if (tab) tab.disabled = false;
+    // 同一张卡片只能保留一条：勾上新的就把其余条目取消勾选（不重渲染，免得打断
+    // 正在播放的音频）。
+    const syncRetainBoxes = (pickedId, on) => {
+        if (!on) return;
+        body.querySelectorAll(".bd-audio-retain-cb").forEach((cb) => {
+            const row = cb.closest(".bd-audio-item");
+            if (row && row.dataset.audioEntry !== String(pickedId)) cb.checked = false;
+        });
+    };
     for (const entry of entries) {
-        body.appendChild(editor._audioExtractRow(entry, {
+        const row = editor._audioExtractRow(entry, {
+            onRetain: syncRetainBoxes,
             onDeleted: () => {
+                // 删掉的正是被保留的那条 → 取消该卡片的「保留音频」，否则运行时
+                // 会去读一个已经不存在的条目。
+                if (editor.retainedAudioId?.(index) === String(entry.id)) {
+                    editor.setRetainAudio?.(index, "", false);
+                }
                 // 删到最后一条就把 tab 置灰，和初始状态保持一致。
                 if (!body.querySelector(".bd-audio-item")) {
                     if (tab) tab.disabled = true;
@@ -2684,7 +2702,9 @@ async function mountAudioTab(body, editor, index, tab) {
                     body.appendChild(empty);
                 }
             },
-        }));
+        });
+        row.dataset.audioEntry = String(entry.id);
+        body.appendChild(row);
     }
 }
 

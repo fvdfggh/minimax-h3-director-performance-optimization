@@ -281,7 +281,8 @@ def _sample_one_segment(
     steps,
     timeline_seg_total,
     vae,
-    workflow_name
+    workflow_name,
+    retain_audio_cache=None,
 ) -> None:
     """Per-segment body of a %s loop in execute_director_batch.
 
@@ -538,6 +539,31 @@ def _sample_one_segment(
         except Exception as exc:
             log.debug("Live TAE preview skipped: %s", exc)
 
+    # 保留音频: overwrite the whole audio stream with the retained clip and lock
+    # it (audio noise_mask = 0) so the UNet conditions on it without re-drawing
+    # it. Runs AFTER continuity on purpose —「段间引导」only pins the audio head,
+    # and a retained clip must win over that everywhere.
+    retain_active = False
+    retain_entry = (retain_audio_cache or {}).get(seg.index)
+    if retain_entry is not None:
+        try:
+            from .audio_retain import apply_retain_audio
+
+            latent, retain_active = apply_retain_audio(
+                latent, audio_vae, retain_entry.get("pcm"),
+                sample_len=sample_len, fps=float(getattr(plan, "frame_rate", 24) or 24),
+            )
+            reports.append(
+                f"  Seg #{seg.index + 1}: 保留音频 ON — 锁定提取音频 "
+                f"({retain_entry.get('entry_id') or '?'})"
+            )
+        except Exception as exc:
+            log.warning(
+                "Director batch: seg #%d 保留音频失败，按正常生成处理 (%s)。",
+                seg.index + 1, exc,
+            )
+            retain_active = False
+
     samples = sample_single_stage(
         model=model, positive=positive, negative=negative,
         latent=latent, seed=seed, cfg=cfg, steps=steps,
@@ -548,6 +574,11 @@ def _sample_one_segment(
         preview_every=1,
         sigmas=sigmas,
     )
+
+    if retain_active:
+        # The lock mask is sampling-only bookkeeping; keeping it would write a
+        # stale mask into the cached latent the next segment reads.
+        samples.pop("noise_mask", None)
 
     # Save AV latent to disk
     _save_batch_latent(node_id, seg.index, samples, cache_dir)
@@ -601,7 +632,8 @@ def _decode_export_one_segment(
     source_audio_cache,
     timeline_seg_total,
     vae,
-    workflow_name
+    workflow_name,
+    retain_audio_cache=None,
 ) -> None:
     """Per-segment body of a %s loop in execute_director_batch.
 
@@ -655,9 +687,13 @@ def _decode_export_one_segment(
         export_len = int(num_frames)
 
     # VAE decode
-    # Source mode: the soundtrack is the source video's, already extracted in
-    # Phase 1 — reuse that PCM and skip the audio VAE decode entirely.
-    source_pcm = source_audio_cache.get(seg.index) if audio_mode == AUDIO_MODE_SOURCE else None
+    # Two "the soundtrack already exists" cases reuse their PCM and skip the
+    # audio VAE decode entirely: source mode (source video's track, extracted in
+    # Phase 1) and「保留音频」(the clip the user pinned in the 音频 tab). The
+    # latter wins — it is the explicit per-segment choice.
+    source_pcm = (retain_audio_cache or {}).get(seg.index)
+    if source_pcm is None and audio_mode == AUDIO_MODE_SOURCE:
+        source_pcm = source_audio_cache.get(seg.index)
     if source_pcm is not None:
         decoded, _ = _decode_av_latent(samples, vae, audio_vae, decode_audio=False)
         del samples

@@ -116,14 +116,18 @@ def _filter_refs_by_prompt(
 ) -> dict[str, Any] | None:
     """Filter reference materials to only those referenced in the prompt.
 
-    ``refs`` format: ``{"<prefix>0": tensor, ...}`` (e.g. ``ref_video_2``).
+    ``refs`` format: ``{"<prefix><N>": tensor, ...}`` (e.g. ``ref_video_2``).
 
     * Returns ``None`` when the prompt contains no reference at all to this token
       kind — the caller then keeps every material (backward compatibility for
       prompts that use references implicitly, without ``<Token N>`` tags).
-    * Returns the (possibly empty) filtered dict when the prompt *does* reference
-      some ``<Token N>``: materials whose index was not referenced are dropped,
-      and if none match, an empty dict is returned so nothing gets encoded.
+    * Returns the filtered dict when the prompt *does* reference some ``<Token N>``
+      and at least one of them resolves to a material that is actually present.
+    * Returns ``None`` (with a warning) when the prompt references only indices
+      that are not in the payload: an empty result here would silently strip
+      *every* reference from the segment, which is never what the user asked
+      for — a stale ``<Picture 5>`` should degrade to "use what I gave you",
+      not to "use nothing".
     """
     if not refs:
         return None
@@ -135,16 +139,25 @@ def _filter_refs_by_prompt(
 
     filtered = {}
     for key, value in refs.items():
-        if value is None:
+        if value is None or not key.startswith(prefix):
             continue
         # Extract index from "ref_video_2" -> 2
         try:
-            idx = int(key.split("_")[-1])
+            idx = int(key[len(prefix):])
             if idx in referenced_indices:
                 filtered[key] = value
         except (ValueError, IndexError):
             # Malformed key — skip
             continue
+
+    if not filtered:
+        log.warning(
+            "R2V %s filtered by prompt: prompt references %s but none of the "
+            "%d material(s) match — keeping them all instead of dropping the "
+            "reference set.",
+            token, sorted(referenced_indices), len(refs),
+        )
+        return None
 
     return filtered
 

@@ -1,136 +1,127 @@
 # 保留音频：待确认项 —— 音频 latent 形状是否依赖画布
 
-> 状态：**未确认**。本文记录「保留音频」功能里唯一一个没有从上游源码核实的假设，
-> 以及如果假设不成立需要改哪些地方。
+> 状态：**已核实（假设成立）**。2026-09-25 对本机 ComfyUI
+> （`comfy_extras/nodes_minimax_h3.py`、`comfy/samplers.py`、`comfy/utils.py`、
+> `comfy/ldm/minimax/model.py`）逐条比对后确认，本文保留作为核对记录。
 >
-> 功能本身（提取音频 / 音频 tab / 保留音频）已实现并可用；这里的结论只影响
-> 跨画布复用时的边界情况，不影响默认路径。
+> 文件名沿用 `OPEN_QUESTION`，仅为避免历史引用失效。
 
 ---
 
-## 1. 背景
+## 1. 结论
 
-「保留音频」在采样前把用户选中的 PCM 用音频 VAE 编码，写进 AV latent 的**音频流**，
-并把该流的 `noise_mask` 置 0（锁定，采样不重绘）。出片时不解码音频，直接复用原 PCM。
+**AV latent 的音频流 `[1, 32, 2, T]` 的 `T` 只由帧数决定，与 width / height 无关。**
+跨画布复用（二采放大、卡片换画布）安全，无需任何补偿。
 
-核心实现：`director/audio_retain.py`
-- `apply_retain_audio(latent, audio_vae, pcm, *, sample_len=None, fps=24.0, seconds=None)`
-- `_fit_waveform()`
-- `_latent_audio_seconds()`
+## 2. 上游证据
 
-接入点：
-| 阶段 | 文件:位置 | 说明 |
-|---|---|---|
-| Phase 1 | `director/batch_executor.py` `build_retain_audio_cache()` | 读 PCM 进内存 |
-| Phase 2（一采） | `director/batch_phases.py` `_sample_one_segment`，`sample_single_stage` 之前 | 写音频流 + 置 mask |
-| Phase 3（一采） | `director/batch_phases.py` `_decode_export_one_segment` | `decode_audio=False` + 复用 PCM |
-| 二采 | `director/second_sampling.py` `_sample_one` / `_decode_one` | 同上 |
+### 2.1 音频流形状与 T 的算法
 
----
-
-## 2. 待确认的假设
-
-**假设：AV latent 的音频流形状 `[1, C, 2, T]` 中的 `T` 只由帧数决定，与 width / height 无关。**
-
-即 `T ≈ round(帧数 / fps × AUDIO_HZ)`，`AUDIO_HZ = 40.0`（`h3_motion_context.py:29`）。
-
-### 支撑证据（都是本仓库内部的，不是上游源码）
-
-1. `director/h3_motion_context.py:130-131`
-   ```python
-   FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
-   def pixel_frames_for_latent_t(latent_t: int) -> int:
-       return sum(FRAME_PER_TOKEN[k % 5] for k in range(int(latent_t)))
-   ```
-   视频 latent 的**时间步**只由帧数决定；H/W 只影响空间维。
-
-2. `director/h3_motion_context.py:323-372` `_audio_tail_from_latent` 里的运行时一致性断言：
-   ```python
-   total_t = int(audio.shape[-1])
-   frames = pixel_frames_for_latent_t(int(video.shape[2]))
-   overhang = total_t - FRAME_RESCALE * frames      # FRAME_RESCALE = 5/3 = 40/24
-   if not (0.0 <= overhang < 1.0):
-       log.warning("Director continuity: unexpected audio grid ...")
-   ```
-   这条在段间延续时持续在跑。如果 `T` 还受 H/W 影响，它应该会频繁告警。
-
-### 为什么不能算已确认
-
-- `_empty_av_latent(width, height, length)` 的实现在 ComfyUI 核心
-  （`comfy_extras/nodes_minimax_h3.py`），**本项目不含该文件，本机也没有 ComfyUI 安装**，
-  上游源码未能拉取核实。
-- 上面两条都是"本仓库对上游的假设"，不是上游实现本身。
-
----
-
-## 3. 如果假设不成立，需要改什么
-
-**结论先行：`apply_retain_audio` 大概率不需要改。** 它不是"先算出 T 再往里写"，而是：
-1. 读目标 latent 自己的音频流长度 `audio.shape[-1]`；
-2. 需要多长就从 PCM 编多长（由这个 T 反推 seconds）；
-3. 写回只用 `t = min(T_latent, T_encoded)`，不足补零。
-
-所以 T 由帧数还是由画布决定，编码长度都跟着目标 latent 走，自洽。
-
-真正需要检查的是另外两处：
-
-### 3.1 通道布局（`apply_retain_audio`）
-
-当前假设音频流是 `[B, C, 2, T]`（2 = 立体声）。已有两种兼容：
-- 编码结果形状完全相等 → 直接整体替换
-- 编码结果是 `[B, 2C, T]` → reshape 成 `[B, C, 2, T]`
-- 都不是 → 抛异常，调用方降级为正常生成（不中断）
-
-若实际布局是第三种，需要在这里补分支。
-
-### 3.2 `seconds` 的反推（`_latent_audio_seconds`）
+`comfy_extras/nodes_minimax_h3.py:29-49`
 
 ```python
-seconds = audio_T / AUDIO_HZ      # AUDIO_HZ = 40.0
-```
-如果音频网格不是 40 Hz（或不是线性于时间），这里算出的 PCM 长度会偏，
-表现为成片音频时长对不上画面（短 → 尾部静音；长 → 被 `align_pcm_to_frames` 截掉）。
+FPS = 24
+AUDIO_LATENT_FPS = 40
 
-更稳的替代：由视频流反推帧数再除 fps——
+def temporal_shape(length):
+    frame_count = align_frame_count(max(5, length))
+    duration = frame_count / FPS
+    return frame_count, video_latent_t(frame_count), round(duration * AUDIO_LATENT_FPS)
+
+def _empty_av_latent(width, height, length, batch_size=1):
+    frame_count, latent_t, audio_t = temporal_shape(length)
+    video = torch.zeros([batch_size, 24, latent_t, height // 16, width // 16], ...)
+    audio = torch.zeros([batch_size, 32, 2, audio_t], ...)
+    return {"samples": comfy.nested_tensor.NestedTensor((video, audio))}, frame_count
+```
+
+- `T = round(frame_count / 24 * 40)` —— 参数表里没有 width / height；
+  只有 `video` 用到 `height // 16`、`width // 16`。
+- `AUDIO_LATENT_FPS = 40` 与本仓 `h3_motion_context.AUDIO_HZ = 40.0` 一致，
+  `FRAME_RESCALE = 5/3 = 40/24`（`comfy/ldm/minimax/model.py:31`）。
+
+### 2.2 时间轴换算（头针偏移的依据）
+
+`MiniMaxH3AddGuide.execute`：`max_rt = floor(audio_t - FRAME_RESCALE * frame_idx)`，
+注释明确写着「the streams share one time axis: FRAME_RESCALE per pixel frame, 1.0
+per audio latent frame」。所以
+
+```
+tick = 帧号 × 40 / 24
+```
+
+本仓 `audio_retain.apply_retain_audio(head_seconds=...)` 里
+`head_ticks = round(head_seconds × 40)` 与之完全一致。
+
+### 2.3 音频 VAE 编码的输出形状
+
+`comfy_extras/nodes_minimax_h3.py:73-80`
+
 ```python
-from .h3_motion_context import pixel_frames_for_latent_t
-frames = pixel_frames_for_latent_t(int(video.shape[2]))
-seconds = frames / float(fps)
+def _encode_ref_audio(audio_vae, audio):
+    waveform = audio["waveform"]            # [B, C, L]
+    sr = audio["sample_rate"]
+    vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
+    if sr != vae_sr:
+        waveform = torchaudio.functional.resample(waveform, sr, vae_sr)
+    z = audio_vae.encode(waveform[:1].movedim(1, -1))   # [1, 32, 2, T]
+    return z, z.shape[-1]
 ```
-这条路完全不依赖 `AUDIO_HZ`，只依赖本仓库已经在用的 `pixel_frames_for_latent_t`。
-**如果确认假设不成立，优先换成这个写法。**
 
-### 3.3 二采的跨画布假设
+- 官方确认编码结果就是 `[1, 32, 2, T]`，与音频流**同形**；
+  `audio_retain.py` 里那段 `[B, 2C, T] → [B, C, 2, T]` 的 reshape 兜底
+  实际不会触发（判据 `z.shape[1] == C * 2` 也不会误命中），留着只是防御。
+- `getattr(audio_vae, "audio_sample_rate", 32000)` 与本仓写法一致。
 
-`second_sampling.py` 里我写了"二采换了画布，音频流没变，所以同一条音频可直接复用"。
-若音频流实际受画布影响，二采的 `new_av` 音频流 T 会和一采不同——不过因为
-`apply_retain_audio` 是按目标 latent 现算现编的，结果仍然正确，只是这句注释要改掉。
+### 2.4 双流 `noise_mask` 是官方支持路径
+
+`comfy/samplers.py:1297-1314`
+
+```python
+if denoise_mask is not None:
+    if denoise_mask.is_nested:
+        denoise_masks = denoise_mask.unbind()          # [video_mask, audio_mask]
+        denoise_masks = denoise_masks[:len(latent_shapes)]
+    for i in range(len(denoise_masks)):
+        denoise_masks[i] = prepare_mask(denoise_masks[i], latent_shapes[i], ...)
+    if len(denoise_masks) > 1:
+        denoise_mask, _ = comfy.utils.pack_latents(denoise_masks)
+```
+
+`prepare_mask` → `comfy.utils.reshape_mask`：`[1,1,1,T]` 先 bilinear 到
+`[1,1,2,T]` 再通道重复到 `[B,32,2,T]`，全 0 插值后仍是全 0，锁定精确成立。
+两条流随后被 `pack_latents` 拼成一条 `[B,1,video_flat+audio_flat]`。
+
+锁定本身由 `KSamplerX0Inpaint.__call__` 完成：
+
+```python
+x   = x * denoise_mask + scale_latent_inpaint(...) * (1 - denoise_mask)
+out = out * denoise_mask + latent_image * (1 - denoise_mask)
+```
+
+mask=0 的位置每步都被换回 `latent_image`（我们写进去的编码音频），
+模型看得见但改不动 —— 正是「保留音频」要的语义。
+`comfy/ldm/minimax/model.py:32` 的 `VISUAL_COND_TIMESTEP = 0.999` 进一步说明
+H3 会把这些 token 当视觉条件处理。
+
+## 3. 由此修正的一处实现判断
+
+初版 `audio_retain.py` 的注释写的是「刻意不设 `PREFIX_STEPS_KEY`，否则 continue
+remask 的 `apply_model` 钩子会用只含视频的 5-D mask 覆盖掉音频流」。核实后**该
+判断不成立**：
+
+- remask 拿到的是**已打包**的 3-D mask（视频+音频拼在一条），
+  `_PrefixRemask.denoise_mask_function` 只改写前 `video_flat` 那一截
+  （`packed[..., :elems]`），音频半截原样保留；
+- `apply_model_wrapper` 确实把 5-D 视频 mask 交给了 transformer，但那个 mask
+  不参与上面那两行 `latent_image` 混合，锁不由它负责。
+
+所以「段间锥形重绘」与「保留音频」可以共存，`PREFIX_STEPS_KEY` /
+`CONTINUE_SEAM_KEY` **不应**被移除（移除只会白白丢掉 per-sigma 的接缝微调）。
 
 ---
 
-## 4. 怎么一次性确认
-
-### 4.1 最直接
-
-把 `comfy_extras/nodes_minimax_h3.py` 里 `_empty_av_latent` 的实现贴出来对照即可。
-
-### 4.2 加诊断日志（换两个画布各跑一段）
-
-在 `director/batch_phases.py` `_sample_one_segment`、latent 重建之后加：
-
-```python
-_v, _a = latent["samples"].unbind()
-log.info("latent shape diag: ctx=%dx%d len=%d video=%s audio=%s",
-         ctx_w, ctx_h, sample_len, tuple(_v.shape), tuple(_a.shape))
-```
-
-判定方法：
-- 固定 `sample_len`，只改画布 → `audio` 形状**不变** ⇒ 假设成立
-- `audio` 形状随画布变 ⇒ 假设不成立，按 §3.2 换反推方式
-
----
-
-## 5. 顺带澄清：`shift video` / `shift audio` 不是画布参数
+## 4. 顺带澄清：`shift video` / `shift audio` 不是画布参数
 
 容易被误当成画布相关，实际是 **sigma 调度偏移**，按视频/音频两条流分别设置。
 
@@ -151,7 +142,7 @@ if apply_shift:
 
 ---
 
-## 6. 相关文件速查
+## 5. 相关文件速查
 
 | 文件 | 作用 |
 |---|---|
@@ -160,10 +151,11 @@ if apply_shift:
 | `director/batch_phases.py` | 一采采样注入 + 出片复用 PCM |
 | `director/second_sampling.py` | 二采采样注入 + 出片复用 PCM |
 | `director/batch_executor.py` | 构造 retain 缓存并传给 Phase 2 / 3 |
-| `director/h3_motion_context.py:28-31` | `FPS` / `AUDIO_HZ` / `FRAME_RESCALE` / `FRAME_PER_TOKEN` |
-| `director/h3_motion_context.py:130-131` | `pixel_frames_for_latent_t()` |
-| `director/h3_motion_context.py:323-372` | `_audio_tail_from_latent()`（音频网格一致性断言） |
-| `director/h3_latent_continue.py:264-286` | AV 双流 `noise_mask` 的先例 |
-| `director/core_sampling.py:69-188` | `sample_single_stage()`，`noise_mask` 唯一入口 |
+| `comfy_extras/nodes_minimax_h3.py:29-49` | `FPS` / `AUDIO_LATENT_FPS` / `temporal_shape()` |
+| `comfy_extras/nodes_minimax_h3.py:73-89` | `_encode_ref_audio()` / `_empty_av_latent()` |
+| `comfy/ldm/minimax/model.py:30-33` | `FRAME_PER_TOKEN` / `FRAME_RESCALE` / `VISUAL_COND_TIMESTEP` |
+| `comfy/samplers.py:1276-1315` | 双流 mask 的打包与 `KSamplerX0Inpaint` 锁定 |
+| `comfy/utils.py:1348-1367` | `reshape_mask()` —— 音频 mask 的逐维对齐 |
+| `director/h3_motion_context.py:28-31` | 本仓 `FPS` / `AUDIO_HZ` / `FRAME_RESCALE`（与上游一致） |
 
 开关字段：`timeline.segments[i].retainAudioId`（存 audio_extract 的 entry id，空 = 不保留）

@@ -546,13 +546,18 @@ def _sample_one_segment(
     retain_active = False
     retain_entry = (retain_audio_cache or {}).get(seg.index)
     if retain_entry is not None:
+        _fps = float(getattr(plan, "frame_rate", 24) or 24)
         try:
             from .audio_retain import apply_retain_audio
 
-            latent, retain_active = apply_retain_audio(
+            latent = apply_retain_audio(
                 latent, audio_vae, retain_entry.get("pcm"),
-                sample_len=sample_len, fps=float(getattr(plan, "frame_rate", 24) or 24),
+                sample_len=sample_len, fps=_fps,
+                # 头部 pin 会被裁掉，音频要从导出帧 0 开始，否则成片音轨比模型
+                # 听到的内容提前 trim_frames 帧。
+                head_seconds=float(trim_frames or 0) / _fps,
             )
+            retain_active = True
             reports.append(
                 f"  Seg #{seg.index + 1}: 保留音频 ON — 锁定提取音频 "
                 f"({retain_entry.get('entry_id') or '?'})"
@@ -563,6 +568,12 @@ def _sample_one_segment(
                 seg.index + 1, exc,
             )
             retain_active = False
+            # 注入没成 → 这一段就是普通生成段。把缓存条目摘掉，Phase 3 才会正常
+            # 解码音频，而不是拿一条模型根本没听过的 PCM 直接合成。
+            try:
+                retain_audio_cache.pop(seg.index, None)
+            except Exception:  # pragma: no cover - defensive
+                pass
 
     samples = sample_single_stage(
         model=model, positive=positive, negative=negative,

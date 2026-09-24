@@ -29,17 +29,41 @@ Note the audio stream is independent of the canvas: its shape is
 So a retained clip keeps working when the card moves to a different canvas,
 which the video pin cannot do (it drops to the pixel path on a canvas change).
 
+Head pin offset
+---------------
+
+A segment is sampled longer than it is exported: 「段间引导」pins the previous
+segment's tail at the head and that prefix is cut away after decoding. The
+retained clip therefore has to start where the *export* starts, not at t=0 —
+otherwise the muxed track runs ``trim_frames / fps`` seconds ahead of the audio
+the UNet actually listened to. Callers pass that offset as ``head_seconds`` and
+the clip is written from the matching audio tick onwards; the head region keeps
+whatever the continuity pass pinned there.
+
 Masking
 -------
 
 ``noise_mask`` is a NestedTensor with the same two streams as ``samples``
-(precedent: :func:`h3_latent_continue.apply_latent_continue`). Video stays
-``1`` (fully sampled); audio goes to ``0`` (fully locked).
+(precedent: :func:`h3_latent_continue.apply_latent_continue`). Video keeps
+whatever the continuity pass left there; audio goes to ``0`` (fully locked).
 
-Deliberately **not** set: ``PREFIX_STEPS_KEY``. Setting it would install the
-continue remask, whose ``apply_model`` hook overwrites ``denoise_mask`` with a
-video-only 5-D tensor and would drop the audio stream from the mask. The static
-mask reaches ``comfy.sample.sample`` intact on its own.
+Keeping ``PREFIX_STEPS_KEY``
+----------------------------
+
+When「段间锥形重绘」ran first it leaves ``PREFIX_STEPS_KEY`` on the latent, so
+:func:`sample_single_stage` installs the continue remask on top of our mask.
+That is safe and must **not** be undone:
+
+* ``comfy.samplers.KSampler.sample`` packs the two mask streams into one flat
+  ``[B, 1, video_flat + audio_flat]`` tensor, and the remask (``_PrefixRemask``)
+  only rewrites the leading ``video_flat`` slice — the audio half is untouched;
+* the hard lock is enforced one level up by ``KSamplerX0Inpaint``, which mixes
+  ``x`` and the denoised output against that packed mask. The remask's
+  ``apply_model`` hook does hand the transformer a video-only 5-D mask, but that
+  one never participates in the ``latent_image`` mixing that pins the audio.
+
+So a retained clip stays locked even under 锥形重绘, and the per-sigma seam
+refinement keeps working.
 """
 
 from __future__ import annotations
@@ -192,6 +216,17 @@ def _fit_waveform(wave: torch.Tensor, sr: int, vae_sr: int, want: int) -> torch.
     return torch.cat([wave, pad], dim=-1).contiguous()
 
 
+def _audio_hz() -> float:
+    """Audio ticks per second (``h3_motion_context.AUDIO_HZ``)."""
+    try:
+        from .h3_motion_context import AUDIO_HZ
+
+        hz = float(AUDIO_HZ)
+    except Exception:  # pragma: no cover - defensive
+        hz = 40.0
+    return hz if hz > 0 else 40.0
+
+
 def _latent_audio_seconds(audio: torch.Tensor) -> float:
     """How many seconds the latent's own audio stream spans.
 
@@ -200,15 +235,7 @@ def _latent_audio_seconds(audio: torch.Tensor) -> float:
     ``AUDIO_HZ`` ticks per second and, unlike the video stream, does not depend
     on the canvas at all.
     """
-    try:
-        from .h3_motion_context import AUDIO_HZ
-
-        hz = float(AUDIO_HZ)
-    except Exception:  # pragma: no cover - defensive
-        hz = 40.0
-    if hz <= 0:
-        hz = 40.0
-    return float(int(audio.shape[-1])) / hz
+    return float(int(audio.shape[-1])) / _audio_hz()
 
 
 def apply_retain_audio(
@@ -219,11 +246,16 @@ def apply_retain_audio(
     sample_len: int | None = None,
     fps: float = 24.0,
     seconds: float | None = None,
-) -> tuple[dict[str, Any], bool]:
+    head_seconds: float = 0.0,
+) -> dict[str, Any]:
     """Encode ``pcm`` into ``latent``'s audio stream and lock that stream.
 
-    Returns ``(latent, True)``; raises on anything unexpected so the caller can
-    fall back to a normal generate segment rather than sampling garbage.
+    ``head_seconds`` is the length of the head pin 段间引导 prepends and the
+    export cuts away again; the clip starts after it so the exported frames line
+    up with the audio the UNet conditioned on.
+
+    Raises on anything unexpected so the caller can fall back to a normal
+    generate segment rather than sampling garbage.
     """
     if not isinstance(latent, dict) or latent.get("samples") is None:
         raise ValueError("保留音频: latent 为空。")
@@ -250,7 +282,15 @@ def apply_retain_audio(
         seconds = float(sample_len) / float(fps or 24.0)
     if seconds is None or seconds <= 0:
         seconds = _latent_audio_seconds(audio)
-    want = max(1, int(round(float(seconds) * vae_sr)))
+
+    # Where the export starts. The clip is written from here on; the ticks before
+    # it keep the continuity audio (and are cut away after decoding anyway).
+    total_t = int(audio.shape[-1])
+    head = float(head_seconds or 0.0)
+    head_ticks = int(round(head * _audio_hz())) if head > 0 else 0
+    head_ticks = max(0, min(head_ticks, max(0, total_t - 1)))
+    span_seconds = max(0.0, float(seconds) - head)
+    want = max(1, int(round(span_seconds * vae_sr)))
     fitted = _fit_waveform(wave, sr, vae_sr, want)
 
     z = audio_vae.encode(fitted[:1].movedim(1, -1))
@@ -258,25 +298,34 @@ def apply_retain_audio(
         raise ValueError("保留音频: 音频 VAE 编码未返回张量。")
 
     # The audio stream is [B, C, 2, T]; some VAE builds return the 2 packed into
-    # the channel axis as [B, C*2, T]. Unpack to the stream's layout.
-    if z.ndim == 3 and audio.ndim == 4 and int(z.shape[1]) % max(1, int(audio.shape[2])) == 0:
+    # the channel axis as [B, C*2, T]. Unpack to the stream's layout — but only
+    # when the channel counts actually say so, or a plain [B, C, T] result would
+    # be silently split in half.
+    if (
+        z.ndim == 3
+        and audio.ndim == 4
+        and int(z.shape[1]) == int(audio.shape[1]) * int(audio.shape[2])
+    ):
         try:
             z = z.reshape(int(z.shape[0]), int(audio.shape[1]), int(audio.shape[2]), int(z.shape[-1]))
         except Exception:  # pragma: no cover - defensive
             pass
 
     patched_audio = audio.clone()
-    t = min(int(audio.shape[-1]), int(z.shape[-1]))
+    room = total_t - head_ticks
+    t = min(room, int(z.shape[-1]))
     if t < 1:
         raise ValueError("保留音频: 编码结果长度为 0。")
-    if tuple(z.shape) == tuple(audio.shape):
+    if head_ticks == 0 and tuple(z.shape) == tuple(audio.shape):
         patched_audio = z.to(device=audio.device, dtype=audio.dtype)
     else:
-        patched_audio[..., :t] = z[..., :t].to(device=audio.device, dtype=audio.dtype)
-        if t < int(audio.shape[-1]):
+        patched_audio[..., head_ticks : head_ticks + t] = z[..., :t].to(
+            device=audio.device, dtype=audio.dtype
+        )
+        if head_ticks + t < total_t:
             # The clip is shorter than this segment: keep the tail silent rather
             # than letting the (never-decoded) leftover stream leak in.
-            patched_audio[..., t:] = 0.0
+            patched_audio[..., head_ticks + t :] = 0.0
 
     # --- mask: video fully sampled, audio fully locked -------------------
     existing_video_mask = None
@@ -304,4 +353,7 @@ def apply_retain_audio(
     template = latent.get("samples")
     out["samples"] = _nested(video, patched_audio, template)
     out["noise_mask"] = _nested(existing_video_mask, audio_mask, template)
-    return out, True
+    # PREFIX_STEPS_KEY / CONTINUE_SEAM_KEY are deliberately left alone: the
+    # continue remask only rewrites the video half of the packed mask, so the
+    # audio lock survives it (see the module docstring).
+    return out

@@ -128,6 +128,15 @@ export const audio_pickersMixin = {
         return bits.join(" ");
     },
 
+    /** 同一张卡片只能保留一条：勾上新的就把其余条目取消勾选（不重渲染，免得打断播放）。 */
+    _syncRetainBoxes(root, pickedId, on) {
+        if (!on || !root) return;
+        root.querySelectorAll(".bd-audio-retain-cb").forEach((cb) => {
+            const row = cb.closest(".bd-audio-item");
+            if (row && row.dataset.audioEntry !== String(pickedId)) cb.checked = false;
+        });
+    },
+
     /** 这张卡片当前保留的条目 id（"" = 不保留）。 */
     retainedAudioId(index) {
         return String(this.timeline.segments?.[index]?.retainAudioId || "");
@@ -436,8 +445,11 @@ export const audio_pickersMixin = {
             listEl.textContent = t("audioExtract.noCache");
             return;
         }
+        const syncRetain = (pickedId, on) => this._syncRetainBoxes(listEl, pickedId, on);
         for (const entry of entries) {
-            listEl.appendChild(this._audioExtractRow(entry));
+            const row = this._audioExtractRow(entry, { onRetain: syncRetain });
+            row.dataset.audioEntry = String(entry.id);
+            listEl.appendChild(row);
         }
     },
 };

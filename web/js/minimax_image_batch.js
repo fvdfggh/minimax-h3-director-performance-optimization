@@ -2677,13 +2677,7 @@ async function mountAudioTab(body, editor, index, tab) {
     if (tab) tab.disabled = false;
     // 同一张卡片只能保留一条：勾上新的就把其余条目取消勾选（不重渲染，免得打断
     // 正在播放的音频）。
-    const syncRetainBoxes = (pickedId, on) => {
-        if (!on) return;
-        body.querySelectorAll(".bd-audio-retain-cb").forEach((cb) => {
-            const row = cb.closest(".bd-audio-item");
-            if (row && row.dataset.audioEntry !== String(pickedId)) cb.checked = false;
-        });
-    };
+    const syncRetainBoxes = (pickedId, on) => editor._syncRetainBoxes?.(body, pickedId, on);
     for (const entry of entries) {
         const row = editor._audioExtractRow(entry, {
             onRetain: syncRetainBoxes,

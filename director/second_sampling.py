@@ -647,25 +647,34 @@ def run_second_sampling(
                             _fail(idx, "seam", str(exc))
                             return
 
-        # 保留音频: overwrite the whole audio stream with the retained clip and
-        # lock it. Last write wins over the seam pin, exactly like the first pass.
+        # 保留音频: overwrite the audio stream with the retained clip and lock it.
+        # Last write wins over the seam pin, exactly like the first pass.
         # No sample_len here — the upscaled latent already carries its own audio
-        # grid, so the encoder takes the length straight from it.
+        # grid, so the encoder takes the length straight from it. The head pin is
+        # cut away on export, so the clip starts after it (same rule as 一采).
         retain_active = False
         retain_entry = (retain_audio_cache or {}).get(int(idx))
         if retain_entry is not None:
             try:
                 from .audio_retain import apply_retain_audio
 
-                new_av, retain_active = apply_retain_audio(
+                _fps = float(getattr(plan, "frame_rate", 24) or 24)
+                new_av = apply_retain_audio(
                     new_av, audio_vae, retain_entry.get("pcm"),
+                    head_seconds=float(trim_frames or 0) / _fps,
                 )
+                retain_active = True
             except Exception as exc:
                 log.warning(
                     "Director 二采: seg #%d 保留音频失败，按正常生成处理 (%s)。",
                     int(idx) + 1, exc,
                 )
                 retain_active = False
+                # 注入没成 → 这一段就是普通生成段，摘掉缓存条目让 Phase 3 正常解码。
+                try:
+                    retain_audio_cache.pop(int(idx), None)
+                except Exception:  # pragma: no cover - defensive
+                    pass
             else:
                 log.info(
                     "二采 seg #%d: 保留音频 ON — 锁定提取音频 (%s)",

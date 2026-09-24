@@ -95,6 +95,11 @@ export const timeline_payloadMixin = {
                         continuityFromPrev: isSegmentContinuityFromPrev(clean, i),
                         // 「对齐下段」is opt-in (default false) and cache-driven.
                         continuityToNext: clean.continuityToNext === true,
+                        // 「保留音频」: id of the extracted clip pinned as this
+                        // card's fixed soundtrack ("" = generate normally). The
+                        // backend reads it off plan.raw, so it must survive here
+                        // or the run silently ignores the tick.
+                        retainAudioId: String(clean.retainAudioId || ""),
                         refImageSize: resolveSegmentRefImageSize(clean, this.timeline.output),
                     };
                 }),

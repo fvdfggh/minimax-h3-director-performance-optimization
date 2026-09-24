@@ -577,6 +577,7 @@ def _sample_one_segment(
 
 def _decode_export_one_segment(
     audio_vae,
+    audio_mode,
     cache_dir,
     completed_audios,
     completed_av_handoff,
@@ -596,6 +597,7 @@ def _decode_export_one_segment(
     seg,
     segment_audios,
     segment_outputs,
+    source_audio_cache,
     timeline_seg_total,
     vae,
     workflow_name
@@ -652,7 +654,40 @@ def _decode_export_one_segment(
         export_len = int(num_frames)
 
     # VAE decode
-    decoded, audio_dict = _decode_av_latent(samples, vae, audio_vae, decode_audio=decode_audio)
+    # In source mode, skip audio VAE decode and use the PCM saved in Phase 1.
+    if audio_mode == AUDIO_MODE_SOURCE and seg.index in source_audio_cache:
+        decoded, _ = _decode_av_latent(samples, vae, audio_vae, decode_audio=False)
+        
+        # Use PCM from Phase 1 cache (already duration-aligned)
+        audio_dict = source_audio_cache[seg.index]["pcm"]
+        
+        # Adjust audio length to match video frames
+        sr = int(audio_dict.get("sample_rate", 44100))
+        target_samples = int(round(export_len / float(plan.frame_rate or 24) * sr))
+        have_samples = int(audio_dict["waveform"].shape[-1])
+        
+        if have_samples > target_samples:
+            audio_dict = {"waveform": audio_dict["waveform"][..., :target_samples], "sample_rate": sr}
+        elif have_samples < target_samples:
+            pad = torch.zeros(
+                1, audio_dict["waveform"].shape[1], target_samples - have_samples,
+                dtype=audio_dict["waveform"].dtype, device=audio_dict["waveform"].device
+            )
+            audio_dict = {
+                "waveform": torch.cat([audio_dict["waveform"], pad], dim=-1),
+                "sample_rate": sr
+            }
+        
+        log.debug(
+            "Seg #%d: source audio used from Phase 1 cache (%.2fs, %d samples)",
+            seg.index + 1,
+            audio_dict["waveform"].shape[-1] / sr,
+            audio_dict["waveform"].shape[-1]
+        )
+    else:
+        # Generate mode: decode audio from latent normally
+        decoded, audio_dict = _decode_av_latent(samples, vae, audio_vae, decode_audio=decode_audio)
+    
     del samples
 
     decoded, audio_dict = _trim_decoded_to_export(

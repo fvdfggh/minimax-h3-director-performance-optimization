@@ -91,6 +91,7 @@ from .segment_mp4_export import (
 )
 from .segment_continuity import concat_chunks_lazy, is_continuity_active, resolve_prev_segment_output
 from .vram_cleanup import cleanup_segment_vram
+from .batch_audio_lock import build_source_audio_cache
 from .batch_phases import (
     _prepare_one_segment,
     _sample_one_segment,
@@ -202,11 +203,30 @@ def execute_director_batch(
         f"Phase 3: Sequential decode (VAE stays loaded)",
     ]
     if audio_mode == AUDIO_MODE_MUTE:
-        reports.append("Audio: muted — skip audio VAE decode, silent AUDIO output.")
+        reports.append("Audio: muted — SKIP audio VAE encode, silent AUDIO output.")
     elif audio_mode == AUDIO_MODE_SOURCE:
-        reports.append("Audio: source — skip audio VAE decode, use original timeline audio.")
+        reports.append("Audio: source — extract+encode PCM in Phase 1, use saved PCM in Phase 3 (zero I/O).")
     else:
-        reports.append("Audio: generate — decode MiniMax H3 AV latent audio.")
+        reports.append("Audio: generate — full audio VAE encode → sample → decode pipeline.")
+
+    # ===================================================================
+    # SOURCE MODE: Pre-extract and encode audio for all segments (Phase 1)
+    # ===================================================================
+    # In source/mute mode, extract PCM once in Phase 1 and save to memory.
+    # This avoids re-extracting from file in Phase 3, and enables audio locking
+    # during sampling (latent stays protected from UNet modification).
+    source_audio_cache: dict[int, dict] = {}
+    if audio_mode in (AUDIO_MODE_SOURCE, AUDIO_MODE_MUTE) and audio_vae is not None:
+        try:
+            source_audio_cache = build_source_audio_cache(
+                run_list=run_list,
+                plan=plan,
+                timeline_data=timeline_data or "",
+                audio_vae=audio_vae,
+                fps=float(plan.frame_rate or 24),
+            )
+        except Exception as exc:
+            log.warning("Source audio cache failed: %s — continuing without it", exc, exc_info=True)
 
     cache_dir = _batch_cache_dir(node_id, workflow_name)
 
@@ -289,13 +309,20 @@ def execute_director_batch(
                        + (f", {shared} shared" if shared else ""))
 
         # ---- Step 3: audio VAE ----------------------------------------------
-        n_aud = (encode_audio_vae_batch(audio_vae, pending, aud_cache)
-                 if audio_vae is not None else 0)
-        if n_aud:
-            unload_model_group(audio_vae, reports=reports, label="audio VAE")
-        shared = n_aud_jobs - n_aud
+        # In source/mute mode, audio is already encoded in batch_audio_lock.build_source_audio_cache().
+        # Skip the regular audio VAE encode to avoid redundant work.
+        n_aud = 0
+        shared = 0
+        if audio_mode not in (AUDIO_MODE_SOURCE, AUDIO_MODE_MUTE):
+            # Generate mode: full audio VAE encode pipeline
+            n_aud = (encode_audio_vae_batch(audio_vae, pending, aud_cache)
+                     if audio_vae is not None else 0)
+            if n_aud:
+                unload_model_group(audio_vae, reports=reports, label="audio VAE")
+            shared = n_aud_jobs - n_aud
         reports.append(f"  audio VAE: {n_aud} encode(s)"
-                       + (f", {shared} shared" if shared else ""))
+                       + (f", {shared} shared" if shared else "")
+                       + (f" [SKIPPED for source/mode]" if audio_mode in (AUDIO_MODE_SOURCE, AUDIO_MODE_MUTE) and n_aud_jobs > 0 else ""))
 
         # ---- Step 4: assemble + persist --------------------------------------
         for prepared, meta in zip(pending, pending_meta):
@@ -434,6 +461,7 @@ def execute_director_batch(
 
     for seg in run_list:
         _decode_export_one_segment(
+            audio_mode=audio_mode,
             audio_vae=audio_vae,
             cache_dir=cache_dir,
             completed_audios=completed_audios,
@@ -454,6 +482,7 @@ def execute_director_batch(
             seg=seg,
             segment_audios=segment_audios,
             segment_outputs=segment_outputs,
+            source_audio_cache=source_audio_cache,
             timeline_seg_total=timeline_seg_total,
             vae=vae,
             workflow_name=workflow_name,

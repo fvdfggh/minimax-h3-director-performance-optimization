@@ -91,7 +91,7 @@ from .segment_mp4_export import (
 )
 from .segment_continuity import concat_chunks_lazy, is_continuity_active, resolve_prev_segment_output
 from .vram_cleanup import cleanup_segment_vram
-from .batch_audio_lock import build_source_audio_cache
+from .batch_source_audio import build_source_audio_cache
 from .batch_phases import (
     _prepare_one_segment,
     _sample_one_segment,
@@ -203,26 +203,27 @@ def execute_director_batch(
         f"Phase 3: Sequential decode (VAE stays loaded)",
     ]
     if audio_mode == AUDIO_MODE_MUTE:
-        reports.append("Audio: muted — SKIP audio VAE encode, silent AUDIO output.")
+        reports.append("Audio: muted — silent AUDIO output.")
     elif audio_mode == AUDIO_MODE_SOURCE:
-        reports.append("Audio: source — extract+encode PCM in Phase 1, use saved PCM in Phase 3 (zero I/O).")
+        reports.append("Audio: source — extract source PCM once in Phase 1, reuse in Phase 3.")
     else:
-        reports.append("Audio: generate — full audio VAE encode → sample → decode pipeline.")
+        reports.append("Audio: generate — encode → sample → decode model audio.")
 
     # ===================================================================
-    # SOURCE MODE: Pre-extract and encode audio for all segments (Phase 1)
+    # SOURCE MODE: pre-extract the source PCM for every running segment
     # ===================================================================
-    # In source/mute mode, extract PCM once in Phase 1 and save to memory.
-    # This avoids re-extracting from file in Phase 3, and enables audio locking
-    # during sampling (latent stays protected from UNet modification).
+    # The soundtrack of a source-mode run comes from the source video, not the
+    # AV latent, so extract it once here (Phase 1) and reuse the tensor in
+    # Phase 3 + the mp4 mux instead of re-reading the file per segment.
+    #
+    # Mute mode has no soundtrack at all and generate mode decodes model audio:
+    # neither builds this cache, so the extraction only ever happens for source.
     source_audio_cache: dict[int, dict] = {}
-    if audio_mode in (AUDIO_MODE_SOURCE, AUDIO_MODE_MUTE) and audio_vae is not None:
+    if audio_mode == AUDIO_MODE_SOURCE:
         try:
             source_audio_cache = build_source_audio_cache(
                 run_list=run_list,
                 plan=plan,
-                timeline_data=timeline_data or "",
-                audio_vae=audio_vae,
                 fps=float(plan.frame_rate or 24),
             )
         except Exception as exc:
@@ -309,20 +310,17 @@ def execute_director_batch(
                        + (f", {shared} shared" if shared else ""))
 
         # ---- Step 3: audio VAE ----------------------------------------------
-        # In source/mute mode, audio is already encoded in batch_audio_lock.build_source_audio_cache().
-        # Skip the regular audio VAE encode to avoid redundant work.
-        n_aud = 0
-        shared = 0
-        if audio_mode not in (AUDIO_MODE_SOURCE, AUDIO_MODE_MUTE):
-            # Generate mode: full audio VAE encode pipeline
-            n_aud = (encode_audio_vae_batch(audio_vae, pending, aud_cache)
-                     if audio_vae is not None else 0)
-            if n_aud:
-                unload_model_group(audio_vae, reports=reports, label="audio VAE")
-            shared = n_aud_jobs - n_aud
+        # Encodes *reference* audio (seg.ref_audios, reference-video soundtracks)
+        # into minimax_refs conditioning. This is input conditioning, required in
+        # every mode — source mode only skips decoding the *output* audio from the
+        # AV latent, not the reference encoding.
+        n_aud = (encode_audio_vae_batch(audio_vae, pending, aud_cache)
+                 if audio_vae is not None else 0)
+        if n_aud:
+            unload_model_group(audio_vae, reports=reports, label="audio VAE")
+        shared = n_aud_jobs - n_aud
         reports.append(f"  audio VAE: {n_aud} encode(s)"
-                       + (f", {shared} shared" if shared else "")
-                       + (f" [SKIPPED for source/mode]" if audio_mode in (AUDIO_MODE_SOURCE, AUDIO_MODE_MUTE) and n_aud_jobs > 0 else ""))
+                       + (f", {shared} shared" if shared else ""))
 
         # ---- Step 4: assemble + persist --------------------------------------
         for prepared, meta in zip(pending, pending_meta):

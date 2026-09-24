@@ -704,25 +704,40 @@ def apply_motion_context(
         log.warning(
             "Director continuity: previous export audio is empty; pinning video only."
         )
-    if continue_audio and (pin_audio_latent is not None or context_audio is not None):
-        # Official: audio window independent; 0 follows video span. Example WF uses 24.
-        a_frames = int(audio_ctx) if audio_ctx > 0 else int(span)
-        # Align audio pin end with the video pin window (not export overshoot).
-        audio_end_limit = pin_end_px if pin_end_px is not None else context_end_frame
-        if pin_audio_latent is not None:
-            audio_latent, ref_audio_t, overhang = _audio_tail_from_latent(
-                pin_audio_latent, a_frames, end_frame=audio_end_limit
-            )
-        else:
-            if audio_vae is None:
-                raise ValueError(
-                    "Director continuity: context_audio requires audio_vae "
-                    "(or pass previous AV latent)."
+    audio_pin = None
+    if continue_audio:
+        if pin_audio_latent is not None or context_audio is not None:
+            # Official: audio window independent; 0 follows video span. Example WF uses 24.
+            a_frames = int(audio_ctx) if audio_ctx > 0 else int(span)
+            # Align audio pin end with the video pin window (not export overshoot).
+            audio_end_limit = pin_end_px if pin_end_px is not None else context_end_frame
+            if pin_audio_latent is not None:
+                audio_pin = _audio_tail_from_latent(
+                    pin_audio_latent, a_frames, end_frame=audio_end_limit
                 )
-            audio_latent, ref_audio_t = _encode_tail_audio(
-                audio_vae, context_audio, a_frames / float(FPS)
-            )
-            overhang = 0.0
+            elif audio_vae is not None:
+                # Audio pin is a continuity nicety, never a hard requirement: if
+                # the context waveform cannot be resampled/encoded (e.g. source
+                # PCM at 44.1k with no torchaudio), pin video only instead of
+                # failing the run — same posture as the empty-audio case above.
+                try:
+                    _al, _rt = _encode_tail_audio(
+                        audio_vae, context_audio, a_frames / float(FPS)
+                    )
+                    audio_pin = (_al, _rt, 0.0)
+                except Exception as exc:
+                    log.warning(
+                        "Director continuity: context audio encode failed (%s); "
+                        "pinning video only.",
+                        exc,
+                    )
+            else:
+                log.warning(
+                    "Director continuity: context_audio requires audio_vae "
+                    "(or a previous AV latent); pinning video only."
+                )
+    if audio_pin is not None:
+        audio_latent, ref_audio_t, overhang = audio_pin
         end_frame = float(span) + float(overhang) / FRAME_RESCALE
         end_coord = round(FRAME_RESCALE * end_frame)
         end_frame = end_coord / FRAME_RESCALE

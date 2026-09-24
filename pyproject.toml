@@ -12,3 +12,16 @@ Repository = "https://github.com/fvdfggh/minimax-h3-director-performance-optimiz
 PublisherId = ""
 DisplayName = "ComfyUI MiniMax H3 Director Opt"
 Icon = ""
+
+[tool.ruff]
+# ComfyUI loads the package from the repo root; keep the scan tight.
+target-version = "py310"
+extend-exclude = ["web", "docs", "example_workflows"]
+
+[tool.ruff.lint]
+# The bug class this gate exists for: a name that is referenced but never
+# imported or defined. Such a name crashes an entire phase at runtime, and when
+# it sits inside a `try/except Exception` it fails silently instead. Keep the
+# selection narrow so a pre-existing style backlog cannot drown out real defects.
+# Run with: ruff check .
+select = ["F821", "F822", "F823"]

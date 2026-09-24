@@ -91,6 +91,14 @@ def prepare_segment_audio_for_file_export(
     if mode == AUDIO_MODE_SOURCE or (
         mode == AUDIO_MODE_GENERATE and task_passes_source_audio(str(getattr(plan, "global_task_key", "") or ""))
     ):
+        # Source mode already produced the (frame-aligned) source PCM in Phase 3,
+        # so mux it as-is instead of re-reading the source file. Generate mode can
+        # only reach here with empty model audio, so this never shadows it.
+        if _audio_has_samples(audio_dict):
+            sr = int(audio_dict.get("sample_rate") or SILENT_SAMPLE_RATE)
+            return _pad_or_trim_audio_to_frames(
+                audio_dict, frame_count=n_frames, fps=fps, sample_rate=sr
+            )
         timeline = getattr(plan, "raw", None) or {}
         start = int(getattr(seg, "start_frame", 0) or 0)
         end = int(getattr(seg, "end_frame", start + n_frames) or (start + n_frames))

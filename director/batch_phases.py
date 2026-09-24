@@ -13,7 +13,8 @@ import logging
 import torch
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.batch")
 
-from .audio_export import AUDIO_MODE_MUTE
+from .audio_export import AUDIO_MODE_MUTE, AUDIO_MODE_SOURCE
+from .batch_source_audio import align_pcm_to_frames
 from .batch_helpers import _av_latent_canvas_matches, _build_minimax_inputs, _decode_av_latent, _latent_for_cache, _load_batch_conditioning, _load_batch_latent, _load_batch_ref, _prev_context_available, _save_batch_conditioning, _save_batch_latent, _save_batch_ref, _trim_decoded_to_export
 from .batch_prepare import _rebuild_empty_latent, prepare_segment_materials
 from .cache_paths import slot_content_hash
@@ -654,45 +655,36 @@ def _decode_export_one_segment(
         export_len = int(num_frames)
 
     # VAE decode
-    # In source mode, skip audio VAE decode and use the PCM saved in Phase 1.
-    if audio_mode == AUDIO_MODE_SOURCE and seg.index in source_audio_cache:
+    # Source mode: the soundtrack is the source video's, already extracted in
+    # Phase 1 — reuse that PCM and skip the audio VAE decode entirely.
+    source_pcm = source_audio_cache.get(seg.index) if audio_mode == AUDIO_MODE_SOURCE else None
+    if source_pcm is not None:
         decoded, _ = _decode_av_latent(samples, vae, audio_vae, decode_audio=False)
-        
-        # Use PCM from Phase 1 cache (already duration-aligned)
-        audio_dict = source_audio_cache[seg.index]["pcm"]
-        
-        # Adjust audio length to match video frames
-        sr = int(audio_dict.get("sample_rate", 44100))
-        target_samples = int(round(export_len / float(plan.frame_rate or 24) * sr))
-        have_samples = int(audio_dict["waveform"].shape[-1])
-        
-        if have_samples > target_samples:
-            audio_dict = {"waveform": audio_dict["waveform"][..., :target_samples], "sample_rate": sr}
-        elif have_samples < target_samples:
-            pad = torch.zeros(
-                1, audio_dict["waveform"].shape[1], target_samples - have_samples,
-                dtype=audio_dict["waveform"].dtype, device=audio_dict["waveform"].device
-            )
-            audio_dict = {
-                "waveform": torch.cat([audio_dict["waveform"], pad], dim=-1),
-                "sample_rate": sr
-            }
-        
+        del samples
+        # Same video trim as the generate path, then align the source PCM to the
+        # exported frame count. The PCM is anchored at seg.start_frame, so it is
+        # only tail-trimmed — never head-trimmed like decoded model audio, whose
+        # head belongs to the previous segment's pin.
+        decoded, _ = _trim_decoded_to_export(
+            decoded, None, trim_frames=trim_frames, export_len=export_len, plan=plan,
+        )
+        audio_dict = align_pcm_to_frames(
+            source_pcm["pcm"], int(decoded.shape[0]), float(plan.frame_rate or 24),
+        )
         log.debug(
-            "Seg #%d: source audio used from Phase 1 cache (%.2fs, %d samples)",
+            "Seg #%d: source audio from Phase 1 cache (%.2fs for %df)",
             seg.index + 1,
-            audio_dict["waveform"].shape[-1] / sr,
-            audio_dict["waveform"].shape[-1]
+            audio_dict["waveform"].shape[-1] / max(1, int(audio_dict["sample_rate"])),
+            int(decoded.shape[0]),
         )
     else:
-        # Generate mode: decode audio from latent normally
+        # Generate mode (or a source segment whose extraction failed): decode
+        # audio from the AV latent exactly as before.
         decoded, audio_dict = _decode_av_latent(samples, vae, audio_vae, decode_audio=decode_audio)
-    
-    del samples
-
-    decoded, audio_dict = _trim_decoded_to_export(
-        decoded, audio_dict, trim_frames=trim_frames, export_len=export_len, plan=plan,
-    )
+        del samples
+        decoded, audio_dict = _trim_decoded_to_export(
+            decoded, audio_dict, trim_frames=trim_frames, export_len=export_len, plan=plan,
+        )
 
     chunk = decoded.cpu().float()
 

@@ -20,6 +20,7 @@ from typing import Any
 
 from aiohttp import web
 
+from ..lib.pathutil import MEDIA_EXTS, VIDEO_EXTS
 from ..lib.task_prompts import resolve_task_key
 from .pack_format import (
     AUDIO_FILE_RE,

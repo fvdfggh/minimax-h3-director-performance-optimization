@@ -6,6 +6,10 @@ next segment can be continued from this one (``/align_to_next_status``), droppin
 segment's files (``/remove_segment_slot``), clearing the cache (``/clear_cache``),
 exporting (``/segment_export``) and streaming one clip (``/segment_clip``).
 
+The「提取音频」group (``/audio_extract*``) drives the persistent audio store:
+probing what can be extracted, running the extraction, listing one card's clips
+and streaming one of them back so the「音频」tab can play it.
+
 Relative imports *inside* the handlers resolve against :mod:`director` exactly as
 they did in :mod:`http_routes`, because this module sits in the same package.
 """
@@ -61,6 +65,36 @@ def register(routes, register_route) -> None:
         "POST",
         f"{ROUTE_PREFIX}/segment_export",
         minimax_segment_export,
+    )
+    register_route(
+        routes,
+        "POST",
+        f"{ROUTE_PREFIX}/audio_extract_status",
+        minimax_audio_extract_status,
+    )
+    register_route(
+        routes,
+        "POST",
+        f"{ROUTE_PREFIX}/audio_extract",
+        minimax_audio_extract,
+    )
+    register_route(
+        routes,
+        "POST",
+        f"{ROUTE_PREFIX}/audio_extract_list",
+        minimax_audio_extract_list,
+    )
+    register_route(
+        routes,
+        "POST",
+        f"{ROUTE_PREFIX}/audio_extract_remove",
+        minimax_audio_extract_remove,
+    )
+    register_route(
+        routes,
+        "GET",
+        f"{ROUTE_PREFIX}/audio_extract_file",
+        minimax_audio_extract_file,
     )
 
 
@@ -316,15 +350,28 @@ async def minimax_remove_segment_slot(request):
     except (TypeError, ValueError):
         return web.Response(status=400, text="Invalid segment index.")
 
+    workflow_name = str(body.get("workflow_name") or "").strip() or None
     try:
+        from .audio_extract import sync_audio_slots
         from .segment_cache import remove_segment_slot
 
         removed = await asyncio.to_thread(
             remove_segment_slot,
             node_id,
             index,
-            workflow_name=str(body.get("workflow_name") or "").strip() or None,
+            workflow_name=workflow_name,
         )
+        # 删除而删除: the card is gone, so its extracted audio goes with it.
+        # ``seg_ids`` is the remaining order — without it (an older front end)
+        # this is a no-op and the next /audio_extract_list reconciles instead.
+        seg_ids = body.get("seg_ids")
+        if isinstance(seg_ids, list) and seg_ids:
+            await asyncio.to_thread(
+                sync_audio_slots,
+                node_id,
+                [str(x or "").strip() for x in seg_ids],
+                workflow_name,
+            )
         return web.json_response({"removed": bool(removed)})
     except Exception as exc:
         log.warning("MiniMax H3 Director Opt segment cache drop failed: %s", exc)
@@ -391,6 +438,196 @@ async def minimax_segment_export(request):
     except Exception as exc:
         log.warning("MiniMax H3 Director Opt segment-export failed: %s", exc)
         return web.json_response({"error": str(exc)}, status=500)
+
+
+def _audio_seg_ids(body: dict, timeline_data: str) -> list[str]:
+    """Ordered segment ids for「提取音频」(the key every entry is bound to).
+
+    The editor sends them alongside the timeline; when it does not (an older
+    build), they are read straight out of the timeline payload, which carries
+    ``segments[].id``.
+    """
+    raw = body.get("seg_ids")
+    if isinstance(raw, list) and raw:
+        return [str(x or "").strip() for x in raw]
+    from .audio_extract import timeline_segment_ids
+
+    return timeline_segment_ids(timeline_data)
+
+
+async def minimax_audio_extract_status(request):
+    """Availability of every segment for「提取音频」(what the picker greys out)."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    timeline_data = body.get("timeline_data") or ""
+    if isinstance(timeline_data, dict):
+        timeline_data = json.dumps(timeline_data, ensure_ascii=False)
+    try:
+        from .plan_types import normalize_segment_export_source
+        from .segment_cache import inspect_audio_extract_status, sync_segment_slots
+        from .segment_slots import VARIANT_SECOND
+
+        workflow_name = str(body.get("workflow_name") or "").strip() or None
+        source = normalize_segment_export_source(body.get("source") or body.get("cacheSource"))
+        variant = VARIANT_SECOND if source == "2nd" else "1st"
+
+        plan = _plan_from_request(body, str(timeline_data))
+        # Reconcile first: the picker must not offer audio for a render that
+        # belongs to a group deleted from the middle of the timeline.
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name, variant=variant)
+        return web.json_response(
+            inspect_audio_extract_status(
+                node_id, plan, workflow_name=workflow_name, variant=variant
+            )
+        )
+    except Exception as exc:
+        log.warning("MiniMax H3 Director Opt audio-extract status failed: %s", exc)
+        return web.json_response({"segments": [], "error": str(exc)}, status=400)
+
+
+async def minimax_audio_extract(request):
+    """Run a「提取音频」request: one WAV (+ audio latent) per checked segment."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    timeline_data = body.get("timeline_data") or ""
+    if isinstance(timeline_data, dict):
+        timeline_data = json.dumps(timeline_data, ensure_ascii=False)
+    raw_indices = body.get("indices")
+    if not isinstance(raw_indices, list) or not raw_indices:
+        return web.Response(status=400, text="No segment indices selected.")
+
+    try:
+        from .plan_types import normalize_segment_export_source
+        from .segment_cache import run_audio_extract, sync_segment_slots
+        from .segment_slots import VARIANT_SECOND
+
+        source = normalize_segment_export_source(body.get("source") or body.get("cacheSource"))
+        variant = VARIANT_SECOND if source == "2nd" else "1st"
+        try:
+            indices = [int(i) for i in raw_indices]
+        except (TypeError, ValueError):
+            return web.Response(status=400, text="Invalid segment indices.")
+
+        plan = _plan_from_request(body, str(timeline_data))
+        workflow_name = str(body.get("workflow_name") or "").strip() or None
+        sync_segment_slots(node_id, plan, workflow_name=workflow_name, variant=variant)
+        result = await asyncio.to_thread(
+            run_audio_extract,
+            node_id,
+            plan,
+            indices,
+            workflow_name=workflow_name,
+            variant=variant,
+            seg_ids=_audio_seg_ids(body, str(timeline_data)),
+        )
+        return web.json_response(result)
+    except Exception as exc:
+        log.warning("MiniMax H3 Director Opt audio-extract failed: %s", exc)
+        return web.json_response({"error": str(exc)}, status=500)
+
+
+async def minimax_audio_extract_list(request):
+    """Entries of the「音频」tab — every clip extracted for one timeline card."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+
+    timeline_data = body.get("timeline_data") or ""
+    if isinstance(timeline_data, dict):
+        timeline_data = json.dumps(timeline_data, ensure_ascii=False)
+    try:
+        from .segment_cache import list_audio_extracts
+
+        workflow_name = str(body.get("workflow_name") or "").strip() or None
+        raw_index = body.get("index")
+        index = int(raw_index) if raw_index is not None and str(raw_index) != "" else None
+        # Reconciling here is what actually enforces「删除而删除」: a card removed
+        # while the node was closed still gets its audio dropped the moment the
+        # tab asks for the list.
+        rows = await asyncio.to_thread(
+            list_audio_extracts,
+            node_id,
+            workflow_name,
+            seg_ids=_audio_seg_ids(body, str(timeline_data)),
+            index=index,
+        )
+        return web.json_response({"node_id": node_id, "entries": rows})
+    except Exception as exc:
+        log.warning("MiniMax H3 Director Opt audio-extract list failed: %s", exc)
+        return web.json_response({"entries": [], "error": str(exc)}, status=400)
+
+
+async def minimax_audio_extract_remove(request):
+    """Delete one extracted clip (the audio tab's per-row delete)."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return web.Response(status=400, text=f"Invalid JSON: {exc}")
+
+    node_id = str(body.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+    entry_id = str(body.get("entry_id") or "").strip()
+    if not entry_id:
+        return web.Response(status=400, text="Missing entry id.")
+
+    try:
+        from .segment_cache import remove_audio_entry
+
+        workflow_name = str(body.get("workflow_name") or "").strip() or None
+        removed = await asyncio.to_thread(remove_audio_entry, node_id, workflow_name, entry_id)
+        return web.json_response({"removed": bool(removed)})
+    except Exception as exc:
+        log.warning("MiniMax H3 Director Opt audio-extract remove failed: %s", exc)
+        return web.json_response({"removed": False, "error": str(exc)}, status=400)
+
+
+async def minimax_audio_extract_file(request):
+    """Stream one extracted WAV so the「音频」tab can play it in place.
+
+    Read-only, and only ever serves a name registered in the entry manifest, so
+    a crafted ``entry`` cannot walk out of the audio directory.
+    """
+    node_id = str(request.query.get("node_id") or "").strip()
+    if not re.fullmatch(r"\d+", node_id):
+        return web.Response(status=400, text="Invalid Director node id.")
+    entry_id = str(request.query.get("entry") or "").strip()
+    if not entry_id:
+        return web.Response(status=400, text="Missing entry id.")
+    workflow_name = str(request.query.get("workflow_name") or "").strip() or None
+
+    try:
+        from .segment_cache import resolve_audio_file
+    except Exception as exc:  # pragma: no cover - import guard
+        log.warning("MiniMax H3 Director Opt audio-extract import failed: %s", exc)
+        return web.Response(status=500, text="Audio cache unavailable.")
+
+    path = resolve_audio_file(node_id, workflow_name, entry_id)
+    if path is None:
+        return web.Response(status=404, text="Extracted audio not found.")
+    return web.FileResponse(
+        str(path),
+        headers={"Content-Type": "audio/wav", "Cache-Control": "no-store"},
+    )
 
 
 async def minimax_segment_clip(request):

@@ -10,7 +10,10 @@ with a single job:
 * :mod:`cache_files`    — clip artefacts, availability probes, shape probes;
 * :mod:`cache_store`    — writing a segment's artefacts, second-pass writer;
 * :mod:`cache_readback` — reading them back for the next segment / the export;
-* :mod:`cache_export`   — the「分段导出」pipeline (decode, stitch, write mp4s).
+* :mod:`cache_export`   — the「分段导出」pipeline (decode, stitch, write mp4s);
+* :mod:`audio_extract`  — the「提取音频」store: a *separate* cache keyed by
+                          segment id, deliberately outside the render cache so
+                          it survives re-runs and cache clears.
 
 What is left *here* is the slot-map reconciliation — the one part that ties a
 timeline position to a file group — plus this facade: everything the rest of the
@@ -30,6 +33,16 @@ from pathlib import Path
 
 from . import cache_layout
 from . import segment_slots
+from .audio_extract import (
+    audio_extract_dir,
+    inspect_audio_extract_status,
+    list_audio_extracts,
+    remove_audio_entry,
+    resolve_audio_file,
+    run_audio_extract,
+    sync_audio_slots,
+    timeline_segment_ids,
+)
 from .cache_export import (
     build_run_selection_clips,
     continuous_export_runs,

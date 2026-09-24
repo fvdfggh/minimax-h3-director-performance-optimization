@@ -8,7 +8,7 @@ import { ensureEditorStyles } from "../styles.js";
 import { bindFl2vEvents, mountFl2vPanel } from "../../minimax_fl2v.js";
 import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_GEN_FRAMES, RESOLUTION_ASPECTS } from "../../minimax_gen_timeline.js";
 import { aspectDisplayLabel } from "../../minimax_i18n.js";
-import { bindImageBatchEvents, mountImageBatchPanel, normalizeImageBatchSegments, renderImageBatchGroups, wireBatchRunSelectControls } from "../../minimax_image_batch.js";
+import { bindImageBatchEvents, mountImageBatchPanel, normalizeImageBatchSegments, renderImageBatchGroups, wireBatchAudioExtract, wireBatchRunSelectControls } from "../../minimax_image_batch.js";
 import { teardownPromptImageMentions } from "../../minimax_prompt_mentions.js";
 export const dom_shellMixin = {
     buildDOM() {
@@ -37,6 +37,7 @@ export const dom_shellMixin = {
                     </label>
                     <button type="button" class="bd-btn" data-a="seg-export" data-i18n="toolbar.segmentExport" data-i18n-title="tooltip.segmentExport">分段导出</button>
                     <button type="button" class="bd-btn" data-a="second-sample" data-i18n="toolbar.secondSample" data-i18n-title="tooltip.secondSample">二次采样</button>
+                    <button type="button" class="bd-btn" data-a="audio-extract" data-i18n="toolbar.audioExtract" data-i18n-title="tooltip.audioExtract">提取音频</button>
                     <button type="button" class="bd-btn bd-btn-danger" data-a="del" data-i18n="toolbar.deleteSegment" data-i18n-title="tooltip.deleteSegment">删除片段</button>
                     <div class="bd-mode">
                         <button type="button" data-a="mode-global" class="active" data-i18n="toolbar.modeGlobal">全局模式</button>
@@ -341,6 +342,7 @@ export const dom_shellMixin = {
         this.batchAddBtn = batchUi.addBtn;
         this.batchPicker = batchUi.picker;
         wireBatchRunSelectControls(this, batchUi);
+        wireBatchAudioExtract(this, batchUi);
 
         this.fl2vUi = mountFl2vPanel(this.mainBody);
         this.fl2vTotalWrap = this.root.querySelector('[data-r="fl2v-total-wrap"]');

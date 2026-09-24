@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -114,6 +115,52 @@ def _probe_audio_stream(path: str) -> tuple[int, int]:
         return ar, ac
     except (subprocess.CalledProcessError, ValueError, IndexError):
         return 44100, 2
+
+
+def extract_audio_track(src: str, dst_wav: str) -> bool:
+    """Pull a container's audio stream into a standalone 16-bit PCM WAV.
+
+    Used by「提取音频」when a segment has a rendered clip but no decoded
+    waveform cache: the clip already carries the finished mix, so re-encoding
+    it is strictly cheaper than decoding the latent back (which needs a VAE).
+
+    ``False`` (never raises) when ffmpeg is unavailable, the container has no
+    audio stream, or the write fails — callers fall through to the next source.
+    """
+    ffmpeg = ffmpeg_bin()
+    if not ffmpeg:
+        return False
+    dest = Path(dst_wav)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    try:
+        res = subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                src,
+                "-vn",                 # drop video entirely
+                "-map",
+                "a:0",
+                "-c:a",
+                "pcm_s16le",           # uncompressed: no second generation loss
+                str(dest),
+            ],
+            capture_output=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    try:
+        return dest.is_file() and dest.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def frames_to_audio_samples(frame_count: int, fps: float, sample_rate: int) -> int:

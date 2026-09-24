@@ -32,6 +32,7 @@ export const eventsMixin = {
         bind('[data-a="run-select-toggle"]', () => this.toggleRunSelectMode());
         bind('[data-a="seg-export"]', () => { void this.openSegmentExportPicker(); });
         bind('[data-a="second-sample"]', () => { void this.openSecondSamplePicker(); });
+        bind('[data-a="audio-extract"]', () => { void this.openAudioExtractPicker(); });
         bind('[data-a="del"]', () => this.deleteSelectedSegment());
         bind('[data-a="mode-global"]', () => this.setEditMode("global"));
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));

@@ -54,7 +54,13 @@ def _pad_even_hw(rgb: np.ndarray) -> np.ndarray:
     return out
 
 
-def _write_wav(path: Path, audio: dict[str, Any]) -> bool:
+def write_wav(path: Path, audio: dict[str, Any]) -> bool:
+    """Write an AUDIO dict ``{"waveform", "sample_rate"}`` as 16-bit PCM WAV.
+
+    Public so「提取音频」can publish a playable cache without going through an
+    encoder: this needs nothing but the stdlib ``wave`` module, so a missing
+    ffmpeg never costs the user their audio.
+    """
     wave_t = audio.get("waveform")
     if not isinstance(wave_t, torch.Tensor) or wave_t.numel() <= 0:
         return False
@@ -78,6 +84,10 @@ def _write_wav(path: Path, audio: dict[str, Any]) -> bool:
         wf.setframerate(sr)
         wf.writeframes(pcm.tobytes())
     return True
+
+
+#: Historical private name; kept so older call sites keep working.
+_write_wav = write_wav
 
 
 def write_frames_to_mp4(

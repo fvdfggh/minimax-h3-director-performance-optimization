@@ -85,6 +85,9 @@ export const run_selectionMixin = {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 node_id: nodeId,
+                // 剩余片段的 id 顺序（调用方已 splice 过）：后端据此同步「提取音频」
+                // 的绑定 —— 被删卡片自己的音频随之删除，后面的重新编号。
+                seg_ids: (this.timeline.segments || []).map((s, i) => String(s?.id || `@${i}`)),
                 workflow_name: getStableWorkflowId(),
                 index: parseInt(index, 10) || 0,
             }),

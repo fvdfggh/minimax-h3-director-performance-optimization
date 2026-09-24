@@ -563,6 +563,17 @@ export const IMAGE_BATCH_STYLES = `
 .bd-r2v-preview-tab:hover:not(:disabled){border-color:#6a9aca;color:#eaf6ff;background:#26313d}
 .bd-r2v-preview-tab.on{border-color:#4a9fd8;background:#1f3a4d;color:#eaf6ff;font-weight:700}
 .bd-r2v-preview-tab:disabled{opacity:.45;cursor:not-allowed}
+.bd-r2v-clip-empty{font-size:11px;color:#7d7d7d;text-align:center;padding:4px 6px}
+.bd-r2v-clip-loading{font-size:11px;color:#7d7d7d;text-align:center;padding:4px 6px}
+/* ---- 「提取音频」条目：播放器 + 元信息 + 删除 ---- */
+.bd-audio-item{display:flex;flex-direction:column;gap:4px;width:100%;padding:6px;border:1px solid #2f3b47;border-radius:5px;background:#151b22;box-sizing:border-box}
+.bd-audio-item+.bd-audio-item{margin-top:6px}
+.bd-audio-item audio{width:100%;height:30px;min-width:0}
+.bd-audio-meta{display:flex;gap:8px;align-items:center;font-size:10px;color:#8fa3b5;font-variant-numeric:tabular-nums}
+.bd-audio-src{color:#9fb0c0}
+.bd-audio-del{align-self:flex-start;font-size:10px;padding:2px 8px;border:1px solid #4a3a3a;background:#241a1a;color:#c98a8a;cursor:pointer;border-radius:4px}
+.bd-audio-del:hover:not(:disabled){border-color:#8a5a5a;color:#ffdada}
+.bd-r2v-clip-body:has(.bd-audio-item){flex-direction:column;align-items:stretch;justify-content:flex-start;overflow-y:auto}
 .bd-batch-src{width:88px;height:88px;border:1px dashed #555;border-radius:4px;background:#111;display:flex;align-items:center;justify-content:center;cursor:pointer;overflow:hidden;color:#666;font-size:9px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-src.has-img{border-style:solid;border-color:#444}
 .bd-batch-src img{width:100%;height:100%;object-fit:contain;background:#000}
@@ -687,6 +698,7 @@ export function mountImageBatchPanel(root) {
                 <input type="checkbox" data-r="batch-run-all-cb">
                 <span data-i18n="toolbar.selectAll">全选</span>
             </label>
+            <button type="button" class="bd-btn hidden" data-a="batch-audio-extract" data-i18n="toolbar.audioExtract" data-i18n-title="tooltip.audioExtract">提取音频</button>
             <span class="bd-meta" data-r="batch-hint" data-i18n="batch.hint.defaultImage">每组生成 1 张图片</span>
         </div>
         <div class="bd-batch-i2v-notice" data-r="batch-i2v-notice"></div>
@@ -703,7 +715,17 @@ export function mountImageBatchPanel(root) {
         runSelectBtn: panel.querySelector('[data-a="batch-run-select"]'),
         runSelectAllWrap: panel.querySelector('[data-r="batch-run-all-wrap"]'),
         runSelectAllCb: panel.querySelector('[data-r="batch-run-all-cb"]'),
+        audioExtractBtn: panel.querySelector('[data-a="batch-audio-extract"]'),
     };
+}
+
+/** 「提取音频」entry point — opens the picker; visibility is set per task. */
+export function wireBatchAudioExtract(editor, batchUi) {
+    editor.batchAudioExtractBtn = batchUi.audioExtractBtn;
+    batchUi.audioExtractBtn?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void editor.openAudioExtractPicker?.();
+    });
 }
 
 export function wireBatchRunSelectControls(editor, batchUi) {
@@ -2523,9 +2545,14 @@ function renderPreview(el, seg, running, isVideo, fps, editor, index) {
 
 const _clipProbe = new Map();
 const CLIP_PROBE_TTL_MS = 30000;
+/** 音频 tab 的条目探测（条目列表，不是 HEAD 探测）。 */
+const _audioProbe = new Map();
+const AUDIO_PROBE_TTL_MS = 15000;
 
 /** 清掉探测缓存（运行结束后调用，保证 tab 状态及时刷新）。 */
 export function invalidateR2vClipProbe(key) {
+    // 音频 tab 的探测跟着一起失效：运行结束后该卡片可能多了（或少了）提取记录。
+    _audioProbe.clear();
     if (key == null) {
         _clipProbe.clear();
         return;
@@ -2596,11 +2623,78 @@ function mountCachedClip(body, url) {
     body.appendChild(v);
 }
 
+/** 探测缓存：切 tab / 重渲染不该每次都打后端。 */
+function probeAudioExtract(editor, index) {
+    const key = `${String(editor?.node?.id ?? "")}|${r2vWorkflowId(editor)}|${index}|audio`;
+    const hit = _audioProbe.get(key);
+    if (hit && Date.now() - hit.at < AUDIO_PROBE_TTL_MS) return hit.promise;
+    const promise = editor.listAudioExtracts?.(index) || Promise.resolve([]);
+    _audioProbe.set(key, { at: Date.now(), promise });
+    return promise;
+}
+
+/** 只置灰 tab，不碰预览区内容（预热探测用）。 */
+async function probeAudioTab(editor, index, tab) {
+    const entries = await probeAudioExtract(editor, index);
+    if (editor.r2vPreviewTab === "audio") return;
+    if (!entries.length) {
+        tab.disabled = true;
+        tab.title = t("r2v.preview.noAudio");
+    }
+}
+
+/** 音频 tab：列出该卡片所有历史提取记录，可直接试听。 */
+async function mountAudioTab(body, editor, index, tab) {
+    body.innerHTML = "";
+    const loading = document.createElement("div");
+    loading.className = "bd-r2v-clip-loading";
+    loading.textContent = "…";
+    body.appendChild(loading);
+
+    const entries = await probeAudioExtract(editor, index);
+    // 切 tab 后旧请求才回来：不要再往已经换掉的容器里塞东西。
+    if (editor.r2vPreviewTab !== "audio") return;
+    body.innerHTML = "";
+    if (typeof editor._audioExtractRow !== "function") return;
+    if (!entries.length) {
+        if (tab) {
+            tab.disabled = true;
+            tab.title = t("r2v.preview.noAudio");
+        }
+        const empty = document.createElement("div");
+        empty.className = "bd-r2v-clip-empty";
+        empty.textContent = t("r2v.preview.noAudio");
+        const hint = document.createElement("div");
+        hint.className = "bd-r2v-clip-empty";
+        hint.textContent = t("r2v.preview.audioHint");
+        body.appendChild(empty);
+        body.appendChild(hint);
+        return;
+    }
+    if (tab) tab.disabled = false;
+    for (const entry of entries) {
+        body.appendChild(editor._audioExtractRow(entry, {
+            onDeleted: () => {
+                // 删到最后一条就把 tab 置灰，和初始状态保持一致。
+                if (!body.querySelector(".bd-audio-item")) {
+                    if (tab) tab.disabled = true;
+                    const empty = document.createElement("div");
+                    empty.className = "bd-r2v-clip-empty";
+                    empty.textContent = t("r2v.preview.noAudio");
+                    body.appendChild(empty);
+                }
+            },
+        }));
+    }
+}
+
 function mountR2vPreviewWithTabs(el, seg, index, running, fps, editor) {
     stopPlayer(el);
     el.innerHTML = "";
     if (!editor.r2vPreviewTab) editor.r2vPreviewTab = "1st";
-    const active = editor.r2vPreviewTab === "2nd" ? "2nd" : "1st";
+    const active = ["2nd", "audio"].includes(editor.r2vPreviewTab)
+        ? editor.r2vPreviewTab
+        : "1st";
 
     const tabs = document.createElement("div");
     tabs.className = "bd-r2v-preview-tabs";
@@ -2625,8 +2719,10 @@ function mountR2vPreviewWithTabs(el, seg, index, running, fps, editor) {
 
     const tab1 = mkTab("1st", t("r2v.preview.first"));
     const tab2 = mkTab("2nd", t("r2v.preview.second"));
+    const tab3 = mkTab("audio", t("r2v.preview.audio"));
     tabs.appendChild(tab1);
     tabs.appendChild(tab2);
+    tabs.appendChild(tab3);
     el.appendChild(tabs);
     el.appendChild(body);
 
@@ -2648,6 +2744,12 @@ function mountR2vPreviewWithTabs(el, seg, index, running, fps, editor) {
             tab2.disabled = true;
             tab2.title = t("r2v.preview.noSecond");
         });
+        void probeAudioTab(editor, index, tab3);
+        return;
+    }
+
+    if (active === "audio") {
+        void mountAudioTab(body, editor, index, tab3);
         return;
     }
 
@@ -2659,6 +2761,7 @@ function mountR2vPreviewWithTabs(el, seg, index, running, fps, editor) {
         tab2.disabled = false;
         if (editor.r2vPreviewTab === "2nd") mountCachedClip(body, res.url);
     });
+    void probeAudioTab(editor, index, tab3);
 }
 
 /* ==========================================================================
@@ -3046,6 +3149,8 @@ export function renderImageBatchGroups(editor) {
             ? t(hintKey)
             : t(isVideo ? "batch.hint.defaultVideo" : "batch.hint.defaultImage");
     }
+    // 只有会出音频的任务才有可提取的东西（图片批次没有音频轨）。
+    editor.batchAudioExtractBtn?.classList.toggle("hidden", !isVideo);
     const externalLocked = !!(editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.());
     if (editor.batchI2vNotice) {
         const needsRefs = key === "r2i" || key === "r2v";

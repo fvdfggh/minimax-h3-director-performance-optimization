@@ -49,6 +49,7 @@ import { media_pickerMixin } from "./mixins/media_picker.js";
 import { segment_editMixin } from "./mixins/segment_edit.js";
 import { live_playbackMixin } from "./mixins/live_playback.js";
 import { ref_slotsMixin } from "./mixins/ref_slots.js";
+import { audio_pickersMixin } from "./mixins/audio_pickers.js";
 
 export class MiniMaxH3DirectorOptEditor {
     constructor(node, container, domWidget) {
@@ -624,6 +625,8 @@ Object.assign(MiniMaxH3DirectorOptEditor.prototype, fieldsMixin);
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, external_groupsMixin);
 
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, export_pickersMixin);
+
+Object.assign(MiniMaxH3DirectorOptEditor.prototype, audio_pickersMixin);
 
 Object.assign(MiniMaxH3DirectorOptEditor.prototype, run_selectionMixin);
 

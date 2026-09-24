@@ -78,70 +78,75 @@ def _job(media, container, key, raw=None):
     }
 
 
-def _extract_referenced_picture_indices(prompt: str) -> set[int]:
-    """Extract all <Picture N> indices referenced in the prompt.
-    
-    Searches for patterns like:
-    - <Picture 1>, <Picture 2>, etc.
-    - 图片1, 图片2, etc. (Chinese variant)
-    
-    Returns a set of 0-based indices (so <Picture 1> → {0}).
+def _extract_referenced_token_indices(prompt: str, token: str) -> set[int]:
+    """Extract the 0-based indices referenced in ``prompt`` as ``<Token N>``
+    (English, case-insensitive) or the Chinese ``<zh>N`` variant.
+
+    ``token`` is ``"Picture"``, ``"Video"`` or ``"Audio"``. Returns a set of
+    0-based indices, so ``<Picture 1>`` -> ``{0}``.
     """
     import re
-    
+
     if not prompt:
         return set()
-    
+
     indices = set()
-    
-    # English pattern: <Picture 1>, <Picture 2>, etc.
-    for match in re.finditer(r'<Picture\s+(\d+)>', prompt):
+
+    # English pattern: <Picture 1>, <Video 2>, <Audio 3>, ...
+    for match in re.finditer(rf"<{token}\s+(\d+)\s*>", prompt, re.IGNORECASE):
         idx = int(match.group(1)) - 1  # Convert to 0-based
         if idx >= 0:
             indices.add(idx)
-    
-    # Chinese pattern: 图片1, 图片2, etc.
-    for match in re.finditer(r'图片\s*(\d+)', prompt):
+
+    # Chinese pattern: 图片1, 视频2, 音频3, ...
+    zh = {"Picture": "图片", "Video": "视频", "Audio": "音频"}.get(token, token)
+    for match in re.finditer(rf"{zh}\s*(\d+)", prompt):
         idx = int(match.group(1)) - 1  # Convert to 0-based
         if idx >= 0:
             indices.add(idx)
-    
+
     return indices
 
 
-def _filter_ref_images_by_prompt(
-    ref_images: dict[str, Any] | None,
+def _filter_refs_by_prompt(
+    refs: dict[str, Any] | None,
     prompt: str,
+    prefix: str,
+    token: str,
 ) -> dict[str, Any] | None:
-    """Filter reference images to only those referenced in the prompt.
-    
-    ref_images format: {"ref_image_0": tensor, "ref_image_1": tensor, ...}
-    
-    This reduces VRAM usage and encoding time by skipping unreferenced materials.
+    """Filter reference materials to only those referenced in the prompt.
+
+    ``refs`` format: ``{"<prefix>0": tensor, ...}`` (e.g. ``ref_video_2``).
+
+    * Returns ``None`` when the prompt contains no reference at all to this token
+      kind — the caller then keeps every material (backward compatibility for
+      prompts that use references implicitly, without ``<Token N>`` tags).
+    * Returns the (possibly empty) filtered dict when the prompt *does* reference
+      some ``<Token N>``: materials whose index was not referenced are dropped,
+      and if none match, an empty dict is returned so nothing gets encoded.
     """
-    if not ref_images:
+    if not refs:
         return None
-    
-    referenced_indices = _extract_referenced_picture_indices(prompt)
+
+    referenced_indices = _extract_referenced_token_indices(prompt, token)
     if not referenced_indices:
-        # No references found in prompt — keep all for backward compatibility
-        return ref_images
-    
+        # No reference to this kind at all — keep all for backward compatibility.
+        return None
+
     filtered = {}
-    for key, value in ref_images.items():
+    for key, value in refs.items():
         if value is None:
             continue
-        # Extract index from "ref_image_0" → 0
+        # Extract index from "ref_video_2" -> 2
         try:
-            idx_str = key.split("_")[-1]
-            idx = int(idx_str)
+            idx = int(key.split("_")[-1])
             if idx in referenced_indices:
                 filtered[key] = value
         except (ValueError, IndexError):
             # Malformed key — skip
             continue
-    
-    return filtered if filtered else None
+
+    return filtered
 
 
 _REF_IMG_PREFIX = "ref_image_"
@@ -244,17 +249,55 @@ def prepare_segment_materials(
     ref_video_audios = ref_video_audios or {}
     ref_audios = ref_audios or {}
     
-    # Filter ref_images to only those referenced in the prompt (R2V optimization)
-    if task_key in {"r2v", "v2v", "rv2v"} and ref_images:
-        orig_count = len(ref_images)
-        filtered = _filter_ref_images_by_prompt(ref_images, prompt)
-        if filtered:
-            ref_images = filtered
-            log.debug(
-                "R2V ref_images filtered by prompt: %d → %d items",
-                orig_count,
-                len(filtered),
-            )
+    # Filter every reference kind to only those referenced in the prompt (R2V
+    # optimization). A segment may carry materials it does not actually use, and
+    # the video / audio VAE + ViT passes are expensive, so drop anything the
+    # prompt does not reference (<Picture N> / <Video N> / <Audio N>, plus the
+    # Chinese 图片N / 视频N / 音频N variants).
+    if task_key in {"r2v", "v2v", "rv2v"}:
+        if ref_images:
+            orig_count = len(ref_images)
+            filtered = _filter_refs_by_prompt(ref_images, prompt, _REF_IMG_PREFIX, "Picture")
+            if filtered is not None:
+                ref_images = filtered
+                log.debug(
+                    "R2V ref_images filtered by prompt: %d -> %d items",
+                    orig_count,
+                    len(ref_images),
+                )
+        if ref_videos:
+            orig_count = len(ref_videos)
+            filtered = _filter_refs_by_prompt(ref_videos, prompt, _REF_VID_PREFIX, "Video")
+            if filtered is not None:
+                ref_videos = filtered
+                log.debug(
+                    "R2V ref_videos filtered by prompt: %d -> %d items",
+                    orig_count,
+                    len(ref_videos),
+                )
+        if ref_audios:
+            orig_count = len(ref_audios)
+            filtered = _filter_refs_by_prompt(ref_audios, prompt, _REF_AUD_PREFIX, "Audio")
+            if filtered is not None:
+                ref_audios = filtered
+                log.debug(
+                    "R2V ref_audios filtered by prompt: %d -> %d items",
+                    orig_count,
+                    len(ref_audios),
+                )
+        if ref_video_audios:
+            # Paired soundtracks are keyed by the video's absolute index, so keep
+            # only those whose video survived the prompt filter above.
+            vid_ref = _extract_referenced_token_indices(prompt, "Video")
+            if vid_ref:
+                kept = {
+                    k: v for k, v in ref_video_audios.items()
+                    if k.startswith(_REF_VAUD_PREFIX)
+                    and int(k[len(_REF_VAUD_PREFIX):]) in vid_ref
+                }
+                if kept:
+                    ref_video_audios = kept
+            # (no <Video> token anywhere -> keep all, backward compatibility)
 
     # Renumber the actually-passed materials to gap-free 1..N and rewrite the
     # prompt tokens so MiniMax's <Picture N> numbering lines up with the payload,

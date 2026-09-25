@@ -6,6 +6,7 @@ import logging
 
 import comfy.samplers
 
+from ..director.asr_check import ASR_MODEL_TYPE, run_asr_check
 from ..director.batch_executor import execute_director_batch
 from ..director.second_sampling import (
     DEFAULT_SECOND_SIGMA_SAMPLER,
@@ -26,6 +27,26 @@ from .director_common import (
 _CATEGORY = "MiniMaxH3 Opt"
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.nodes")
+
+
+def _append_asr_report(result, plan, asr_model, enabled: bool):
+    """Append the「音频有效性校验」verdict to the report output.
+
+    ``result`` is the 6-tuple ``finalize_director_outputs`` returns; index 1 is
+    the AUDIO list and index 5 the report string. Never raises and never drops
+    a generated frame — a failing check only costs a line of text.
+    """
+    if not enabled or asr_model is None or not isinstance(result, tuple) or len(result) < 6:
+        return result
+    try:
+        audios = list(result[1] or [])
+        note = run_asr_check(plan, audios, asr_model)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("音频有效性校验: 未预期的失败 (%s)", exc, exc_info=True)
+        note = f"音频有效性校验 (ASR): 未预期的失败 — {type(exc).__name__}: {exc}"
+    out = list(result)
+    out[5] = f"{out[5]}\n\n{note}" if out[5] else note
+    return tuple(out)
 
 _DEFAULT_GLOBAL_PROMPT = "A cinematic scene with natural motion and synchronized ambience"
 
@@ -332,6 +353,34 @@ class MiniMaxH3DirectorOpt:
                         ),
                     },
                 ),
+                # ── 音频有效性校验（ASR）—— 放在 optional 最末尾 ──────────────
+                # asr_model 是 forceInput 的自定义口（不占 widget 下标）；asr_check
+                # 是 BOOLEAN widget，必须留在最后，否则旧工作流 widgets_values 错位。
+                "asr_model": (
+                    ASR_MODEL_TYPE,
+                    {
+                        "forceInput": True,
+                        "tooltip": (
+                            "ASR 模型：接 MOSS 转写说话人模型加载器 (T8_MOSS_ModelLoader) 的 model 口。"
+                            "未接线时「判断音频有效性」自动跳过，不影响出片。"
+                        ),
+                    },
+                ),
+                "asr_check": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "判断音频有效性：开启后把所有生成片段的音轨拼成一整条送 ASR 识别，"
+                            "再与提示词里的台词块逐说话人比对（错误率 + 说话人是否对得上）。"
+                            "台词必须严格写成 "
+                            "<Subject 1> (S1) says: <d>[Chinese] 台词</d> —— "
+                            "格式正确时前端会渲染成带框的说话人卡片，格式不对就当普通文本，"
+                            "不会参与校验。长音频按提示词中说话人首次出现的顺序确定谁是谁。"
+                            "拼接后超过 30 秒会自动改走分块长音频识别，报告里会写明本次用的是哪种。"
+                        ),
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -407,6 +456,8 @@ class MiniMaxH3DirectorOpt:
         second_sigmas=None,
         second_denoise=1.0,
         second_seed=SECOND_SEED_FIXED,
+        asr_model=None,
+        asr_check=False,
         **kwargs,
     ):
         del kwargs  # dropped widgets (batch_mode / use_conditioning_cache / ...) land here
@@ -582,7 +633,7 @@ class MiniMaxH3DirectorOpt:
                     _report,
                     export_source_images=EXPORT_SOURCE_IMAGES,
                 )
-            return result
+            return _append_asr_report(result, plan, asr_model, bool(asr_check))
 
         model, model_note = resolve_run_model(
             run_model, model=model, model_b=model_b, model_c=model_c
@@ -624,6 +675,7 @@ class MiniMaxH3DirectorOpt:
             segment_audios=segment_audios,
             segment_frame_counts=export_frame_counts,
         )
+        result = _append_asr_report(result, plan, asr_model, bool(asr_check))
 
         # 「分段导出」不再另外写磁盘：节点 OUTPUT 已由 finalize_director_outputs
         # 通过 segment_outputs 直接输出（与「运行」一致），batch / normal 两条路径

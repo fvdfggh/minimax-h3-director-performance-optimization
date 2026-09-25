@@ -12,6 +12,17 @@ import { viewUrl } from "./core/utils.js";
 const TAG_RE = /<(Picture|Video|Audio)\s+(\d+)\s*>/gi;
 const TOKEN_CLASS = "bd-token";
 
+/** Strict speaking line: <Subject 1> (S1) says: <d>[Chinese] 台词</d>
+ *
+ * Same grammar the backend's ``director/asr_check.py`` validates against. The
+ * two regexes have no shared source, so a change here MUST be mirrored in the
+ * backend's ``SPEECH_RE`` (and vice versa) — otherwise the chip renders but the
+ * check ignores the line, or the check grades text that never became a chip.
+ * It is deliberately strict: a block that does not match stays plain text, so
+ * a typo is never silently promoted to a line the ASR check will grade.
+ */
+const SPEECH_RE = /<Subject\s+(\d+)\s*>\s*\(\s*S(\d+)\s*\)\s*says\s*:\s*<d>\s*\[([^\]]*)\]\s*([\s\S]*?)\s*<\/d>/gi;
+
 const MENTION_STYLES = `
 .bd-mention-menu{position:fixed;z-index:10050;min-width:210px;max-width:300px;max-height:240px;overflow:auto;background:#252525;border:1px solid #444;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px 0}
 .bd-mention-menu.hidden{display:none!important}
@@ -94,6 +105,18 @@ body.bd-token-resizing{cursor:ns-resize!important;user-select:none!important}
 }
 .bd-token.is-missing{opacity:.62;border-style:dashed}
 .bd-token.is-missing .bd-token-label{text-decoration:line-through;text-decoration-color:rgba(255,255,255,.35)}
+.bd-token.bd-token-say{
+  display:inline-flex;align-items:stretch;gap:0;max-width:100%;margin:2px 0;padding:0;
+  border-radius:4px;vertical-align:top;overflow:hidden;
+  border:1px solid #8b6ee0;background:rgba(139,110,224,.14);color:#e8e2ff;
+  font-size:11px;line-height:1.45;user-select:none;cursor:default
+}
+.bd-token-say-who{
+  display:inline-flex;align-items:center;flex-shrink:0;padding:2px 7px;
+  background:rgba(139,110,224,.45);color:#f4f0ff;font-weight:700;font-size:10px;letter-spacing:.02em
+}
+.bd-token-say-text{padding:2px 8px;white-space:pre-wrap;word-break:break-word}
+.bd-token-say.is-empty .bd-token-say-text{color:#b9a9e8;font-style:italic}
 .bd-token-thumb{
   width:16px;height:16px;border-radius:3px;object-fit:cover;flex-shrink:0;background:#111;border:1px solid rgba(0,0,0,.35)
 }
@@ -323,6 +346,67 @@ function makeTokenChip(kind, ordinal1, mediaItem, { onActivate } = {}) {
     return chip;
 }
 
+/** One <Subject N> (SN) says: <d>[lang] text</d> block → a boxed speaker card. */
+function makeSpeechChip(subject, speaker, lang, text, raw) {
+    const chip = document.createElement("span");
+    chip.className = `${TOKEN_CLASS} bd-token-say`;
+    chip.contentEditable = "false";
+    // dataset.tag is what serializeTokenEditor reads back — the verbatim block,
+    // so round-tripping never rewrites what the user (or an older build) typed.
+    chip.dataset.tag = raw;
+    chip.dataset.kind = "say";
+    chip.dataset.subject = String(subject);
+    chip.dataset.speaker = String(speaker);
+    chip.title = `S${speaker} · Subject ${subject}${lang ? ` · ${lang}` : ""}`;
+
+    const who = document.createElement("span");
+    who.className = "bd-token-say-who";
+    who.textContent = `S${speaker}`;
+    chip.appendChild(who);
+
+    const body = document.createElement("span");
+    body.className = "bd-token-say-text";
+    const flat = String(text || "").replace(/\s+/g, " ").trim();
+    body.textContent = flat || "…";
+    chip.classList.toggle("is-empty", !flat);
+    chip.appendChild(body);
+
+    chip.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        const editor = chip.closest(".bd-token-editor");
+        if (!editor) return;
+        const range = document.createRange();
+        const rect = chip.getBoundingClientRect();
+        if (event.clientX < rect.left + rect.width / 2) range.setStartBefore(chip);
+        else range.setStartAfter(chip);
+        range.collapse(true);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        editor.focus();
+    });
+
+    return chip;
+}
+
+/** Text between two speaking lines: plain text + <Picture N> / <Video K> / <Audio J>. */
+function hydrateTagChunk(parent, chunk, items, options) {
+    TAG_RE.lastIndex = 0;
+    let cursor = 0;
+    let match;
+    while ((match = TAG_RE.exec(chunk))) {
+        if (match.index > cursor) {
+            appendTextWithBreaks(parent, chunk.slice(cursor, match.index));
+        }
+        const kind = kindFromTagType(match[1]);
+        const ordinal1 = Number(match[2]) || 1;
+        const item = findMentionItem(items, kind, ordinal1);
+        parent.appendChild(makeTokenChip(kind, ordinal1, item, options));
+        cursor = match.index + match[0].length;
+    }
+    if (cursor < chunk.length) appendTextWithBreaks(parent, chunk.slice(cursor));
+}
+
 /** Serialize editor DOM → official prompt string. */
 export function serializeTokenEditor(editor) {
     if (!editor) return "";
@@ -357,20 +441,23 @@ export function hydrateTokenEditor(editor, text, getMedia, options = {}) {
     const items = listAvailableMentions(media.refs, media.audios, media.videos);
     const source = String(text ?? "");
     editor.textContent = "";
+    // Speaking lines are matched first: their body may wrap across lines and
+    // must never be re-scanned for <Picture N> tags.
+    SPEECH_RE.lastIndex = 0;
     let cursor = 0;
-    TAG_RE.lastIndex = 0;
     let match;
-    while ((match = TAG_RE.exec(source))) {
+    while ((match = SPEECH_RE.exec(source))) {
         if (match.index > cursor) {
-            appendTextWithBreaks(editor, source.slice(cursor, match.index));
+            hydrateTagChunk(editor, source.slice(cursor, match.index), items, options);
         }
-        const kind = kindFromTagType(match[1]);
-        const ordinal1 = Number(match[2]) || 1;
-        const item = findMentionItem(items, kind, ordinal1);
-        editor.appendChild(makeTokenChip(kind, ordinal1, item, options));
+        editor.appendChild(
+            makeSpeechChip(match[1], match[2], match[3], match[4], match[0]),
+        );
         cursor = match.index + match[0].length;
     }
-    if (cursor < source.length) appendTextWithBreaks(editor, source.slice(cursor));
+    if (cursor < source.length) {
+        hydrateTagChunk(editor, source.slice(cursor), items, options);
+    }
     // Leave truly empty so CSS :empty placeholder works; caret still works on empty contenteditable.
 }
 
@@ -380,6 +467,8 @@ function refreshTokenStates(editor, getMedia) {
     const items = listAvailableMentions(media.refs, media.audios, media.videos);
     for (const chip of editor.querySelectorAll(`.${TOKEN_CLASS}`)) {
         const kind = chip.dataset.kind || "image";
+        // Speaking lines carry no media item — their label is the spoken text.
+        if (kind === "say") continue;
         const ordinal1 = Number(chip.dataset.ordinal) || 1;
         const item = findMentionItem(items, kind, ordinal1);
         chip.classList.toggle("is-missing", !item);

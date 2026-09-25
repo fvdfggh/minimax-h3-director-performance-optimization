@@ -1,35 +1,33 @@
-# MiniMax H3 Director — 示例工作流
+# 示例工作流
 
-拖入 ComfyUI 画布即可使用。需已安装本插件，且 ComfyUI 主干含 MiniMax H3（v0.30.0+）。
+把 `.json` 直接拖进 ComfyUI 画布即可打开。打开后请按自己机器上的模型文件名，重新选择
+`UNETLoader` / `VAELoader` / `CLIPLoader` 里的模型与 VAE。
 
-| 文件 | 任务 | UNET | 说明 |
-|------|------|------|------|
-| `minimax_h3_director_t2v.json` | t2v | fl2va | 文生音视频，可直接 Queue |
-| `minimax_h3_director_fl2v.json` | fl2v | fl2va | 首尾帧；「添加一组」后上传首帧和/或尾帧（可只传尾帧） |
-| `minimax_h3_director_r2v.json` | r2v | **ref2va** | 参考改视频；素材组：图片1–9 / 音频1–3 / 视频1–3 |
-| `minimax_h3_director_v2v.json` | v2v | **ref2va** | 源视频编辑；导演台上传视频并分段（同 Bernini v2v） |
-| `minimax_h3_director_rv2v.json` | rv2v | **ref2va** | 参考改视频；源视频 + 图片1–9 |
-| `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | 外部 Group（Image to Video）→ Combine → Director.`i2v_groups`；时长/素材以接线为准 |
-| `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | 外部 Group（Reference to Video）→ Combine → Director.`r2v_groups`；可用「选择运行」勾选组序 |
+所有工作流都基于同一条官方 MiniMax H3 管线：Director 节点出 `images` / `audio`，
+再接 `VHS_VideoCombine`（或 `SaveImage` / `SaveAudio`）保存。
 
-## 模型路径（与官方模板一致）
+| 文件 | 任务 | 说明 |
+|---|---|---|
+| `minimax_h3_director_t2v.json` | t2v | 纯文生音视频，最小可用配置 |
+| `minimax_h3_director_r2v.json` | r2v | 参考图生视频：提示词里用 `<Picture N>` 指代参考槽 |
+| `minimax_h3_director_fl2v.json` | fl2v | 首尾帧镜头组：每个镜头一张首帧 + 可选尾帧 |
+| `minimax_h3_director_v2v.json` | v2v | 上传源视频，按时间轴分段编辑（每段源画面作为 `<Video 1>`） |
+| `minimax_h3_director_rv2v.json` | rv2v | 源视频 + 参考图 / 参考音频一起改视频 |
+| `minimax_h3_director_external_groups_i2v.json` | i2v | 用 `Group (Image to Video)` + `Groups Combine` 从图上接线喂给 Director |
+| `minimax_h3_director_external_groups_r2v.json` | r2v | 用 `Group (Reference to Video)` + `Groups Combine` 从图上接线喂给 Director |
+| `minimax_h3_director_加速版.json` | — | 更快的参数组合（更保守的片段长度 / 采样设置），用于快速验证管线是否跑通 |
 
-| 用途 | 文件名 | 目录 |
-|------|--------|------|
-| UNET (t2v/i2v/fl2v) | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
-| UNET (r2v / v2v / rv2v) | `minimax_h3_ref2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
-| CLIP | `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | `models/text_encoders/` |
-| Video VAE | `minimax_h3_video_vae_fp16.safetensors` | `models/vae/` |
-| Audio VAE | `minimax_h3_audio_vae_fp32.safetensors` | `models/vae/` |
+## 使用步骤
 
-CLIP Loader 的 **type 必须选 `minimax`**。
+1. 拖入工作流 → 补上缺失的模型（UNET、视频 VAE、音频 VAE、CLIP type=minimax）。
+2. 选中 Director 节点，在节点内的时间轴上填提示词、上传素材。
+3. 需要出文件时，确认 `images` / `audio` 已接到保存节点。
+4. 按 **Run** 入队；进度、采样预览与最终报告都显示在节点上。
 
-## 默认采样参数
+## 提示
 
-- 画布默认 **0.4MP 16:9（864×480）**，**5 秒 / 124** 帧 @ **24 fps**（17k+5 网格）
-- **25** steps，`res_multistep` + `simple`，CFG **1.0**
-- Sigma shift：video **12** / audio **3**
-
-## 输出
-
-导演台 → `CreateVideo` → `SaveVideo`（前缀 `video/MiniMaxH3_Director_*`），报告接 `PreviewAny`。
+- 首次运行会写缓存到 `output/minimax_director_opt_cache/<工作流名>/node_<id>/`；换机器 / 换源视频后
+  相关片段会自动重算。
+- 只想重跑某几段，用工具栏的「选择运行」勾选后再 Run。
+- 已经跑过的片段可以用「分段导出」直接输出到节点，不再采样。
+- 想放大出片，接 `Minimax H3 Latent Upscaler Opt (3D) [Model]` 后用「二次采样」。

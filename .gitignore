@@ -29,3 +29,6 @@ Thumbs.db
 # Local seam / debug probe dumps (do not publish)
 _seam_probe/
 _seam_probe_*/
+
+# Local archive of superseded documents (do not publish; docs are rewritten from code)
+_archive/

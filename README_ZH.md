@@ -1,7 +1,3 @@
-# 中文文档已移至默认 README
+# 中文文档
 
-本仓库默认文档为中文，请直接查看：
-
-→ **[README.md](README.md)**
-
-English version: [README_EN.md](README_EN.md)
+中文说明请见 [`README.md`](README.md)，英文说明见 [`README_EN.md`](README_EN.md)。

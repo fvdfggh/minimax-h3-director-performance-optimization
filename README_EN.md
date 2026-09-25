@@ -1,187 +1,465 @@
-# ComfyUI MiniMax H3 Director
+# ComfyUI MiniMax H3 Director Opt
 
-Multi-segment AV timeline director for **official ComfyUI MiniMax-H3**.  
-Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director)
+A multi-segment **timeline Director** node pack built on ComfyUI's **official MiniMax H3 pipeline**
+(`MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo`, ComfyUI PR #15224 / #15228). It adds an
+in-node timeline editor, per-segment caching, segment continuity, a second sampling pass and
+audio/video export on top of that pipeline.
 
-**中文文档** → [README.md](README.md)
+- Upstream project: `AIMixer/ComfyUI_MiniMaxH3_Director` (author: AI搅拌手)
+- **Opt fork author: fvdfggh**
+- Repository: <https://github.com/fvdfggh/minimax-h3-director-performance-optimization>
+- License: Apache-2.0 (see `LICENSE`)
 
-![MiniMaxH3Director workflow screenshot](docs/screenshot.png)
+> Every node type id, display name, HTTP route, frontend event and cache root in this fork carries
+> the `Opt` marker, so it can be installed **side by side** with the original pack without collisions.
+
+---
 
 ## Features
 
-**MiniMaxH3Director** is a single-node director for long-form, multi-segment MiniMax H3 audio–video generation — timeline planning, conditioning, sampling, AV decode, and export in one place. It wraps the official `MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo` + `MiniMaxH3SigmaShift` + `KSampler` pipeline with native stereo audio.
+- **In-node timeline**: upload a source clip → split / equal-split / smart-split → write per-segment
+  prompts and attach reference images / audio / videos → queue the run.
+- **Official H3 pipeline**: conditioning goes through `MiniMaxH3ImageToVideo` /
+  `MiniMaxH3ReferenceToVideo`; sampling is a single KSampler with `MiniMaxH3SigmaShift`; decoding
+  splits the AV latent via `LTXVSeparateAVLatent`, so picture and sound come out together.
+- **Six tasks**: `t2v`, `i2v`, `fl2v`, `r2v`, `v2v`, `rv2v`.
+- **Per-segment cache** keyed by content fingerprint — editing one segment re-renders only that
+  segment. Cache lives in `output/minimax_director_opt_cache/<workflow slug>/node_<id>/`.
+- **Segment continuity (段间引导)**: the previous segment's tail is written into this segment's body
+  prefix and re-drawn (continue mode), with a 5 / 22 / 39 / 56-frame context window.
+- **Second sampling (二采)**: upscale + re-sample already cached segments into their own `seg2_*`
+  cache — the first pass is never overwritten.
+- **Segment export**: check segments and get the clips straight on the node's `images` / `audio`
+  outputs (piecewise or continuous, first- or second-pass source).
+- **Audio modes**: `generate` (model audio) / `source` (original soundtrack) / `mute`, plus
+  extract-audio and retain-audio.
+- **Audio validity check (ASR)**: with a MOSS transcribe model wired, the generated soundtrack is
+  compared against the prompt's speaking lines, speaker by speaker.
+- **Director pack (`.mmxpack.zip`)**: timeline + assets export/import, layout-compatible with the
+  upstream pack.
+- **External Group nodes**: wire `MMX_DIR_GROUP` from the graph; external groups take priority over
+  the in-node UI cards.
 
-### Core capabilities
+---
 
-| Feature | Description |
-|---------|-------------|
-| **Multi-segment timeline** | Upload video in-node; split, equal-split, smart shot-split (PySceneDetect), append; selectable/deletable split points; visual timeline with thumbs |
-| **Task modes** | `t2v`, `i2v`, `fl2v` (first/last frame), `r2v` (reference material groups), `v2v` (video-to-video), `rv2v` (reference-guided source edit) |
-| **First/last frame (fl2v)** | Dedicated shot groups: prompt-only (text-to-video), or start and/or end (official FL2VA allows end-only). With segment continuity + From prev, an empty shot pins the previous tail (N context frames) for motion/audio handoff; drag edges for duration; run-select per group |
-| **Reference groups (r2v)** | fl2v-style groups: top **Common params** share refs/audio and a common prompt (concatenated with each group prompt); each group may add images 1–9 / audios 1–3 / videos 1–3; prompt tags `<Picture N>` / `<Video K>` / `<Audio J>` (or `@` picker); timeline preview synced with card selection |
-| **Source-video edit (v2v / rv2v)** | Bernini-style source timeline; each segment bound as `<Video 1>`; `rv2v` adds optional refs (images 1–9, audios 1–3) |
-| **Run select** | Sample only checked segments/groups; unselected may use cache or source passthrough when exporting all |
-| **External multi-group inputs** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`; wire into `i2v_groups` / `r2v_groups` for external-priority batches with run-select |
-| **Native stereo audio** | Generated with the picture; `v2v`/`rv2v` can generate / keep source / mute |
-| **Segment continuity** | Off by default. For multi-segment `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v`, pin the previous generated tail (motion + generated audio) into the next sample, then trim the prefix. Context frames: 5 / 22 / 39 / 56 — **recommended default: 22**. **Thanks to [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) for the implementation approach** |
-| **Run report** | `report` output with plan and per-segment summary |
+## Install
 
-Reference-audio slots can select an existing video or a local audio/video file. A video's first audio stream is extracted immediately to FLAC directly under `input/`; local source videos remain temporary and are not saved as video assets. Audio follows ComfyUI's existing upload rule: identical content with the same name is reused, while different content with the same name gets a numeric suffix without overwriting; the same resolved audio path is not added twice within one material group.
-
-### Inputs / outputs
-
-**Inputs:** `model` → `video_vae` → `audio_vae` → `clip`  
-**Optional:** `i2v_groups` (Image to Video packs) / `r2v_groups` (Reference to Video packs)
-
-**Outputs:** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report`
-
-> CLIP Loader **type must be `minimax`** (Qwen3-VL).  
-> Use **fl2va** UNET for `t2v` / `i2v` / `fl2v`; **ref2va** for `r2v` / `v2v` / `rv2v`.
-
-`Export source to source_images` populates only the separate `source_images` output; it does not change `images`. Connect `source_images` to a preview or video compositor. Decode failures are reported explicitly and emit a neutral placeholder instead of generated frames.
-
-## Requirements
-
-**ComfyUI ≥ v0.30.0** with official MiniMax H3 nodes ([PR #15224](https://github.com/comfyanonymous/ComfyUI/pull/15224), [PR #15228](https://github.com/comfyanonymous/ComfyUI/pull/15228)).
-
-Optional: `scenedetect`, `opencv-python-headless`, `imageio-ffmpeg` — see `requirements.txt`.
-
-## Installation
-
-### Method 1: Manual (standard)
-
-```bash
+```powershell
 cd ComfyUI/custom_nodes
-git clone https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director.git
-
-pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
+git clone https://github.com/fvdfggh/minimax-h3-director-performance-optimization ComfyUI_MiniMaxH3_Director_Opt
+pip install -r ComfyUI_MiniMaxH3_Director_Opt/requirements.txt
 ```
 
-Restart ComfyUI.
+Dependencies (`requirements.txt`):
 
-### Method 2: ComfyUI Manager
+| Package | Used for |
+|---|---|
+| `av>=13.0` | source-video decode for v2v / timelines (ships with the ComfyUI portable build; OpenCV is deliberately NOT used) |
+| `imageio-ffmpeg>=0.4` | source-audio extraction, incremental segment mp4 encoding |
+| `scenedetect>=0.6.4,<0.8` | smart split (shot detection) |
 
-1. Open **ComfyUI Manager**
-2. Choose **Install via Git URL**
-3. Enter `https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director.git` and install
-4. Restart ComfyUI
+Restart ComfyUI; the frontend (`web/js`, extension `ComfyUI.MiniMaxH3DirectorOptPlugin`) loads
+automatically.
 
-## Models & workflow downloads
+---
 
-Full pack (**MiniMax H3 weights** + **example JSON workflows**):
+## Required models
 
-**[Comfyit · article 506 — MiniMax H3 models & workflows](https://comfyit.cn/article/506)**
+| Socket | Type | Notes |
+|---|---|---|
+| `model` (`model_b`, `model_c`) | MODEL | MiniMax H3 UNET (`UNETLoader`). `model` is required and is the fallback for an unwired backup slot |
+| `video_vae` | VAE | MiniMax H3 video VAE (`minimax_h3_video_vae`) |
+| `audio_vae` | VAE | MiniMax H3 audio VAE (`minimax_h3_audio_vae`); required for `r2v` / `v2v` / `rv2v` |
+| `clip` | CLIP | `CLIPLoader` type=minimax (qwen3vl) |
+| `upscale_model` | LATENT_UPSCALE_MODEL | second sampling only — `Minimax H3 Latent Upscaler Opt (3D) [Model]` |
+| `asr_model` | T8_MOSS_TRANSCRIBE_MODEL | optional, from `Comfyui-MOSS-Transcribe-Diarize-T8` |
 
-Merge `models/` into `ComfyUI/models/`, then drag a JSON workflow into ComfyUI.
+ComfyUI must also ship `comfy_extras.nodes_minimax_h3` (official MiniMax H3 nodes); otherwise the
+node fails with “Upgrade to ComfyUI with PR #15224 merged”.
 
-Also available:
+Second sampling and the two Autogrow Group nodes need `comfy_api.latest` (V3 node API); without it
+the latent-upscale model node is not registered and the R2V group falls back to static slots.
 
-- **Hugging Face:** [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)
-- **ComfyUI docs:** [MiniMax H3 workflows](https://docs.comfy.org/tutorials/video/minimax/minimax-h3)
-
-This repo ships examples under `example_workflows/`:
-
-| Workflow | task_type | UNET | Notes |
-|----------|-----------|------|--------|
-| `minimax_h3_director_t2v.json` | t2v | fl2va | Text to AV |
-| `minimax_h3_director_fl2v.json` | fl2v | fl2va | First/last frame groups |
-| `minimax_h3_director_r2v.json` | r2v | **ref2va** | Reference material groups |
-| `minimax_h3_director_v2v.json` | v2v | **ref2va** | Source-video timeline edit |
-| `minimax_h3_director_rv2v.json` | rv2v | **ref2va** | Source + reference images/audio |
-| `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | External Group×2 → Combine → `i2v_groups` |
-| `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | External Group×N → Combine → `r2v_groups` |
-
-### Recommended model files
-
-| Role | Filename | Directory |
-|------|----------|-----------|
-| UNET (t2v / i2v / fl2v) | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
-| UNET (r2v / v2v / rv2v) | `minimax_h3_ref2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
-| CLIP | `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | `models/text_encoders/` |
-| Video VAE | `minimax_h3_video_vae_fp16.safetensors` | `models/vae/` |
-| Audio VAE | `minimax_h3_audio_vae_fp32.safetensors` | `models/vae/` |
+---
 
 ## Quick start
 
-1. Ensure ComfyUI ≥ **0.30.0** with MiniMax H3 nodes
-2. Load an example from [article 506](https://comfyit.cn/article/506) or `example_workflows/`
-3. Connect UNET / CLIP / video_vae / audio_vae, edit the timeline UI, Queue
+1. Add **MiniMaxH3Director Opt** (category `MiniMaxH3 Opt`).
+2. Wire `model`, `video_vae`, `audio_vae`, `clip`.
+3. In the node, pick a task type, write the global (or per-segment) prompt and upload assets.
+4. Connect `images` / `audio` to `VHS_VideoCombine` (or `SaveImage` / `SaveAudio`).
+5. Queue with ComfyUI's **Run**; progress and live sampling previews show on the node.
 
-**Video tutorial:** [Bilibili playlist · plugin usage](https://space.bilibili.com/1997403556/lists/8357740)
+Defaults: 864×480 (0.4 MP 16:9), 124 frames @ 24 fps, cfg 1.0, 25 steps, `res_multistep` + `simple`,
+`shift_video=12` / `shift_audio=3` (matching the official template).
 
-### Default sampling
+---
 
-- Canvas default **0.4MP 16:9 (864×480)**, **5s / 124** frames @ **24 fps** (17k+5 grid)
-- **25** steps, `res_multistep` + `simple`, CFG **1.0**
-- Sigma shift: video **12** / audio **3**
+## Node list
 
-### First/last frame (fl2v) — short guide
+| Type id | Display name | Category | Outputs |
+|---|---|---|---|
+| `MiniMaxH3DirectorOpt` (legacy id `ComfyMiniMaxH3DirectorOpt` still loads) | MiniMaxH3Director Opt | `MiniMaxH3 Opt` | `images`, `audio`, `fps`, `frame_count`, `source_images`, `report` |
+| `MiniMaxH3DirectorOptConditioning` | MiniMax H3 Director Opt Conditioning | `MiniMaxH3 Opt` | `positive`, `latent` |
+| `MiniMaxH3DirectorOptPlannerConditioning` | MiniMax H3 Director Opt Planner Conditioning | `MiniMaxH3 Opt` | `positive`, `latent`, `task_mode` |
+| `MiniMaxH3DirectorOptGroupImageToVideo` | MiniMax H3 Director Opt Group (Image to Video) | `MiniMaxH3 Opt/Director Groups` | `group` |
+| `MiniMaxH3DirectorOptGroupReferenceToVideo` | MiniMax H3 Director Opt Group (Reference to Video) | `MiniMaxH3 Opt/Director Groups` | `group` |
+| `MiniMaxH3DirectorOptGroupsCombine` | MiniMax H3 Director Opt Groups Combine | `MiniMaxH3 Opt/Director Groups` | `groups` |
+| `MiniMaxH3FastVideoVAEOpt` | MiniMax H3 Fast Video VAE Opt | `MiniMaxH3 Opt` | `vae` |
+| `MiniMaxH3LatentUpscaleModelOpt` | Minimax H3 Latent Upscaler Opt (3D) [Model] | `MiniMaxH3 Opt` | `upscale_model` |
 
-1. Set task type to **First/Last Frame to Video (fl2v)**
-2. Click **Add group**: prompt-only (text-to-video), or upload start and/or end (end-only OK; start-only = i2v)
-3. With multiple groups, turn on **Segment continuity** and check **From prev** — an empty shot pins the previous tail (N context frames, default 22)
-4. Adjust duration on the shot card or timeline; write mid-shot motion / camera / transition in the prompt
-5. Queue; with multiple groups, use **Run select** to sample only some of them
+`images`, `audio` and `source_images` are **lists** (`OUTPUT_IS_LIST`): in segments export mode each
+clip is one entry.
 
-### Reference groups (r2v) — short guide
+### Group nodes (external wiring)
 
-1. Set task type to **Reference to Video (r2v)** (**ref2va** UNET + audio_vae)
-2. Click **Enable common params** (collapsed/off by default); upload shared refs/audio and write a common prompt (e.g. character lock / `subject_definitions`); when enabled it is concatenated with each group prompt
-3. Click **Add material group**; write per-shot prompts and optionally add group-only assets (same slot overrides common)
-4. In prompts use `<Picture N>` / `<Video K>` / `<Audio J>`, or type `@` (with common params on, picker includes common + group assets)
-5. Timeline previews group duration/thumbs; Run-select stays in sync with group checkboxes
+- **Group (Image to Video)** — `prompt` + `duration_sec` + optional `first_frame` / `last_frame`.
+  No frames = t2v; first only = i2v; any last frame = fl2v.
+- **Group (Reference to Video)** — `prompt` + `duration_sec` + Autogrow slots: reference images ≤ 9,
+  reference videos ≤ 3, reference video audios ≤ 3, standalone reference audios ≤ 3 (same UX as the
+  official R2V node).
+- **Groups Combine** — fan several groups into one list; **do not mix** i2v and r2v groups in one list.
 
-### Source video (v2v / rv2v) — short guide
+Wiring `i2v_groups` / `r2v_groups` overrides the in-node UI cards. Output size is always controlled
+by the Director node, never by the group packers.
 
-1. Choose **v2v** or **rv2v**, upload a source video and split segments (cut / equal-split / smart split)
-2. Write a prompt per segment; the source clip is bound as `<Video 1>` automatically
-3. For `rv2v`, optionally add reference images / audio; audio mode can be generate / source / mute
+---
 
-### External multi-group wiring
+## Director node parameters
 
-Mirror the two official conditioning nodes and feed **multi-group** batches into the Director:
+### Required
 
-1. Add **`MiniMax H3 Director Group (Image to Video)`** or **`(Reference to Video)`**
-2. Wire per group: `prompt` / `duration_sec`; I2V family uses `first_frame` / `last_frame` (none=t2v, first only=i2v, last only or both=fl2v); R2V uses Autogrow slots (same as official Reference to Video: images ≤9, videos ≤3, audios ≤3). Output size is set on the **Director**
-3. Batch with **`Director Groups Combine`** (Autogrow slots, same UX as official Reference to Video) → Director `i2v_groups` / `r2v_groups`; a single `group` can connect to the Director directly
-4. Match `task_type` to the port (t2v/i2v/fl2v ↔ `i2v_groups`; r2v ↔ `r2v_groups`); do not connect both ports at once
-5. When linked, graph wiring overrides UI cards (external priority); Run-select still applies by group index
+| Widget | Default | Notes |
+|---|---|---|
+| `model` / `video_vae` / `audio_vae` / `clip` | — | see “Required models” |
+| `task_type` | `t2v — 文生视频(Text to Video)` | one of six |
+| `global_prompt` | `A cinematic scene with natural motion and synchronized ambience` | sent straight to the H3 nodes |
+| `cfg` | 1.0 | KSampler cfg |
+| `seed` | 0 | supports control_after_generate |
+| `frame_rate` | 24.0 | timeline / output fps |
+| `width` / `height` | 864 / 480 | step 32 |
+| `ref_max_size` | 864 | long edge for the `long_edge` scaling mode |
+| `total_frames` | 124 | timeline length (fl2v = sum of shots) |
+| `timeline_data` | — | internal; written by the frontend timeline (hidden in the UI) |
 
-## Ecosystem · [Comfyit](https://comfyit.cn/)
+### Optional
 
-[Comfyit](https://comfyit.cn/) provides environment, models, workflows, and tutorials:
+| Widget | Default | Notes |
+|---|---|---|
+| `run_model` | main model | which MODEL socket samples: `model` / `model_b` / `model_c`; an unwired pick falls back to `model` |
+| `model_b` / `model_c` | — | backup UNET 1 / 2 |
+| `i2v_groups` / `r2v_groups` | — | external group packs (priority over UI cards) |
+| `steps` | 25 | sampling steps |
+| `sampler` | `res_multistep` | KSampler sampler |
+| `scheduler` | `simple` | scheduler |
+| `shift_video` / `shift_audio` | 12.0 / 3.0 | `MiniMaxH3SigmaShift` |
+| `sigmas` + `use_sigmas` | off | custom noise schedule (`BasicScheduler` / `ManualSigmas`). When on: steps = `len(sigmas)-1`, denoise is fixed at 1.0 and `steps` / `scheduler` are ignored; an unwired or unparsable input falls back to defaults |
+| `conn_noise` | off | segment taper-redraw switch (see Continuity) |
+| `upscale_model` | — | **mandatory** for second sampling; the run errors out without it |
+| `second_sigmas` | unwired | second-pass schedule; defaults to the Hailuo second-pass schedule `(0.85, 0.7250, 0.4219, 0.0)` (euler, 3 steps) |
+| `second_run_model` | main model | which MODEL socket the second pass uses |
+| `second_denoise` | 1.0 | because the second pass always uses SIGMAS, denoise scales the whole schedule (first sigma = denoise × sigma[0]) |
+| `second_seed` | 20240 | fixed second-pass seed, independent of the first-pass seed |
+| `asr_model` / `asr_check` | off | audio validity check |
+| `workflow_name` | hidden | filled by the frontend; namespaces the on-disk cache |
 
-| Resource | Link |
-|----------|------|
-| Models & workflows pack | [comfyit.cn/article/506](https://comfyit.cn/article/506) |
-| Official MiniMax H3 docs | [docs.comfy.org · MiniMax H3](https://docs.comfy.org/tutorials/video/minimax/minimax-h3) |
-| Plugin video tutorials | [Bilibili playlist](https://space.bilibili.com/1997403556/lists/8357740) |
-| Product center | [comfyit.cn/products](https://comfyit.cn/products) |
-| Plugins | [comfyit.cn/plugins](https://comfyit.cn/plugins) |
-| Models | [comfyit.cn/resources/models](https://comfyit.cn/resources/models) |
-| Workflows | [comfyit.cn/workflows](https://comfyit.cn/workflows) |
+The group headers (`采样设置` / `高级采样` / `二级采样`) are a custom frontend `BDGROUP` widget —
+cosmetic folding only.
 
-## Contact
+### Fixed behaviour (no longer widgets)
 
-| | |
+Constants at the top of `nodes/director_common.py` (restart ComfyUI after editing):
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `USE_CONDITIONING_CACHE` | `True` | reuse on-disk CLIP/VAE conditioning across runs (key = prompt + canvas + model fingerprint) |
+| `CLEAR_VRAM_BETWEEN_SEGMENTS` | `True` | unload models and empty the CUDA cache after each segment |
+| `EXPORT_SOURCE_IMAGES` | `False` | decode the source timeline onto the `source_images` output |
+
+---
+
+## Task types
+
+| Key | Meaning |
 |---|---|
-| **Maintainer** | [AIMixer](https://github.com/AIMixer) |
-| **Repository** | [github.com/AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director) |
-| **Sibling plugin** | [ComfyUI_Bernini_Director](https://github.com/AIMixer/ComfyUI_Bernini_Director) |
-| **Author QQ** | **3697688140** |
-| **Bilibili** | [space.bilibili.com/1997403556](https://space.bilibili.com/1997403556) |
-| **Plugin tutorials** | [Bilibili playlist · usage](https://space.bilibili.com/1997403556/lists/8357740) |
-| **QQ groups** | **551482703** · **425064221** · **559826331** |
-| **Comfyit** | [comfyit.cn](https://comfyit.cn/) |
+| `t2v` | text to AV — no keyframes, no references |
+| `i2v` | image to AV — first keyframe conditioning |
+| `fl2v` | first + last keyframe AV |
+| `r2v` | reference to AV — subject images / videos / audios referenced via `<Picture N>` / `<Video K>` / `<Audio J>` |
+| `v2v` | video edit — each source timeline slice is fed as `<Video 1>` to `ReferenceToVideo` |
+| `rv2v` | video edit with references — source `<Video 1>` + `<Picture N>` + `<Audio J>`; without references it behaves like `v2v` |
 
-## Credits
+Frontend modes: `fl2v` → shot (first/last frame) panel; `t2v` / `i2v` / `r2v` → prompt-group batch
+panel (no source-video upload); `v2v` / `rv2v` → source-video timeline panel.
 
-- [Comfy-Org / ComfyUI](https://github.com/Comfy-Org/ComfyUI) — official MiniMax H3 support
-- [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 model
-- [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — weights & docs
-- [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — inspiration for cross-segment motion/audio continuation
-- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent upscaler architecture and checkpoint format
+---
 
-## License
+## Timeline editor (frontend)
 
-Apache-2.0
+Entry point `web/js/minimax_timeline.js`; DOM widget `minimax_director_ui`; editor class
+`MiniMaxH3DirectorOptEditor` (assembled from 25 mixins). Default node size `[1000, 680]`, minimum
+width 900.
+
+### Toolbar
+
+| Button | Action |
+|---|---|
+| Upload video / Pick existing / Append video | load (or append) the source clip |
+| + Split | cut at the playhead |
+| Equal split (2–64 segments) | split evenly, keeping clip boundaries as forced cuts |
+| Smart split | backend `detect_shots` (scenedetect); needs ≥ 8 total frames |
+| Run selection / Select all | re-run only the checked segments |
+| Segment export | checked segments → node outputs (piecewise / continuous, 1st / 2nd pass cache) |
+| Second sample | checked segments → upscale + re-sample |
+| Extract audio | pull a clip out of the source video as a reusable entry |
+| Delete segment | really removes the source frames and re-packs later segments |
+| Global / Segment mode | switch prompt editing scope |
+| Import / Export director pack | `.mmxpack.zip` |
+| Clear cache / Clear all node cache | see Cache |
+| EN | Chinese ⇄ English UI (stored in `mmx_director_ui_locale`) |
+
+### Output bar
+
+Resolution presets (default 16:9 widescreen), megapixels (0.1–16), long edge, width / height
+(step 32), scaling mode (`long_edge` / `fixed`), fps (1–240), sound (`generate` / `source` / `mute`),
+export mode (`all` / `segments`), segment continuity + context frames (5 / 22 / 39 / 56, default 22),
+live preview toggle.
+
+### Playback
+
+`▶` play, `⟳` loop, `‹` / `›` step one frame, frame input (1-based), timecode, seek bar, plus a live
+sampling preview fed by the `minimax_director_opt_preview` event.
+
+### Keyboard shortcuts (active while the pointer is over the editor)
+
+| Key | Action |
+|---|---|
+| `Delete` / `Backspace` | delete the selected segment |
+| `Space` | play / pause |
+| `←` / `→` | ±1 frame; `Shift` + arrow = ±10 frames |
+| `Esc` | close a modal / revert the frame input |
+| Right click on canvas | add a split point (disabled in fl2v mode) |
+
+Shortcuts are suppressed while an `INPUT` / `TEXTAREA` / `SELECT` / editable region has focus.
+**Split points cannot be deleted with Delete** — use the “delete split point” button.
+
+### Drag & drop
+
+Drag a segment body to reorder; drag its edges to retime (video mode keeps neighbours aligned, fl2v
+ripples later shots); drop files directly (video → source clip, image → reference slot).
+
+---
+
+## Segment continuity
+
+Continuity is **opt-in per timeline** (`timeline.output.continuityEnabled`, off by default):
+
+- needs ≥ 2 segments; supported for `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v`; segment 1 never
+  references a predecessor;
+- context frames can only be **5 / 22 / 39 / 56** (default 22 — aligned to the VAE's 17-frame cycle);
+- per segment you can switch off “reference previous” (default on); “align to next” is off by default
+  and only available when that neighbour already holds an AV latent;
+- with `conn_noise` on, the previous tail is written into this segment's body prefix and re-drawn
+  (continue mode); the redraw amount comes from the timeline's 重绘幅度 (default 0.10 — 0 = hard seam
+  lock, 0.95 = almost no redraw);
+- with `conn_noise` off, only reference-frame guidance (guide) is applied;
+- **do not enable it together with a standalone H3 Motion Context node.**
+
+After swapping the source video the old cache no longer matches; if a segment needs its predecessor
+and that one was never rendered (or is not part of the run selection), the run fails loudly instead
+of producing a broken clip.
+
+---
+
+## Second sampling (二采)
+
+For **already cached** segments: read the first-pass AV latent → upscale with `upscale_model`
+(`Minimax H3 Latent Upscaler Opt (3D) [Model]`) → re-seam using the context length the first pass
+actually pinned → sample on the second pass's own schedule (default: euler, 3 steps; when wired, the
+connected SIGMAS plus the sampler from 高级采样) → write the result into a separate `seg2_*` file
+group with its own `segment_slots_2nd.json`, so the first pass is never overwritten → export in
+batches of adjacent segments so decoded frames do not all sit in memory at once.
+
+`upscale_model` is mandatory: without it the run returns an error report instead of silently
+exporting the original resolution.
+
+Trigger: the node's “二次采样” picker writes a one-shot flag into `timeline.output.secondSample` and
+queues the prompt. That run does the second pass only — it never mixes with a first-pass run.
+
+---
+
+## Segment export
+
+The node's “分段导出” picker lists segments (those without cache are greyed out) and writes a
+one-shot flag into `timeline.output.segmentExport`.
+
+- **Mode**: `piecewise` (one video per checked segment) / `continuous` (checked segments that sit
+  next to each other are stitched into one video).
+- **Cache source**: `1st` (`seg_*`) or `2nd` (`seg2_*`).
+- The result goes **straight to the node's `images` / `audio` outputs** — nothing is written to disk;
+  each clip is one `images` entry.
+- During a second sample, adjacent segments marked “reference previous” are merged into one
+  indivisible run range.
+
+---
+
+## Audio
+
+`timeline.output.audioMode`:
+
+| Mode | Behaviour |
+|---|---|
+| `generate` (default) | the model's own soundtrack |
+| `source` | the source clip's audio (only meaningful for `v2v` / `rv2v`; other tasks fall back to `generate`) |
+| `mute` | silent output (44.1 kHz empty track) |
+
+When the merged layout is used, the per-group audio is concatenated along the timeline, so the tail
+is never silent.
+
+**Extract audio** stores PCM under `<node cache dir>/audio_extract/`, named by **entry id** (never a
+content hash, never a timeline position), so re-running or editing prompts cannot invalidate it and
+“clear cache” cannot delete it. Reordering moves entries with their card; deleting a card deletes its
+entries.
+
+**Retain audio** pins one extracted entry to a segment. Phase 2 VAE-encodes it into the AV latent's
+audio stream and zeroes that stream's `noise_mask`, so the UNet conditions on it but can never
+re-draw it; Phase 3 skips the audio VAE decode and muxes the *same* PCM back, so you hear exactly the
+clip you picked — no round-trip through the audio VAE.
+
+---
+
+## Audio validity check (ASR)
+
+With `asr_check` on and an `asr_model` wired (`T8_MOSS_ModelLoader` from
+`Comfyui-MOSS-Transcribe-Diarize-T8`, type `T8_MOSS_TRANSCRIBE_MODEL`), every exported segment's
+soundtrack is concatenated, transcribed with diarization, and compared against the speaking lines in
+the prompt, speaker by speaker.
+
+A line must be written exactly like this:
+
+```
+<Subject 1> (S1) says: <d>[Chinese] 师尊，你一直说你是毒修。</d>
+```
+
+Anything else is treated as plain text (no chip, no expectation). Concatenated audio longer than
+30 s automatically switches to the chunked long-audio route; the report always names the route it
+took. The verdict is only appended to the `report` output — it can never drop a frame.
+
+See [`docs/asr_check.md`](docs/asr_check.md).
+
+---
+
+## Cache
+
+Unified root:
+
+```
+output/minimax_director_opt_cache/<workflow slug>/node_<node id>/
+```
+
+File-name prefixes tell the artefacts apart (`<hash>` is a segment's **content** fingerprint, not its
+position):
+
+| File | Contents |
+|---|---|
+| `cond_text_<hash>.pt` | text-encoding cache |
+| `seg_<hash>_latent.pt` | first-pass sampled latent |
+| `seg_<hash>_clip.mp4` | first-pass rendered clip |
+| `seg_<hash>_frames_ht.mp4` (+`.json`) | head/tail seam window (crf 12) |
+| `seg_<hash>_audio.pt` | audio latent |
+| `seg_<hash>_meta.json` / `_handoff.json` | fingerprint and handoff info |
+| `segment_slots.json` | position → file-group map (first pass) |
+| `seg2_<hash>_*` / `segment_slots_2nd.json` | the second pass's own set |
+| `seg_XXXX_scratch_*.pt` | per-run scratch files |
+| `audio_extract/` | extracted audio (own lifecycle) |
+| `_vit/` | global ViT (vision tower) output cache, shared across workflows, capped at 8 GB |
+
+The fingerprint covers prompt, task, canvas, fps, reference files, source-video identity
+(relative path + size + mtime), continuity flags and the pipeline version — changing any of them
+re-renders that segment.
+
+Two node buttons:
+
+- **Clear cache** — drops the text-encoding cache, batch scratch files and legacy `*_frames_ht.pt`
+  windows; rendered segments survive.
+- **Clear all node cache** — additionally deletes every `seg_*` file, forcing a full re-render.
+
+Both confirm first (showing workflow id, node id and what will be deleted) and then POST
+`/minimax/director_opt/clear_cache` (`clear_all: true/false`).
+
+> Caches are namespaced by workflow name. If the hidden `workflow_name` widget is empty, the cache
+> lands in a bare `node_<id>/` directory, which can grey out “align to next” and make exports empty.
+> The frontend fills this field — do not edit it by hand.
+
+---
+
+## Director pack
+
+`.mmxpack.zip` bundles the timeline JSON plus reference images / videos / audios and the source
+video. The on-disk layout matches the upstream `ComfyUI_MiniMaxH3_Director` pack, so packs can be
+imported both ways.
+
+- Export: `POST /minimax/director_opt/export_pack` → `GET .../download_pack?filename=...`
+  (name like `MiniMaxH3DirectorOpt-<task>-<timestamp>.mmxpack.zip`; over 500 MB asks for a second
+  confirmation).
+- Import: `POST /minimax/director_opt/import_pack` (large files upload in 8 MiB chunks).
+
+---
+
+## HTTP routes & WebSocket events
+
+Route prefix: `/minimax/director_opt` (`lib/constants.py`).
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/upload_chunk` | chunked upload (8 MiB) |
+| POST | `/probe_video` | probe source fps / frame count / size / duration |
+| GET | `/list_input_media` | list `input` media (`includeCache=1` also lists generated clips) |
+| POST | `/detect_shots` | smart split |
+| POST | `/prepare_reference_audio_chunk`, `/extract_reference_audio` | reference audio upload / extraction |
+| POST | `/audio_extract_status`, `/audio_extract`, `/audio_extract_list`, `/audio_extract_remove` | extracted-audio CRUD |
+| GET | `/audio_extract_file` | download an extracted entry |
+| POST | `/segment_export_status` | segment export availability |
+| POST | `/segment_export` | segment export |
+| GET | `/segment_clip` | stream one segment's clip |
+| POST | `/second_sample_status` | second-sample availability |
+| POST | `/align_to_next_status` | “align to next” availability |
+| POST | `/remove_segment_slot` | drop one segment's cache files |
+| POST | `/clear_cache` | clear cache |
+| POST | `/export_pack`, `/import_pack`; GET `/download_pack` | director pack |
+
+WebSocket events:
+
+| Event | Payload highlights |
+|---|---|
+| `minimax_director_opt_progress` | `node_id`, `segment`, `segment_total`, `phase` (`prepare` / `context_encode` / `sample` / `decode`), `phase_value`, `overall_value`, … |
+| `minimax_director_opt_preview` | `node_id`, `segment_index`, `image_b64`, `width`, `height`, optional `step` / `total_steps` |
+
+---
+
+## Limits & troubleshooting
+
+| Symptom / limit | Reason |
+|---|---|
+| A single diffusion segment maxes out at 512 frames | frame counts must land on the `17k+5` grid, minimum 5 (124 ≈ 5 s @ 24 fps) |
+| Shortest video-timeline segment is 4 frames; batch / fl2v minimum is 5 | frontend constants |
+| ≤ 9 reference images, ≤ 3 reference videos, ≤ 3 reference audios | MiniMax H3 `ReferenceToVideo` limits |
+| Equal split 2–64; canvas aligned to 32; fps 1–240 | frontend constants |
+| Uploads ≤ 95 MiB use `/upload/image`, larger ones use 8 MiB chunks | `core/upload.js` |
+| Continuity context can only be 5 / 22 / 39 / 56 and needs ≥ 2 segments | `h3_motion_context.py` |
+| `use_sigmas` on but nothing wired | logged, then falls back to the default schedule |
+| Second sample without `upscale_model` | returns an error report, never a silent same-resolution export |
+| Widget values shifted after loading an old workflow | the frontend strips the removed `segment_images` output and repairs stale widget values; absurd width/height/total_frames are clamped back to safe defaults with a warning — save the workflow again to fix it permanently |
+| `/minimax/director_opt/*` returns 404 | PromptServer was not ready at import time; restart ComfyUI |
+| `import cv2` fails | OpenCV is intentionally not a dependency; decoding uses PyAV |
+| Washed-out / inverted colours | do not post-process `MiniMax H3 Fast Video VAE Opt` output with a non-H3 VAE path; the wrapper deliberately skips ComfyUI's `*2-1` transform |
+
+---
+
+## License & credits
+
+Apache License 2.0 — see `LICENSE`.
+
+- Upstream: `AIMixer/ComfyUI_MiniMaxH3_Director` (author: AI搅拌手), itself based on ComfyUI's
+  official MiniMax H3 support (PR #15224 / #15228).
+- Opt fork: **fvdfggh** — <https://github.com/fvdfggh/minimax-h3-director-performance-optimization>

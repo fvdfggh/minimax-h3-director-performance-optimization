@@ -1,109 +1,83 @@
-# Source 模式音频优化改造说明
+# 源音频链路（模式 / 抽取 / 保留 / 排错）
 
-## 概述
+**相关代码**：`director/audio_export.py`（模式与导出）、`director/audio_extract.py`（提取音频存储）、
+`director/audio_retain.py`（保留音频）、`lib/audio_io.py`（抽取与诊断）。
 
-**目标模式**: `audio_mode = "source"`（声音=使用原声）
+## 1. 三种声音模式
 
-source 模式下，成片音轨来自**源视频**，而不是 AV latent。优化只做一件事：把源 PCM 在
-Phase 1 提前提取一次，Phase 3 与分段 mp4 封装直接复用内存中的张量，避免每段重复调用
-`extract_timeline_audio`（内部要跑 ffmpeg）。
+写在 `timeline.output.audioMode`，前端对应「声音」下拉：
 
-> 上一版实现曾声称"编码 audio latent 用于采样锁定保护"。该部分并未接入采样流程，
-> 属于死代码，已删除。**本次改造不涉及任何 audio latent 锁定**，采样路径与改造前一致。
+| 模式 | 别名 | 行为 |
+|---|---|---|
+| `generate`（默认） | `generated`、`model` | 用模型生成的音轨 |
+| `source` | `original`、`passthrough` | 用源视频的原声；**仅 `v2v` / `rv2v` 生效**，其他任务自动回退 `generate` |
+| `mute` | `silent`、`silence` | 静音，输出 44.1 kHz 空音轨 |
 
----
+`generate` 模式下如果模型音轨为空，而任务属于 `{i2v, fl2v, r2v, v2v, rv2v}`，会自动退回到
+源音频（不会静音）。报告里会说明本次实际用的是哪种。
 
-## 改造前后对比
+「全部导出」合并画面时，各组音频会按时间轴拼接；否则只会用第一组音频、后半段静音。
 
-### 改造前
+## 2. 原声是怎么抽出来的
 
-```
-Source 模式:
+`lib/audio_io.py::extract_timeline_audio` 把**逻辑时间轴区间**映射回源文件的真实时间轴：
 
-Phase 1  文本编码 / Video VAE / 参考音频 VAE 编码（ref_audios 等，采样必需）
-Phase 2  UNet 采样
-Phase 3  Video VAE 解码，audio_dict = 空
-         └─ save_segment_cache → clip.mp4 封装 → extract_timeline_audio  ← 第 1 次提取
-         └─ maybe_export_segment_mp4        → extract_timeline_audio  ← 第 2 次提取
-```
+1. 由 `frameMap` 把 `[logical_start, logical_end)` 换算成若干段 `(文件路径, 起秒, 时长, 原生 fps)`；
+2. 用 ffmpeg 解码出 PCM（44.1 kHz 起，实际以源文件采样率为准）；
+3. 按目标时长裁剪 / 补零，使音轨长度与画面帧数严格对齐（避免音画漂移）。
 
-Phase 3 本身并不提取音频，重复提取发生在每个 mp4 封装点，且每段都会发生。
+无 ffmpeg、源文件没有音轨、或 ffmpeg 解码失败时返回 `None`，并由
+`diagnose_source_audio_failure()` 给出人话原因（见第 5 节）。
 
-### 改造后
+## 3. 提取音频（独立于渲染缓存）
 
-```
-Source 模式:
+`director/audio_extract.py`：把一段源 PCM 存成可复用的条目。
 
-Phase 1  文本编码 / Video VAE / 参考音频 VAE 编码（不变）
-         └─ 提取各段源 PCM → source_audio_cache（唯一一次提取）
-Phase 2  UNet 采样（不变）
-Phase 3  Video VAE 解码，audio_dict = 缓存 PCM（对齐到导出帧数）
-         └─ save_segment_cache / maybe_export_segment_mp4 直接用该 PCM，不再读文件
-```
+- 目录：`<节点缓存目录>/audio_extract/`；
+- 命名：按 **entry id**（`audio_<id>.pt` / `audio_<id>_latent.pt`），**不是内容哈希、不是时间轴位置**；
+- 因此：改提示词、重跑、甚至改画布都不会让它失效；「清空缓存」「清空节点所有缓存」和槽位表的
+  孤儿回收都碰不到它（前缀 `audio_` 既不匹配 `seg_*` / `seg2_*`，也不是 `cache_layout.stem_of_filename`
+  认可的后缀）。
+- 绑定方式：条目记的是时间轴卡片上的 **segment id**，位置是推导出来的 ——
+  重排 / 中间插入时按当前 id 顺序重算索引（音频跟着卡片走），删除卡片时条目与文件一起删。
+  旧时间轴若卡片没有 id，则跳过对账而不是猜（猜错会删掉用户还要用的音频）。
 
----
+## 4. 保留音频（retainAudioId）
 
-## 具体改动
+在时间轴卡片上把某条提取音频标记为「保留」，该段运行时：
 
-### 新增 `director/batch_source_audio.py`
+- **Phase 2**：把这段 PCM 用 audio VAE 编码进 AV latent 的**音频流**，并把该流的 `noise_mask` 置零。
+  UNet 看得到它、以它为条件生成画面，但永远不会重绘它。
+- **Phase 3**：跳过音频 VAE 解码，直接把**同一份 PCM** 混流回去 —— 听到的就是你选的那一段，
+  不经过音频 VAE 往返。
 
-| 函数 | 作用 |
-|------|------|
-| `build_source_audio_cache(run_list, plan, fps)` | Phase 1 批量为所有运行段提取源 PCM |
-| `extract_segment_source_pcm(seg, plan, fps)` | 单段提取（`plan.raw` 时间线 → PCM） |
-| `align_pcm_to_frames(pcm, frame_count, fps)` | 把 PCM 裁/补到指定视频帧数 |
+为什么不直接复用存下来的 audio latent：那份 latent 的 `T` 是按「上次导出长度」算的，而本次需要
+`T = round(sample_len / fps * AUDIO_HZ)`；开启「段间引导」时 `sample_len` 会比导出长度多出被 pin 的
+头部帧，两者不一致。从 PCM 重新编码只是一次廉价的 `audio_vae.encode`，永远落在当前网格上。
 
-要点：
+音频流与画布无关（形状 `[1, C, 2, T]`，T 只由帧数决定），所以保留的音频在卡片换到别的画布后仍然
+有效 —— 这一点视频 pin 做不到（换画布会降级到像素路径）。
 
-- 时间线取自 `plan.raw`（解析后的 dict），与 `audio_export` 的取法完全一致；
-  不是 JSON 字符串。
-- 直接接收 `seg` 对象，不再用 `plan.segments[seg.index]` 反查。
-- 只缓存 PCM，不编码 latent。
+**头部偏移**：开启段间引导时，一段是「采样得比导出长」，头部 pin 的前缀解码后被裁掉。保留音频因此
+要从「导出起点」而不是 t=0 开始写（调用方传 `head_seconds`），否则混进去的声轨会比 UNet 实际听到的
+早 `trim_frames / fps` 秒；头部区域保留连续段 pin 的内容。
 
-### `director/batch_executor.py`
+## 5. 排错
 
-- 仅 `AUDIO_MODE_SOURCE` 构建 `source_audio_cache`（mute 无音轨、generate 用模型音频，
-  都不需要，避免 mute 模式白跑一次提取）。
-- 保留 `encode_audio_vae_batch`：它编码的是**参考音频**（`seg.ref_audios`、
-  参考视频音轨），属于采样输入 conditioning，任何模式都必需。source 模式只是不解码
-  *输出* 音频，不能跳过它。
+`diagnose_source_audio_failure()` 会返回具体原因，报告里原样显示：
 
-### `director/batch_phases.py`
+| 报告文字 | 处理 |
+|---|---|
+| `ffmpeg unavailable (install FFmpeg on PATH or pip install imageio-ffmpeg)` | 装 ffmpeg；ComfyUI 便携版一般自带，`imageio-ffmpeg` 是兜底 |
+| `could not map timeline frames to a source video path` | 时间轴的 `frameMap` / 源视频路径不对，重新上传或重建时间轴 |
+| `input video has no audio track` | 源视频本身没有音轨，改用 `generate` |
+| `audio extraction failed – ffprobe not found …` | 装带 `ffprobe` 的完整 FFmpeg |
+| `ffmpeg failed to extract audio despite an audio stream being present` | 源音轨编码 ffmpeg 解不了，先转码成 AAC / PCM 再上传 |
 
-Phase 3 `_decode_export_one_segment`：
+其他常见问题：
 
-- 命中缓存时跳过 audio VAE 解码，直接用缓存 PCM。
-- 音频对齐统一在本处完成：先按导出口径裁视频，再把 PCM 对齐到 `decoded.shape[0]` 帧。
-- **只裁尾、不裁头**：源 PCM 锚定在 `seg.start_frame`，而连续性头部 pin 位于该点**之前**
-  的时间线上，不属于本段的源音频；模型生成音频才需要随 pin 一起丢掉头部。
-
-### `director/audio_export.py`
-
-`prepare_segment_audio_for_file_export` 在 source 模式下优先复用传入的 PCM，
-缺失时仍回退到原提取逻辑（generate 模式的空模型音频回退路径不受影响）。
-
-### `director/h3_motion_context.py`
-
-source 模式的段缓存现在带有真实源音频，连续性 pin 因此可能走到"编码上下文音频"
-分支。该分支改为**失败即降级**（只 pin 视频），不再因重采样/编码失败中断整个运行。
-
----
-
-## 未改变的行为
-
-- **generate 模式**：全流程不变。
-- **mute 模式**：不提取、不缓存，输出静音。
-- **参考音频编码**：不变（改造前一度被跳过，属缺陷，已恢复）。
-- **最终合并 AUDIO 输出**：source 模式仍由 `build_director_audio_outputs` 按整条时间线
-  提取，不使用分段缓存。
-- **采样流程**：除上述降级保护外，与改造前一致；没有引入 audio latent 锁定。
-
----
-
-## 验证要点
-
-- `ruff check .`（配置见 `pyproject.toml`，规则 `F821/F822/F823`）——用于拦截
-  "未导入/未定义名称"这一类会让整个 phase 崩溃或在 `try/except` 中静默失效的错误。
-- source 模式跑多段（含「选择运行」部分运行）后，确认：
-  - 报告里 `Phase 1` 出现 `Source audio: N/M segment(s) cached for reuse`；
-  - 每段 mp4 与合并成片音轨均正常，且与改造前一致。
+- **原声听着有延迟 / 提前**：确认输出帧率与源视频原生 fps 是否一致；上传视频时前端会默认跟随源 fps，
+  手动改帧率会保持真实时长并重算帧数。
+- **后半段没声音**：检查导出方式是不是「全部导出」（分段导出时每段各自一条音轨）；
+  合并路径下各组音频是按时间轴拼接的，若仍无声，看报告里 `Audio:` 那一段写的是哪种来源。
+- **换源视频后原声不对**：源视频身份（相对路径 + 大小 + mtime）参与缓存指纹，换源会让相关片段重算。

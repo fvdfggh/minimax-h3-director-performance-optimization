@@ -6,7 +6,7 @@ import { bindDirectorDomWidgetSizing, destroyDirectorEditor, ensureDirectorDomWi
 import { logicalToSourceFrame } from "./core/frame_map.js";
 import { EXTERNAL_COMBINE_NODE_TYPE, EXTERNAL_GROUP_NODE_TYPES, findDirectorNode, getStableWorkflowId, notifyDirectorsSyncExternalGroups } from "./core/graph_refs.js";
 import { DIRECTOR_DOM_WIDGET_NAME } from "./core/layout_spec.js";
-import { clearAllDirectorRunStatus, isDirectorNodeDef, isMiniMaxH3DirectorOptNode, normalizeDirectorOutputs, sanitizeAllWidgetValues, sanitizeWidgetValues } from "./core/node_migrations.js";
+import { clearAllDirectorRunStatus, isDirectorNodeDef, isMiniMaxH3DirectorOptNode, normalizeDirectorOutputs, patchDirectorWidgetValueMigration, sanitizeAllWidgetValues, sanitizeWidgetValues } from "./core/node_migrations.js";
 import { clamp } from "./core/utils.js";
 import { DIRECTOR_GROUP_LABEL_KEYS, applyDirectorWidgetLabels } from "./core/widget_labels.js";
 import { onLocaleChange, t } from "./minimax_i18n.js";
@@ -441,6 +441,9 @@ app.registerExtension({
         if (!isDirectorNodeDef(nodeType, nodeData)) return;
         if (nodeType.prototype._minimaxDirectorPatched) return;
         nodeType.prototype._minimaxDirectorPatched = true;
+        // Deleting an input shifts every later entry of the positional
+        // `widgets_values` array in older workflows — drop the stale slot first.
+        patchDirectorWidgetValueMigration(nodeType);
 
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {

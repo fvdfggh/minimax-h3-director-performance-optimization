@@ -157,7 +157,6 @@ pip install -r ComfyUI_MiniMaxH3_Director_Opt/requirements.txt
 | `upscale_model` | — | 二采**硬性要求**，未接则二采直接报错 |
 | `second_sigmas` | 未接线 | 二采专用调度，未接线用默认海螺二采 `(0.85, 0.7250, 0.4219, 0.0)`（euler 3 步） |
 | `second_run_model` | 主模型 | 二采用哪个 MODEL 口 |
-| `second_denoise` | 1.0 | 二采去噪强度；因硬走 SIGMAS，denoise 通过缩放整条调度生效（首 sigma = denoise×sigma[0]） |
 | `second_seed` | 20240 | 二采固定种子，与一采 seed 相互独立 |
 | `asr_model` / `asr_check` | 关闭 | 音频有效性校验 |
 | `workflow_name` | 隐藏 | 前端自动写入当前工作流名，用于缓存分目录 |

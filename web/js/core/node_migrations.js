@@ -62,7 +62,7 @@ export function sanitizeWidgetValues(node) {
             continue;
         }
         if (w.value === "" && (w.type === "number" || w.type === "int" || w.type === "float")) {
-            // 回退到控件自身的 INPUT_TYPES 默认值（如 second_denoise 的 1.0），
+            // 回退到控件自身的 INPUT_TYPES 默认值（如某个 FLOAT 控件的 1.0），
             // 而不是一律写 0 —— 否则新增的浮点控件在旧工作流里会被强制成 0.0。
             // 没有有效数字默认时才回退到 0（保持 second_seed 等整数控件的原行为）。
             const def = w.options?.default;
@@ -147,4 +147,71 @@ export function migrateDirectorOutputLinks(node) {
 export function normalizeDirectorOutputs(node) {
     stripDeprecatedDirectorOutputs(node);
     migrateDirectorOutputLinks(node);
+}
+
+/**
+ * Widgets deleted from the Director node, keyed by the widget that *followed*
+ * them in the old INPUT_TYPES order.
+ *
+ * A saved workflow pins ``widgets_values`` positionally, and ComfyUI hands that
+ * array to the widgets in order when the node is configured (skipping
+ * ``serialize === false``). Deleting a widget therefore shifts every later value
+ * by one — an old workflow would put ``second_denoise``'s 1.0 into
+ * ``second_seed`` and 20240 into ``asr_check`` (turning the ASR check on). Each
+ * entry names the successor, whose *new* index is exactly the slot the removed
+ * widget used to occupy.
+ */
+const REMOVED_DIRECTOR_WIDGETS = [
+    { name: "second_denoise", followedBy: "second_seed" },
+];
+
+/** Widgets that take part in the positional ``widgets_values`` array. */
+function serializableWidgets(node) {
+    return (node?.widgets || []).filter((w) => w && w.serialize !== false);
+}
+
+/**
+ * Drop positional values that no longer have a widget behind them.
+ *
+ * Only fires when the array is still longer than the widget list — i.e. the
+ * workflow was saved while the removed widgets existed. Anything saved after the
+ * removal is left untouched.
+ */
+export function stripRemovedDirectorWidgetValues(node, info) {
+    const values = info?.widgets_values;
+    if (!Array.isArray(values)) return;
+    const widgets = serializableWidgets(node);
+    for (const removed of REMOVED_DIRECTOR_WIDGETS) {
+        if (values.length <= widgets.length) break;
+        const idx = widgets.findIndex((w) => w?.name === removed.followedBy);
+        if (idx < 0) continue;
+        values.splice(idx, 1);
+        console.warn(
+            `[MiniMax] ${node?.type}: 已删除控件 ${removed.name}，丢弃其在 widgets_values 中下标 ${idx} 的旧值。`,
+        );
+    }
+}
+
+/**
+ * Normalise a stale widget-value array *before* ComfyUI applies it.
+ *
+ * Wraps ``configure`` instead of patching ``onConfigure`` because by then the
+ * shifted values have already been written onto the widgets. Delegates to
+ * whatever ``configure`` was in place (inherited or previously patched) so this
+ * stays a pure pre-processing step.
+ */
+export function patchDirectorWidgetValueMigration(nodeType) {
+    const proto = nodeType?.prototype;
+    if (!proto || proto.__mmxWidgetValuesMigrated) return;
+    const previous = proto.configure;
+    if (typeof previous !== "function") return;
+    proto.__mmxWidgetValuesMigrated = true;
+    proto.configure = function (info) {
+        try {
+            stripRemovedDirectorWidgetValues(this, info);
+        } catch (e) {
+            /* best-effort: a stale array must never block loading */
+        }
+        return previous.apply(this, arguments);
+    };
 }

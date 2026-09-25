@@ -158,7 +158,6 @@ by the Director node, never by the group packers.
 | `upscale_model` | — | **mandatory** for second sampling; the run errors out without it |
 | `second_sigmas` | unwired | second-pass schedule; defaults to the Hailuo second-pass schedule `(0.85, 0.7250, 0.4219, 0.0)` (euler, 3 steps) |
 | `second_run_model` | main model | which MODEL socket the second pass uses |
-| `second_denoise` | 1.0 | because the second pass always uses SIGMAS, denoise scales the whole schedule (first sigma = denoise × sigma[0]) |
 | `second_seed` | 20240 | fixed second-pass seed, independent of the first-pass seed |
 | `asr_model` / `asr_check` | off | audio validity check |
 | `workflow_name` | hidden | filled by the frontend; namespaces the on-disk cache |

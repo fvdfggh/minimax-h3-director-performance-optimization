@@ -325,21 +325,6 @@ class MiniMaxH3DirectorOpt:
                         ),
                     },
                 ),
-                "second_denoise": (
-                    "FLOAT",
-                    {
-                        "default": 1.0,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.01,
-                        "tooltip": (
-                            "二级采样（二采）去噪强度 denoise（0.0~1.0，默认 1.0）。"
-                            "二采硬性走自定义 SIGMAS，故 denoise 通过缩放整条噪声调度生效："
-                            "首 sigma 变为 denoise×sigma[0]，步数不变、起始噪声更小，"
-                            "从而保留更多原 latent。1.0 = 完全重采样；越接近 0 越接近原图。"
-                        ),
-                    },
-                ),
                 "second_seed": (
                     "INT",
                     {
@@ -454,7 +439,6 @@ class MiniMaxH3DirectorOpt:
         upscale_model=None,
         second_run_model=RUN_MODEL_MAIN,
         second_sigmas=None,
-        second_denoise=1.0,
         second_seed=SECOND_SEED_FIXED,
         asr_model=None,
         asr_check=False,
@@ -554,7 +538,6 @@ class MiniMaxH3DirectorOpt:
                 second_shift_video=shift_video,
                 second_shift_audio=shift_audio,
                 second_sigmas=_second_sigmas_eff,
-                second_denoise=second_denoise,
                 second_seed=second_seed,
                 audio_mode="movie",
                 decode_audio=True,

@@ -128,7 +128,6 @@ def run_second_sampling(
     second_shift_video: float,
     second_shift_audio: float,
     second_sigmas,
-    second_denoise: float = 1.0,
     second_seed: int = SECOND_SEED_FIXED,
     audio_mode: str = "movie",
     decode_audio: bool = True,
@@ -299,19 +298,9 @@ def run_second_sampling(
         sigma_tensor = normalize_sigmas(DEFAULT_SECOND_SIGMAS)
         schedule_note = f"默认海螺二采调度 {list(DEFAULT_SECOND_SIGMAS)}（连线值解析失败）"
 
-    # denoise：二采硬性走自定义 SIGMAS，而 ComfyUI 在提供 sigmas 时会忽略
-    # sample() 的 denoise 参数（schedule 由 sigmas 决定）。要让「denoise」生效，
-    # 只能把整条调度按 denoise 缩放——首 sigma 变成 denoise*sigma[0]，步数不变，
-    # 起始噪声更小，从而保留更多原 latent（标准 img2img denoise 语义）。
-    # denoise>=1 时还原为 1.0（完全重采样），不做缩放。
-    try:
-        _denoise = float(second_denoise)
-    except (TypeError, ValueError):
-        _denoise = 1.0
-    _denoise = max(0.0, min(1.0, _denoise))
-    if _denoise < 1.0 and sigma_tensor is not None:
-        sigma_tensor = sigma_tensor * _denoise
-        schedule_note = f"{schedule_note}（denoise={_denoise:.3f}）"
+    # denoise 恒为 1.0：二采硬性走自定义 SIGMAS，ComfyUI 在提供 sigmas 时会忽略
+    # sample() 的 denoise，所以此前靠「按 denoise 缩放整条调度」来模拟；该参数已从
+    # 节点上移除，这里保持完全重采样（不缩放），语义与 denoise=1.0 一致。
 
     # --- phase 1: upscale every selected latent -----------------------------
     # ``force_unload=False`` keeps the upscaler resident for the whole batch, so
@@ -783,7 +772,6 @@ def run_second_sampling(
             "second_steps": int(second_steps),
             "second_sampler": second_sampler,
             "second_scheduler": second_scheduler,
-            "second_denoise": float(_denoise),
             "second_sigmas": None if sigma_tensor is None else sigma_tensor.tolist(),
             "schedule_source": schedule_note,
             "context_frames": int(meta["context_n"]),

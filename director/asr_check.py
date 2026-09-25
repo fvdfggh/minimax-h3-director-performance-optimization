@@ -64,8 +64,13 @@ skipped rather than handed a free pass.
 
 from __future__ import annotations
 
+import importlib
+import importlib.machinery
+import importlib.util
 import logging
+import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -379,11 +384,49 @@ def _resample(wave, src_sr: int, dst_sr: int):
 # ASR side — the sibling pack
 # --------------------------------------------------------------------------
 
+def _asr_package_dir() -> str:
+    """Absolute path of the sibling ASR pack.
+
+    ``.../custom_nodes/<this pack>/director/asr_check.py`` →
+    ``.../custom_nodes/<ASR_PACKAGE>`` — both packs share the ``custom_nodes``
+    parent, so this survives a renamed / relocated ComfyUI root.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))        # .../director
+    pack_root = os.path.dirname(here)                        # .../<this pack>
+    return os.path.join(os.path.dirname(pack_root), ASR_PACKAGE)
+
+
+def _ensure_asr_package():
+    """Make ``ASR_PACKAGE`` importable under its own name.
+
+    ComfyUI loads a custom node under a *path-derived* ``sys.modules`` key — see
+    ``nodes.load_custom_node``, which registers ``module_path.replace(".", "_x_")``
+    — and never puts ``custom_nodes/`` on ``sys.path``. ``importlib.import_module``
+    therefore could never resolve the directory name, so every ASR run died with
+    ``No module named 'Comfyui-MOSS-Transcribe-Diarize-T8'`` even though the pack
+    was installed and its model socket was wired.
+    Binding a namespace package whose ``__path__`` points at that directory
+    restores the plain ``ASR_PACKAGE.<sub>`` imports — and, unlike putting
+    ``custom_nodes/`` on ``sys.path``, it does *not* execute the pack's
+    ``__init__.py`` a second time (which would re-register all of its nodes).
+    """
+    existing = sys.modules.get(ASR_PACKAGE)
+    if existing is not None and getattr(existing, "__path__", None):
+        return existing
+    pkg_dir = _asr_package_dir()
+    if not os.path.isdir(pkg_dir):
+        raise ImportError(f"未找到 ASR 节点目录 {ASR_PACKAGE}（期望位置：{pkg_dir}）")
+    spec = importlib.machinery.ModuleSpec(ASR_PACKAGE, None, is_package=True)
+    module = importlib.util.module_from_spec(spec)
+    module.__path__ = [pkg_dir]
+    sys.modules[ASR_PACKAGE] = module
+    return module
+
+
 def _load_t8_module(suffix: str):
     """``ASR_PACKAGE.suffix`` module, or raise ``ImportError``."""
-    import importlib
-
     try:
+        _ensure_asr_package()
         return importlib.import_module(f"{ASR_PACKAGE}.{suffix}")
     except Exception as exc:
         raise ImportError(

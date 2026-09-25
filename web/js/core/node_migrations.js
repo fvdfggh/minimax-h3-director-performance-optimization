@@ -190,6 +190,14 @@ export function stripRemovedDirectorWidgetValues(node, info) {
             `[MiniMax] ${node?.type}: 已删除控件 ${removed.name}，丢弃其在 widgets_values 中下标 ${idx} 的旧值。`,
         );
     }
+    if (values.length > widgets.length) {
+        // Still longer: the workflow predates other removals too, so every value
+        // from here on lands on the wrong widget. Only a re-save can realign it.
+        console.warn(
+            `[MiniMax] ${node?.type}: widgets_values 仍有 ${values.length - widgets.length} 个多余值，`
+            + "控件会被错位赋值（如 asr_check / use_sigmas 被塞进字符串）。请在 ComfyUI 中核对控件后重新保存该工作流。",
+        );
+    }
 }
 
 /**

@@ -159,7 +159,7 @@ by the Director node, never by the group packers.
 | `second_sigmas` | unwired | second-pass schedule; defaults to the Hailuo second-pass schedule `(0.85, 0.7250, 0.4219, 0.0)` (euler, 3 steps) |
 | `second_run_model` | main model | which MODEL socket the second pass uses |
 | `second_seed` | 20240 | fixed second-pass seed, independent of the first-pass seed |
-| `asr_model` / `asr_check` | off | audio validity check |
+| `asr_model` | optional | audio validity check — wire it and run once; an「Audio validity check」button then appears on the node in r2v mode |
 | `workflow_name` | hidden | filled by the frontend; namespaces the on-disk cache |
 
 The group headers (`采样设置` / `高级采样` / `二级采样`) are a custom frontend `BDGROUP` widget —
@@ -329,10 +329,17 @@ clip you picked — no round-trip through the audio VAE.
 
 ## Audio validity check (ASR)
 
-With `asr_check` on and an `asr_model` wired (`T8_MOSS_ModelLoader` from
-`Comfyui-MOSS-Transcribe-Diarize-T8`, type `T8_MOSS_TRANSCRIBE_MODEL`), every exported segment's
-soundtrack is concatenated, transcribed with diarization, and compared against the speaking lines in
-the prompt, speaker by speaker.
+Wire an `asr_model` (`T8_MOSS_ModelLoader` from `Comfyui-MOSS-Transcribe-Diarize-T8`, type
+`T8_MOSS_TRANSCRIBE_MODEL`) and **run the node once**; r2v mode then shows an
+「Audio validity check」button on the node:
+
+1. click it and tick the segments to verify;
+2. the backend loads those segments' *cached* audio and compares it against the lines in each
+   segment's **current** prompt, speaker by speaker (error rate + speaker alignment);
+3. the verdict opens in a dialog — nothing is written to `report` and nothing is regenerated.
+
+A segment with no cached audio is listed as skipped rather than counted as a pass, so the workflow
+is: generate first, then re-word the prompt and re-check whenever you like.
 
 A line must be written exactly like this:
 
@@ -342,7 +349,7 @@ A line must be written exactly like this:
 
 Anything else is treated as plain text (no chip, no expectation). Concatenated audio longer than
 30 s automatically switches to the chunked long-audio route; the report always names the route it
-took. The verdict is only appended to the `report` output — it can never drop a frame.
+took.
 
 See [`docs/asr_check.md`](docs/asr_check.md).
 

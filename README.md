@@ -158,7 +158,7 @@ pip install -r ComfyUI_MiniMaxH3_Director_Opt/requirements.txt
 | `second_sigmas` | 未接线 | 二采专用调度，未接线用默认海螺二采 `(0.85, 0.7250, 0.4219, 0.0)`（euler 3 步） |
 | `second_run_model` | 主模型 | 二采用哪个 MODEL 口 |
 | `second_seed` | 20240 | 二采固定种子，与一采 seed 相互独立 |
-| `asr_model` / `asr_check` | 关闭 | 音频有效性校验 |
+| `asr_model` | 可选 | 音频有效性校验：接上后运行一次，r2v 模式下节点上出现「音频有效性校验」按钮 |
 | `workflow_name` | 隐藏 | 前端自动写入当前工作流名，用于缓存分目录 |
 
 节点上的分组标题（`采样设置` / `高级采样` / `二级采样`）是前端自定义控件 `BDGROUP`，只用于折叠，不参与计算。
@@ -305,7 +305,13 @@ pip install -r ComfyUI_MiniMaxH3_Director_Opt/requirements.txt
 
 ## 音频有效性校验（ASR）
 
-开启 `asr_check` 并接上 `asr_model`（来自 `Comfyui-MOSS-Transcribe-Diarize-T8` 的 `T8_MOSS_ModelLoader`，类型 `T8_MOSS_TRANSCRIBE_MODEL`）后，运行结束会把所有片段音轨拼成一整条送去识别，再与提示词里的台词**逐说话人**比对。
+接上 `asr_model`（来自 `Comfyui-MOSS-Transcribe-Diarize-T8` 的 `T8_MOSS_ModelLoader`，类型 `T8_MOSS_TRANSCRIBE_MODEL`）并**运行一次**节点后，r2v 模式的节点上会出现「**音频有效性校验**」按钮：
+
+1. 点按钮 → 弹出片段列表，勾选要核对的片段；
+2. 确认后，后端读取这些片段**已缓存**的音轨，与本段**当前**提示词里的台词块逐说话人比对（错误率 + 说话人是否对得上）；
+3. 结果以弹窗展示，不写入 `report`，也**不会重新生成任何片段**。
+
+没有音轨缓存的片段会被明确列为「已跳过」，不会被当成通过。所以用法是：先生成，再改提示词、随时点按钮复核。
 
 台词必须严格写成：
 
@@ -317,7 +323,7 @@ pip install -r ComfyUI_MiniMaxH3_Director_Opt/requirements.txt
 - `(SN)`：说话人编号；
 - `<d>[lang]…</d>`：台词内容与语言标签。
 
-格式不对就当普通文本（前端不渲染成说话人卡片，也不参与校验）。长音频超过 30 秒会自动改走分块长音频识别，报告里会写明走的是哪条路径。校验结果只追加到 `report`，**永远不会丢帧**。
+格式不对就当普通文本（前端不渲染成说话人卡片，也不参与校验）。长音频超过 30 秒会自动改走分块长音频识别，报告里会写明走的是哪条路径。
 
 详见 [`docs/asr_check.md`](docs/asr_check.md)。
 

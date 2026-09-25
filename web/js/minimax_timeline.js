@@ -8,6 +8,7 @@ import { EXTERNAL_COMBINE_NODE_TYPE, EXTERNAL_GROUP_NODE_TYPES, findDirectorNode
 import { DIRECTOR_DOM_WIDGET_NAME } from "./core/layout_spec.js";
 import { clearAllDirectorRunStatus, isDirectorNodeDef, isMiniMaxH3DirectorOptNode, normalizeDirectorOutputs, patchDirectorWidgetValueMigration, sanitizeAllWidgetValues, sanitizeWidgetValues } from "./core/node_migrations.js";
 import { clamp } from "./core/utils.js";
+import { resolveTaskKey } from "./minimax_gen_timeline.js";
 import { DIRECTOR_GROUP_LABEL_KEYS, applyDirectorWidgetLabels } from "./core/widget_labels.js";
 import { onLocaleChange, t } from "./minimax_i18n.js";
 import { ensureImageBatchTimeline, renderImageBatchGroups, setImageBatchPreview } from "./minimax_image_batch.js";
@@ -544,6 +545,49 @@ app.registerExtension({
             // up by name), so they are built from t() and re-translated on switch.
             const clearBtn = this.addWidget("button", t("cache.buttonClear"), null, () => runClearCache(false));
             const clearAllBtn = this.addWidget("button", t("cache.buttonClearAll"), null, () => runClearCache(true));
+
+            // 「音频有效性校验」——只在 r2v 出现。按钮 widget 不参与
+            // widgets_values 序列化（serialize=false），所以加它不会让旧工作流的
+            // 控件值再错位一格。
+            const asrBtn = this.addWidget("button", t("asr.button"), null, () => {
+                const open = () => this._minimaxEditor?.openAsrCheckPicker?.();
+                if (this._minimaxEditor) open();
+                else setTimeout(open, 0);
+            });
+            asrBtn.serialize = false;
+
+            // 保存按钮原始 computeSize，隐藏/恢复时不能把它永久改掉。
+            const setAsrVisible = (visible) => {
+                if (visible) {
+                    if (asrBtn._bdAsrOrigComputeSize) {
+                        asrBtn.computeSize = asrBtn._bdAsrOrigComputeSize;
+                        asrBtn._bdAsrOrigComputeSize = null;
+                    }
+                } else if (!asrBtn._bdAsrOrigComputeSize) {
+                    asrBtn._bdAsrOrigComputeSize = asrBtn.computeSize;
+                    asrBtn.computeSize = () => [0, 0];
+                }
+                asrBtn.hidden = !visible;
+                if (!asrBtn.options) asrBtn.options = {};
+                asrBtn.options.hidden = !visible;
+                if (asrBtn.element) asrBtn.element.style.display = visible ? "" : "none";
+            };
+            const syncAsrButton = () => {
+                const tw = (this.widgets || []).find((w) => w?.name === "task_type");
+                setAsrVisible(resolveTaskKey(tw?.value || "") === "r2v");
+                finalizeDirectorWidgetOrder(this);
+                this.setDirtyCanvas?.(true, true);
+            };
+            const taskWidget = (this.widgets || []).find((w) => w?.name === "task_type");
+            if (taskWidget) {
+                const prevTaskCb = taskWidget.callback;
+                taskWidget.callback = function (...args) {
+                    const out = prevTaskCb?.apply(this, args);
+                    syncAsrButton();
+                    return out;
+                };
+            }
+            syncAsrButton();
             this._unsubCacheLocale?.();
             this._unsubCacheLocale = onLocaleChange(() => {
                 const relabel = (w, key) => {
@@ -553,6 +597,7 @@ app.registerExtension({
                 };
                 relabel(clearBtn, "cache.buttonClear");
                 relabel(clearAllBtn, "cache.buttonClearAll");
+                relabel(asrBtn, "asr.button");
                 this.setDirtyCanvas?.(true, true);
             });
 

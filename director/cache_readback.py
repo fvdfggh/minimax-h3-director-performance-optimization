@@ -236,6 +236,11 @@ def load_segment_audio(
             audio_path = previous["audio"]
     if audio_path is None or not audio_path.is_file():
         return None
+    return _read_audio_file(audio_path, f"segment {idx + 1}")
+
+
+def _read_audio_file(audio_path, label: str) -> dict[str, Any] | None:
+    """Read one cached audio payload; ``None`` when it is unusable."""
     try:
         payload = torch.load(audio_path, map_location="cpu", weights_only=False)
         if not isinstance(payload, dict):
@@ -246,5 +251,37 @@ def load_segment_audio(
         sr = int(payload.get("sample_rate") or 0) or 32000
         return {"waveform": wave.contiguous(), "sample_rate": sr}
     except Exception as exc:
-        log.warning("Failed to load segment %d audio cache: %s", seg.index + 1, exc)
+        log.warning("Failed to load %s audio cache: %s", label, exc)
         return None
+
+
+def load_segment_audio_by_position(
+    node_id: str | None,
+    position: int,
+    *,
+    allow_stale: bool = False,
+    workflow_name: str | None = None,
+    variant: str = segment_slots.VARIANT_FIRST,
+) -> dict[str, Any] | None:
+    """Cached audio of a timeline *position*, ignoring the content fingerprint.
+
+    The「音频有效性校验」button grades the audio that already exists against the
+    prompt as it is **now**. Editing that prompt churns the fingerprint — it
+    carries ``seg.prompt`` — so going through :func:`load_segment_audio` would
+    report a cache miss exactly when the check is most worth running. Resolve by
+    position instead.
+    """
+    if not node_id:
+        return None
+    for stale in ((False, True) if allow_stale else (False,)):
+        paths = _slot_paths(
+            node_id, workflow_name, int(position), stale=stale, variant=variant
+        )
+        if paths is None:
+            continue
+        audio_path = paths["audio"]
+        if audio_path.is_file():
+            found = _read_audio_file(audio_path, f"segment {int(position) + 1}")
+            if found is not None:
+                return found
+    return None

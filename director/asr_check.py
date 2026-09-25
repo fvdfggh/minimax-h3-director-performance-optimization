@@ -3,14 +3,20 @@
 What it does
 ------------
 
-When the node's「判断音频有效性」switch is on and an ASR model is wired
-(``T8_MOSS_TRANSCRIBE_MODEL``, from the sibling
-``Comfyui-MOSS-Transcribe-Diarize-T8`` pack), the run:
+Triggered by the「音频有效性校验」button the node shows in r2v mode (an ASR model
+must be wired — ``T8_MOSS_TRANSCRIBE_MODEL``, from the sibling
+``Comfyui-MOSS-Transcribe-Diarize-T8`` pack, and the node must have run once so
+the handle is known; see :mod:`director.asr_runtime` and :mod:`director.routes_asr`).
+The picked segments' *cached* audio is then:
 
-1. concatenates every exported segment's soundtrack into one timeline;
-2. transcribes it with speaker diarization;
-3. reads the **speaking lines** the prompt asks for and compares them with what
-   the model actually said — per speaker, plus a speaker-identity check.
+1. concatenated into one timeline (timeline order — that is the order the
+   audience hears the speakers in);
+2. transcribed with speaker diarization;
+3. compared against the **speaking lines** those segments' *current* prompts ask
+   for — per speaker, plus a speaker-identity check.
+
+Nothing is generated here, and a segment with no cached audio is reported as
+missing rather than treated as a pass.
 
 Speaking-line grammar
 ---------------------
@@ -709,7 +715,7 @@ def run_asr_check(
     audios: list[Any],
     model_handle: Any,
 ) -> str:
-    """Entry point used by the node. Never raises — a failure is reported."""
+    """Entry point used by ``routes_asr``. Never raises — a failure is reported."""
     if model_handle is None:
         return "音频有效性校验 (ASR): 未接线 ASR 模型，已跳过。"
     warnings: list[str] = []

@@ -546,12 +546,8 @@ def build_plan_from_external_groups(
                 SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
                 for idx, aud in sorted((g.get("ref_video_audios") or {}).items())
             ]
-            prompt = reinforce_r2v_prompt(
-                prompt,
-                ref_indices=[r.index for r in refs],
-                video_indices=[v.index for v in ref_videos],
-                audio_indices=[a.index for a in ref_audios],
-            )
+            # No auto-tagging: the prompt alone decides which materials are used.
+            prompt = reinforce_r2v_prompt(prompt)
             row = timeline_row_for_index(timeline, int(src_index))
             if not row and isinstance(g, dict):
                 row = g

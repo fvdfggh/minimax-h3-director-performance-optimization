@@ -37,6 +37,15 @@ from .segment_runtime import frames_label, resolve_segment_raw_clip
 from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge
 from ..lib.media_b64 import tensor_frame_to_jpeg_b64
 
+#: Report wording for material dropped by the strict prompt filter
+#: (see ``batch_prepare.prepare_segment_materials`` -> ``ref_drops``).
+_IGNORED_REF_LABEL = {
+    "Picture": "参考图",
+    "Video": "参考视频",
+    "Audio": "参考音频",
+    "VideoAudio": "参考视频音轨",
+}
+
 def _prepare_one_segment(
     plan: DirectorPlan,
     seg,
@@ -103,16 +112,13 @@ def _prepare_one_segment(
             has_end = len(seg.refs) >= 2
         positive_prompt = reinforce_fl2v_prompt(positive_prompt, has_end_frame=has_end, has_start_frame=has_start)
     elif seg.task_key == "r2v":
-        ref_idxs = [int(getattr(r, "index", 0)) for r in (seg.refs or []) if r is not None]
-        vid_idxs = [int(getattr(v, "index", 0)) for v in (getattr(seg, "ref_videos", None) or []) if v is not None]
-        audio_idxs = [int(getattr(a, "index", 0)) for a in (seg.ref_audios or []) if a is not None]
-        positive_prompt = reinforce_r2v_prompt(positive_prompt, ref_indices=ref_idxs, video_indices=vid_idxs, audio_indices=audio_idxs)
+        # Reference tags are the user's alone: nothing is auto-added here, so the
+        # reference filter can drop every un-referenced picture / video / audio.
+        positive_prompt = reinforce_r2v_prompt(positive_prompt)
     elif seg.task_key == "v2v":
         positive_prompt = reinforce_v2v_prompt(positive_prompt)
     elif seg.task_key == "rv2v":
-        ref_idxs = [int(getattr(r, "index", 0)) for r in (seg.refs or []) if r is not None]
-        audio_idxs = [int(getattr(a, "index", 0)) for a in (seg.ref_audios or []) if a is not None]
-        positive_prompt = reinforce_rv2v_prompt(positive_prompt, ref_indices=ref_idxs, audio_indices=audio_idxs)
+        positive_prompt = reinforce_rv2v_prompt(positive_prompt)
     # Build inputs (without prev_tail — we don't have it yet in phase 1)
     first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios = _build_minimax_inputs(
         plan, seg, clip_frames=clip_frames, ctx_w=ctx_w, ctx_h=ctx_h, prev_tail=None,
@@ -242,6 +248,13 @@ def _prepare_one_segment(
         ref_image_size=ref_image_size,
     )
     staged["text_key"] = text_key
+    # Surface the strict prompt filter: material the prompt never referenced is
+    # not sent, and the user has to be able to see that happen.
+    for drop in staged.get("ref_drops") or []:
+        reports.append(
+            f"  Seg #{seg.index + 1}: 提示词未引用 {_IGNORED_REF_LABEL.get(drop['token'], drop['token'])}"
+            f" ×{drop['dropped']}，已忽略（实际使用 {drop['kept']} 个）"
+        )
     meta = {
         "seg": seg, "positive_prompt": positive_prompt,
         "ctx_w": ctx_w, "ctx_h": ctx_h, "sample_len": sample_len,

@@ -90,7 +90,7 @@ body.bd-token-resizing{cursor:ns-resize!important;user-select:none!important}
   border:1.5px solid #3dcc7a;background:rgba(61,204,122,.12);color:#c8ffd9;
   font-size:11px;font-weight:600;line-height:1.4;user-select:none;cursor:default;white-space:nowrap
 }
-.bd-token[contenteditable="false"]{-webkit-user-modify:read-only}
+.bd-token:not(.bd-token-say)[contenteditable="false"]{-webkit-user-modify:read-only}
 .bd-token.bd-token-image{
   border-color:#3dcc7a;background:rgba(61,204,122,.14);color:#c8ffd9;
   box-shadow:0 0 0 1px rgba(61,204,122,.22)
@@ -115,8 +115,17 @@ body.bd-token-resizing{cursor:ns-resize!important;user-select:none!important}
   display:inline-flex;align-items:center;flex-shrink:0;padding:2px 7px;
   background:rgba(139,110,224,.45);color:#f4f0ff;font-weight:700;font-size:10px;letter-spacing:.02em
 }
-.bd-token-say-text{padding:2px 8px;white-space:pre-wrap;word-break:break-word}
+/* Dialogue text stays editable in place: it is the only part of the card that
+   takes a caret, so clicking it types without splitting the atomic chip. */
+.bd-token-say-text{
+  padding:2px 8px;white-space:pre-wrap;word-break:break-word;
+  min-width:1em;outline:none;cursor:text;user-select:text;-webkit-user-modify:read-write
+}
+.bd-token-say-text:focus{background:rgba(139,110,224,.22)}
 .bd-token-say.is-empty .bd-token-say-text{color:#b9a9e8;font-style:italic}
+.bd-token-say.is-empty .bd-token-say-text:before{
+  content:attr(data-placeholder);color:#b9a9e8;font-style:italic;pointer-events:none
+}
 .bd-token-thumb{
   width:16px;height:16px;border-radius:3px;object-fit:cover;flex-shrink:0;background:#111;border:1px solid rgba(0,0,0,.35)
 }
@@ -346,7 +355,54 @@ function makeTokenChip(kind, ordinal1, mediaItem, { onActivate } = {}) {
     return chip;
 }
 
-/** One <Subject N> (SN) says: <d>[lang] text</d> block → a boxed speaker card. */
+/** Rebuild ``dataset.tag`` from the live dialogue body of a speaker card.
+ *
+ * ``serializeTokenEditor`` reads ``dataset.tag`` rather than the DOM, so an
+ * in-place edit only reaches the canonical textarea value once this runs.
+ * ``</d>`` is stripped so a stray close tag can never break the grammar.
+ */
+function syncSpeechChip(chip) {
+    if (!chip) return;
+    const body = chip.querySelector(".bd-token-say-text");
+    const flat = String(body?.textContent || "").replace(/\s+/g, " ").trim();
+    const subject = chip.dataset.subject || "1";
+    const speaker = chip.dataset.speaker || "1";
+    const lang = chip.dataset.lang || "";
+    chip.dataset.tag = `<Subject ${subject}> (S${speaker}) says: <d>[${lang}] ${flat.replace(/<\/?d>/gi, "")}</d>`;
+    chip.classList.toggle("is-empty", !flat);
+}
+
+/** Replace the selection with plain text inside a dialogue body (paste path). */
+function insertTextIntoSpeechBody(body, insert) {
+    if (!body || !insert) return;
+    const sel = window.getSelection();
+    let range = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+    if (!range || !body.contains(range.startContainer)) {
+        range = document.createRange();
+        range.selectNodeContents(body);
+        range.collapse(false);
+    }
+    if (!body.contains(range.endContainer)) {
+        range.setEnd(body, body.childNodes.length);
+    }
+    range.deleteContents();
+    const node = document.createTextNode(insert);
+    range.insertNode(node);
+    const after = document.createRange();
+    after.setStartAfter(node);
+    after.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(after);
+    syncSpeechChip(body.closest(".bd-token-say"));
+}
+
+/** One <Subject N> (SN) says: <d>[lang] text</d> block → a boxed speaker card.
+ *
+ * The speaker badge stays atomic, but the dialogue body is a nested editing
+ * host so the line can be reworded in place. Every keystroke rewrites
+ * ``dataset.tag``; the editor's own input handler then mirrors it into the
+ * textarea without rehydrating (which would drop the caret).
+ */
 function makeSpeechChip(subject, speaker, lang, text, raw) {
     const chip = document.createElement("span");
     chip.className = `${TOKEN_CLASS} bd-token-say`;
@@ -357,6 +413,7 @@ function makeSpeechChip(subject, speaker, lang, text, raw) {
     chip.dataset.kind = "say";
     chip.dataset.subject = String(subject);
     chip.dataset.speaker = String(speaker);
+    chip.dataset.lang = String(lang || "");
     chip.title = `S${speaker} · Subject ${subject}${lang ? ` · ${lang}` : ""}`;
 
     const who = document.createElement("span");
@@ -366,12 +423,26 @@ function makeSpeechChip(subject, speaker, lang, text, raw) {
 
     const body = document.createElement("span");
     body.className = "bd-token-say-text";
+    body.contentEditable = "true";
+    body.spellcheck = false;
+    body.dataset.placeholder = "…";
     const flat = String(text || "").replace(/\s+/g, " ").trim();
-    body.textContent = flat || "…";
+    body.textContent = flat;
     chip.classList.toggle("is-empty", !flat);
     chip.appendChild(body);
 
+    const onEdit = () => syncSpeechChip(chip);
+    body.addEventListener("input", onEdit);
+    body.addEventListener("compositionend", onEdit);
+    body.addEventListener("keydown", (event) => {
+        // A speaking line is a single logical line; Enter would split the <d> body.
+        if (event.key === "Enter") event.preventDefault();
+    });
+
     chip.addEventListener("pointerdown", (event) => {
+        // Clicking the dialogue text drops the caret inside; anywhere else on the
+        // card stays atomic (caret before/after) so the chip never breaks apart.
+        if (event.target === body || body.contains(event.target)) return;
         event.preventDefault();
         const editor = chip.closest(".bd-token-editor");
         if (!editor) return;
@@ -891,10 +962,15 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia, options 
         },
     };
 
+    // A dialogue body is itself an editing host, so focus can sit on it rather
+    // than on `rich`; treat any focused descendant as "the editor is active".
+    const editorHasFocus = () => document.activeElement === rich
+        || !!rich.contains?.(document.activeElement);
+
     const hydrateFromValue = (value) => {
-        const caret = document.activeElement === rich ? serializedCaretOffset(rich) : null;
+        const caret = editorHasFocus() ? serializedCaretOffset(rich) : null;
         hydrateTokenEditor(rich, value, getMedia, chipOpts);
-        if (caret != null && document.activeElement === rich) {
+        if (caret != null && editorHasFocus()) {
             setCaretBySerializedOffset(rich, caret);
         }
     };
@@ -1036,7 +1112,7 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia, options 
         if (composing) return;
         clearTimeout(rehydrateTimer);
         rehydrateTimer = setTimeout(() => {
-            if (composing || document.activeElement !== rich) return;
+            if (composing || !editorHasFocus()) return;
             if (!editorHasRawTagsInTextNodes(rich)) {
                 syncToTextarea({ emitInput: true });
                 return;
@@ -1077,6 +1153,18 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia, options 
         e.stopPropagation();
         e.stopImmediatePropagation?.();
         const text = (e.clipboardData || window.clipboardData)?.getData("text/plain") || "";
+        // Paste inside a dialogue card edits that line instead of tearing the chip
+        // down and rehydrating the whole editor (which moves the caret out).
+        const anchorNode = window.getSelection()?.anchorNode;
+        const anchorEl = anchorNode
+            ? (anchorNode.nodeType === Node.ELEMENT_NODE ? anchorNode : anchorNode.parentElement)
+            : null;
+        const sayBody = anchorEl?.closest?.(".bd-token-say-text");
+        if (sayBody && rich.contains(sayBody)) {
+            insertTextIntoSpeechBody(sayBody, text.replace(/\r\n?/g, "\n").replace(/\s+/g, " "));
+            syncToTextarea({ emitInput: true });
+            return;
+        }
         insertAtCaret(rich, text.replace(/\r\n/g, "\n"), getMedia, chipOpts);
         syncToTextarea({ emitInput: true });
         openIfMention();
@@ -1159,10 +1247,15 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia, options 
         }
     });
 
-    rich.addEventListener("blur", () => {
+    // `blur`/`focusout`: a dialogue body is its own editing host, so leaving it
+    // does not fire `blur` on `rich` — commit here or the pending debounce (which
+    // bails once unfocused) would drop the last edit.
+    const commitEdits = () => {
         syncToTextarea({ emitInput: true });
         refreshTokenStates(rich, getMedia);
-    });
+    };
+    rich.addEventListener("blur", commitEdits);
+    rich.addEventListener("focusout", commitEdits);
 
     // document/window listeners outlive the textarea. Batch cards rebuild with
     // innerHTML, so unnamed handlers would accumulate and pin the whole editor.

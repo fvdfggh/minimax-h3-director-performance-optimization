@@ -191,35 +191,69 @@ export function stripRemovedDirectorWidgetValues(node, info) {
         );
     }
     if (values.length > widgets.length) {
-        // Still longer: the workflow predates other removals too, so every value
-        // from here on lands on the wrong widget. Only a re-save can realign it.
+        // Still longer: the workflow predates other removals too, and where those
+        // widgets sat cannot be reconstructed — every value after the gap lands on
+        // the wrong widget (asr_check / use_sigmas end up holding strings). A
+        // re-save writes widgets_values_named alongside the array, which
+        // restoreDirectorWidgetValues then reads, realigning it for good.
         console.warn(
             `[MiniMax] ${node?.type}: widgets_values 仍有 ${values.length - widgets.length} 个多余值，`
-            + "控件会被错位赋值（如 asr_check / use_sigmas 被塞进字符串）。请在 ComfyUI 中核对控件后重新保存该工作流。",
+            + "控件会被错位赋值（如 asr_check / use_sigmas 被塞进字符串）。"
+            + "请在 ComfyUI 中核对控件后重新保存该工作流，之后刷新不再错位。",
         );
     }
 }
 
 /**
- * Normalise a stale widget-value array *before* ComfyUI applies it.
+ * Restore widget values *by name* when the workflow carries a named map.
  *
- * Wraps ``configure`` instead of patching ``onConfigure`` because by then the
- * shifted values have already been written onto the widgets. Delegates to
- * whatever ``configure`` was in place (inherited or previously patched) so this
- * stays a pure pre-processing step.
+ * ComfyUI only ever reads the positional ``widgets_values`` array, so any widget
+ * deleted since the workflow was saved shifts every later value. Saving the map
+ * alongside it makes the next load independent of widget order: names present in
+ * the map win, anything added later keeps its own default.
+ */
+export function restoreDirectorWidgetValues(node, info) {
+    const named = info?.widgets_values_named;
+    if (!named || typeof named !== "object") {
+        stripRemovedDirectorWidgetValues(node, info);
+        return;
+    }
+    const widgets = serializableWidgets(node);
+    const values = [];
+    for (const w of widgets) {
+        const hit = w?.name && Object.prototype.hasOwnProperty.call(named, w.name);
+        values.push(hit ? named[w.name] : w.value);
+    }
+    // Rewrite the array ComfyUI is about to apply positionally so both paths agree.
+    info.widgets_values = values;
+}
+
+/**
+ * Make Director widget values survive widget deletions.
+ *
+ * Load: normalise the saved values *before* ComfyUI applies them — patching
+ * ``onConfigure`` would be too late, the shifted values are already on the
+ * widgets by then. Delegates to whatever ``configure`` was in place (inherited or
+ * previously patched) so this stays pure pre-processing.
+ *
+ * ComfyUI's own ``LGraphNode.serialize()`` already writes a ``widgets_values_named``
+ * map next to the positional array, but it only *restores* from it when the
+ * ``namedValuesRestore`` setting is on — otherwise the stale positional array wins
+ * and every refresh re-shifts the values. Reading the map here makes the Director
+ * independent of that setting (and of widget order).
  */
 export function patchDirectorWidgetValueMigration(nodeType) {
     const proto = nodeType?.prototype;
     if (!proto || proto.__mmxWidgetValuesMigrated) return;
-    const previous = proto.configure;
-    if (typeof previous !== "function") return;
+    const prevConfigure = proto.configure;
+    if (typeof prevConfigure !== "function") return;
     proto.__mmxWidgetValuesMigrated = true;
     proto.configure = function (info) {
         try {
-            stripRemovedDirectorWidgetValues(this, info);
+            restoreDirectorWidgetValues(this, info);
         } catch (e) {
             /* best-effort: a stale array must never block loading */
         }
-        return previous.apply(this, arguments);
+        return prevConfigure.apply(this, arguments);
     };
 }

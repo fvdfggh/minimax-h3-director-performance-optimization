@@ -16,8 +16,10 @@ Two design points worth keeping in view:
 * the cache file name carries **no segment index on purpose** — two segments with
   identical text inputs must resolve to the same file so the second one is served
   from disk instead of being encoded again. Text is the only encoding kind cached
-  here; reference image / video encoding lives in ``_vit/`` (see
-  :mod:`vision_cache`).
+  here; the reference media's own passes live outside it — the vision tower's
+  output in ``_vit/`` (:mod:`vision_cache`) and the VAE latents in ``_reflat/``
+  (:mod:`ref_latent_cache`), both addressed by content so they survive a prompt
+  edit or a canvas switch.
 """
 
 from .conditioning_admin import (

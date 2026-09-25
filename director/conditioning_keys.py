@@ -119,21 +119,30 @@ def text_cache_key(
     )
 
 
-def _has_visual_inputs(
+def _canvas_bound(
     ref_images: Any = None,
     ref_videos: Any = None,
     first_frame: Any = None,
     last_frame: Any = None,
 ) -> bool:
-    """True when this encoding actually consumed *pixels*.
+    """True when this encoding cannot be reused at another resolution.
 
-    Those pixels are downscaled against the canvas, so only then can the canvas
-    size change the encoding. Pure-prompt batches (t2v, or reference **audio**
-    only) never look at a pixel and therefore carry no canvas dependency.
+    Only the i2v / fl2v **first / last frames** bind it: they are the generated
+    video's own opening and closing frame, so they are stretched and centre-cropped
+    onto the canvas, and Qwen sees them at exactly that size.
+
+    Nothing else does. Reference images and reference videos both reach Qwen at
+    native resolution, and the latents they produce live in
+    :mod:`ref_latent_cache` under an address the *reader* re-derives from its own
+    canvas — so the same file serves 768p and 1080p alike, each resolving to its
+    own latents. Pure-prompt batches (t2v, or reference audio only) are
+    canvas-free as well.
+
+    ``ref_images`` / ``ref_videos`` are accepted but deliberately unused: they are
+    what used to bind the encoding to the canvas, and keeping the parameters makes
+    the change (and the call sites still passing them) readable.
     """
-    if first_frame is not None or last_frame is not None:
-        return True
-    return bool(ref_images) or bool(ref_videos)
+    return first_frame is not None or last_frame is not None
 
 
 def _prompt_hash(
@@ -160,17 +169,18 @@ def _prompt_hash(
       keyframe anchors), never the token stream: changing a segment's duration
       therefore reuses the encoding instead of paying for another Qwen prefill.
       :func:`retime_conditioning_for_frames` re-maps those extras on load.
-    * **The canvas only counts when pixels are involved.** Reference images /
-      videos and the i2v/fl2v first/last frames are resized against the canvas
-      before Qwen sees them, so their token stream (and the matching reference
-      VAE latents) genuinely change with the resolution; a batch with no visual
-      input is keyed canvas-free and survives a resolution change.
+    * **The canvas only counts when the encoding is canvas-bound** — see
+      :func:`_canvas_bound`. Only i2v / fl2v keyframes are: they *are* frames of
+      the output, so they are fitted to the canvas before Qwen sees them.
+      Reference images and videos are not — Qwen gets them native, and their
+      latents are resolved per-canvas at load time — so a resolution change keeps
+      reusing the encoding.
 
     Keeping both correct is what lets one file serve every duration of a prompt
     instead of one file per (prompt, resolution, duration) triple.
     """
     ref_hash = _hash_ref_images(ref_images)
-    if _has_visual_inputs(ref_images, ref_videos, first_frame, last_frame):
+    if _canvas_bound(ref_images, ref_videos, first_frame, last_frame):
         canvas = f"{int(width)}|{int(height)}"
     else:
         canvas = "canvas-free"

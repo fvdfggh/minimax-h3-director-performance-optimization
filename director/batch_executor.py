@@ -305,15 +305,19 @@ def execute_director_batch(
 
     # ---- Step 1: text encoder -------------------------------------------------
     if pending:
-        n_deduped = len(pending) - len(used_text_keys)
+        # Counted over ``pending`` rather than every segment: keys of fully
+        # cached segments are in ``used_text_keys`` too, and subtracting those
+        # reported a negative "deduped" whenever a run mixed hits and misses.
+        pending_keys = {p.get("text_key") for p in pending if p.get("text_key") is not None}
+        n_deduped = len(pending) - len(pending_keys)
         reports.append(
-            f"  text encoder: {len(used_text_keys)} encode(s) for {len(pending)} segment(s)"
+            f"  text encoder: {len(pending_keys)} encode(s) for {len(pending)} segment(s)"
             + (f", {n_deduped} deduped" if n_deduped > 0 else "")
             + (f", {cache_hits} cache hit(s)" if cache_hits else "")
         )
         n_reused = encode_text_batch(clip, pending)
         if n_reused:
-            reports.append(f"  text encoder: {n_reused} segment(s) shared an encoding")
+            reports.append(f"  text encoder: {n_reused} segment(s) reused an encoding (no prefill)")
         unload_model_group(clip, reports=reports, label="text encoder (CLIP)")
 
         # ---- Step 2: video VAE ----------------------------------------------

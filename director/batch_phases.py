@@ -209,6 +209,9 @@ def _prepare_one_segment(
             ref_image_size=ref_image_size, ref_images=ref_images,
             workflow_name=workflow_name,
             ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
+            # Two-level hit: a canvas we have never encoded at still has a usable
+            # text encoding, so take it and leave the latents to the VAEs.
+            require_latents=False,
         )
     # Ref data feeds Phase 2; write it before any cache short-circuit.
     ref_data = {
@@ -229,8 +232,8 @@ def _prepare_one_segment(
         "use_motion_context": use_motion_context,
     }
     _save_batch_ref(node_id, seg.index, ref_data, cache_dir)
-    if cached_conditioning is not None:
-        # Cache hit: nothing to encode, so this segment never touches a model.
+    if cached_conditioning is not None and not cached_conditioning.get("latents_pending"):
+        # Full hit: text and latents, so this segment never touches a model.
         _save_batch_conditioning(
             node_id, seg.index,
             cached_conditioning["positive"], cached_conditioning["negative"],
@@ -248,6 +251,13 @@ def _prepare_one_segment(
         ref_image_size=ref_image_size,
     )
     staged["text_key"] = text_key
+    if cached_conditioning is not None:
+        # Text half was cached but the latents were never encoded at this canvas.
+        # Carry the encoding over so the Qwen prefill is skipped and only the
+        # reference VAEs run.
+        staged["cond"] = cached_conditioning["positive"]
+        staged["text_reused"] = True
+        reports.append(f"  Seg #{seg.index + 1}: text CACHE HIT, latents to encode")
     # Surface the strict prompt filter: material the prompt never referenced is
     # not sent, and the user has to be able to see that happen.
     for drop in staged.get("ref_drops") or []:

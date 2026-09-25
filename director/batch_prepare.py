@@ -11,8 +11,12 @@ VAE inside a single call, which would keep all three resident at once:
     step 4  assemble   — attach the finished latent blocks to the conditioning
 
 The split is only possible because the CLIP side consumes *pixels*: Qwen sees the
-resized refs (``ref_items`` / ``images``), while the latents that ride in
-``minimax_refs`` are produced afterwards by the VAEs from those same pixels.
+reference pixels (``ref_items`` / ``images``) while the latents that ride in
+``minimax_refs`` are produced afterwards by the VAEs. Reference *images* reach
+Qwen at **native resolution** — Qwen's own preprocessing resizes and patches
+them, so fitting them to the canvas here would only discard detail and pin the
+ViT cache key to the canvas size — whereas the VAE still encodes the
+canvas-fitted pixels.
 
 ``prepare_segment_materials`` also owns the R2V reference renumbering, so a
 prompt's ``<Picture 3>`` tokens keep pointing at the material the user picked
@@ -55,7 +59,7 @@ def _ref_audio_encode(audio_vae, audio):
     return cls._encode_ref_audio(audio_vae, audio)
 
 
-def _job(media, container, key, raw=None):
+def _job(media, container, key, raw=None, address=None, ref=None):
     """Describe one VAE encode.
 
     ``cache_key`` is ``(id(raw), shape, dtype)``. In global edit mode every
@@ -66,15 +70,66 @@ def _job(media, container, key, raw=None):
 
     Audio arrives as a dict, so the tensor under ``"waveform"`` is what identifies
     it — two dicts wrapping the same waveform still dedupe to one encode.
+
+    ``address`` is where the encode lives in :mod:`ref_latent_cache`; ``ref`` is
+    how to re-derive that address later at a *different* canvas (source hash +
+    variant). ``ref`` is stamped onto the container so a cached text encoding can
+    carry it instead of a second copy of the latent.
     """
     tensor = media["waveform"] if isinstance(media, dict) else media
     rt = raw if raw is not None else media
     if isinstance(rt, dict):
         rt = rt.get("waveform")
+    if ref is not None:
+        container["_reflat" if key == "latent" else "_reflat_audio"] = ref
     return {
         "pixel": media, "container": container, "key_name": key,
         "cache_key": (id(rt), tuple(tensor.shape), str(tensor.dtype)),
         "raw": rt,
+        "address": address,
+    }
+
+
+def _audio_track(audio):
+    """The tensor the audio VAE actually encodes (``None``-safe)."""
+    if isinstance(audio, dict):
+        return audio.get("waveform")
+    return audio
+
+
+def _reflat_ref(
+    raw,
+    canvas,
+    variant: str,
+    *,
+    kind: str = "video",
+    ref_image_size: str = "",
+    frames: int | None = None,
+) -> dict:
+    """``address`` / ``ref`` kwargs for :func:`_job`, or ``{}`` when caching is off.
+
+    The **address** is where this run's VAE encode is stored; the **reference** is
+    what a cached text encoding keeps in its place. The reference names the source
+    media and the variant but *not* the canvas — the reader supplies its own — so
+    one text encoding can resolve to the 768p latent or the 1080p one.
+
+    ``frames`` has to ride along because a reference clip is trimmed to the
+    segment's frame count, which no reader can re-derive from the canvas.
+    """
+    from . import ref_latent_cache
+
+    if raw is None or not ref_latent_cache.enabled():
+        return {}
+    seed = ref_latent_cache.seed(raw)
+    ref = {"kind": kind, "seed": seed, "variant": variant}
+    if frames is not None:
+        ref["frames"] = int(frames)
+    return {
+        "address": ref_latent_cache.address_of_seed(
+            kind, seed, canvas,
+            variant=variant, ref_image_size=ref_image_size, frames=frames,
+        ),
+        "ref": ref,
     }
 
 
@@ -336,13 +391,21 @@ def prepare_segment_materials(
             out["images"].append(img)
             kf = {"resolved_frame_index": 0, "image": img}
             out["keyframes"].append(kf)
-            out["image_jobs"].append(_job(img, kf, "latent", first_frame))
+            out["image_jobs"].append(_job(
+                img, kf, "latent", first_frame,
+                **_reflat_ref(first_frame, (width, height), "first_frame"),
+            ))
         if last_frame is not None:
+            # Centre-cropped, where the first frame is stretched: same source
+            # image as both keyframes must not land on one cache entry.
             img = resize(last_frame[:1], width, height, "center")
             out["images"].append(img)
             kf = {"resolved_frame_index": frame_count - 1, "image": img}
             out["keyframes"].append(kf)
-            out["image_jobs"].append(_job(img, kf, "latent", last_frame))
+            out["image_jobs"].append(_job(
+                img, kf, "latent", last_frame,
+                **_reflat_ref(last_frame, (width, height), "last_frame"),
+            ))
         return out
 
     # --- MiniMaxH3ReferenceToVideo geometry -----------------------------------
@@ -364,28 +427,41 @@ def prepare_segment_materials(
         th = max(CANVAS_MULTIPLE, round(h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
         resized = resize(img[:1], tw, th, "disabled")
         blk = {"kind": "image", "latent_h": th // 16, "latent_w": tw // 16, "latent": None}
-        out["ref_items"].append({"type": "image", "data": resized})
+        # Qwen's own preprocessing (``process_qwen2vl_images``) resizes and
+        # patches whatever it is handed, so the ViT gets the *native* reference
+        # pixels. The canvas fit above exists for the VAE (its latent must sit on
+        # the canvas grid); reusing it for Qwen would just throw detail away and
+        # tie the ViT cache key to the canvas size.
+        out["ref_items"].append({"type": "image", "data": img[:1, ..., :3]})
         out["ref_blocks"].append(blk)
-        out["image_jobs"].append(_job(resized, blk, "latent", img))
+        out["image_jobs"].append(_job(
+            resized, blk, "latent", img,
+            **_reflat_ref(
+                img, (width, height), "ref_image", ref_image_size=ref_image_size,
+            ),
+        ))
 
     for name, video_frames in ref_videos.items():
         if video_frames is None:
             continue
         soundtrack = ref_video_audios.get("ref_video_audio_" + name.rsplit("_", 1)[-1])
+        # Trim to the model's 17k+5 grid first: the frame count follows from the
+        # clip and the segment length, never from the canvas.
+        n = video_frames.shape[0]
+        if n > frame_count:
+            n = frame_count
+        if n < 5:
+            raise ValueError("MiniMax H3 reference videos need at least 5 frames (~0.2s at 24 fps)")
+        while n % 17 != 5:
+            n -= 1
         vh, vw = video_frames.shape[1], video_frames.shape[2]
         cw, ch = adapt(vw, vh)
         if vw * vh < cw * ch:
             cw = max(CANVAS_MULTIPLE, round(vw / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
             ch = max(CANVAS_MULTIPLE, round(vh / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
-        frames = resize(video_frames, cw, ch, "disabled")
-        if frames.shape[0] > frame_count:
-            frames = frames[:frame_count]
-        n = frames.shape[0]
-        if n < 5:
-            raise ValueError("MiniMax H3 reference videos need at least 5 frames (~0.2s at 24 fps)")
-        while n % 17 != 5:
-            n -= 1
-        frames = frames[:n]
+        # The VAE gets the canvas fit — that latent rides in the DiT pack at
+        # every step, so it is the half that has to sit on the canvas grid.
+        frames = resize(video_frames[:n], cw, ch, "disabled")
 
         blk = {
             "kind": None,               # resolved once the soundtrack is encoded
@@ -393,17 +469,25 @@ def prepare_segment_materials(
             "latent_t": None, "latent_h": ch // 16, "latent_w": cw // 16,
             "ref_audio_t": 0, "latent": None, "audio_latent": None,
         }
-        out["image_jobs"].append(_job(frames, blk, "latent", video_frames))
+        out["image_jobs"].append(_job(
+            frames, blk, "latent", video_frames,
+            **_reflat_ref(video_frames, (width, height), "ref_video", frames=n),
+        ))
 
         if soundtrack is not None:
-            ref_items_audio = {"type": "audio"}
-            out["ref_items"].append(ref_items_audio)
-            out["audio_jobs"].append(_job(soundtrack, blk, "audio_latent", soundtrack))
+            out["ref_items"].append({"type": "audio"})
+            out["audio_jobs"].append(_job(
+                soundtrack, blk, "audio_latent", soundtrack,
+                **_reflat_ref(_audio_track(soundtrack), (0, 0), "ref_audio", kind="audio"),
+            ))
 
-        # Qwen sees the video at 2 fps with timestamps
-        sample_idx = list(range(0, frames.shape[0], FPS // 2))
+        # Qwen sees the video at 2 fps with timestamps — at *native* resolution,
+        # exactly like a reference image: ``process_video_block`` does its own
+        # resize and patching, so fitting the clip to the canvas here would only
+        # discard detail and tie the vision cache to the canvas.
+        sample_idx = list(range(0, n, FPS // 2))
         out["ref_items"].append({
-            "type": "video", "data": frames[sample_idx],
+            "type": "video", "data": video_frames[sample_idx, ..., :3],
             "timestamps": [i / 2.0 for i in range(len(sample_idx))],
         })
         out["ref_blocks"].append(blk)
@@ -414,7 +498,10 @@ def prepare_segment_materials(
         blk = {"kind": "audio", "ref_audio_t": 0, "audio_latent": None}
         out["ref_items"].append({"type": "audio"})
         out["ref_blocks"].append(blk)
-        out["audio_jobs"].append(_job(audio, blk, "audio_latent", audio))
+        out["audio_jobs"].append(_job(
+            audio, blk, "audio_latent", audio,
+            **_reflat_ref(_audio_track(audio), (0, 0), "ref_audio", kind="audio"),
+        ))
 
     return out
 
@@ -442,6 +529,12 @@ def encode_text_batch(clip, prepared: list[dict]) -> int:
     by_key: dict[str, Any] = {}
     reused = 0
     for item in prepared:
+        if item.get("cond") is not None:
+            # Served from disk: the text half only, because its reference latents
+            # were never encoded at this canvas. Nothing to tokenize or prefill.
+            item["text_reused"] = True
+            reused += 1
+            continue
         key = item.get("text_key")
         if key is not None and key in by_key:
             # assemble_conditioning pairs this with the segment's own ref_blocks
@@ -468,7 +561,16 @@ def encode_video_vae_batch(vae, prepared: list[dict], cache: dict | None = None)
     is encoded once and shared via ``cache``. Latents are treated as read-only
     downstream — the DiT concatenates them — so sharing one tensor is safe and
     avoids both a repeat encode and a repeat GPU upload.
+
+    ``cache`` spans one run only; :mod:`ref_latent_cache` is the layer beneath it
+    and persists the same result across runs, addressed by the pixels. The
+    canvas-fitted pixels are a pure function of (reference media, canvas), so
+    switching the canvas back — or editing a prompt, which moves the
+    conditioning cache onto another key and gets the old file pruned — reuses
+    the encode instead of paying for the VAE again.
     """
+    from . import ref_latent_cache
+
     cache = {} if cache is None else cache
     done = 0
     for item in prepared:
@@ -476,12 +578,21 @@ def encode_video_vae_batch(vae, prepared: list[dict], cache: dict | None = None)
             ck = job["cache_key"]
             if ck in cache:
                 job["container"][job["key_name"]] = cache[ck]
+                continue
+            # ``job["address"]`` was derived from the source media + canvas, so it
+            # is known before any tensor work — a hit costs no resize at all.
+            addr = job.get("address")
+            entry = ref_latent_cache.load_by_key(addr) if addr else None
+            if entry is not None:
+                z = entry["latent"]
             else:
                 z = vae.encode(job["pixel"])
-                cache[ck] = z
-                cache[(ck, "raw")] = job["raw"]   # pin: keep id() stable
-                job["container"][job["key_name"]] = z
+                if addr:
+                    ref_latent_cache.store_by_key(addr, z)
                 done += 1
+            cache[ck] = z
+            cache[(ck, "raw")] = job["raw"]   # pin: keep id() stable
+            job["container"][job["key_name"]] = z
         # Downstream only needs the latent, so drop the pixel after encoding.
         for kf in item["keyframes"]:
             kf.pop("image", None)
@@ -492,8 +603,16 @@ def encode_video_vae_batch(vae, prepared: list[dict], cache: dict | None = None)
 def encode_audio_vae_batch(audio_vae, prepared: list[dict], cache: dict | None = None) -> int:
     """Step 3 — audio VAE: encode every prepared soundtrack.
 
-    Shares results the same way as :func:`encode_video_vae_batch`.
+    Shares results the same way as :func:`encode_video_vae_batch`, including the
+    cross-run layer: a soundtrack is the single most expensive thing to encode
+    here and it is entirely independent of prompt and canvas, so it is cached by
+    its waveform under :mod:`ref_latent_cache`.
+
+    ``ref_audio_t`` has to ride along in the payload — it is the latent length
+    the audio VAE reports, and the DiT payload reads it back.
     """
+    from . import ref_latent_cache
+
     cache = {} if cache is None else cache
     done = 0
     for item in prepared:
@@ -502,11 +621,22 @@ def encode_audio_vae_batch(audio_vae, prepared: list[dict], cache: dict | None =
             if ck in cache:
                 z, t = cache[ck]
             else:
-                z, t = _ref_audio_encode(audio_vae, job["pixel"])
-                t = int(t)
+                # Audio arrives as a dict; the waveform under it is what the VAE
+                # actually encodes, so it is what identifies the entry.
+                media = job["pixel"]
+                addr = job.get("address")
+                entry = ref_latent_cache.load_by_key(addr) if addr else None
+                if entry is not None and entry.get("ref_audio_t") is not None:
+                    z = entry["latent"]
+                    t = int(entry["ref_audio_t"])
+                else:
+                    z, t = _ref_audio_encode(audio_vae, media)
+                    t = int(t)
+                    if addr:
+                        ref_latent_cache.store_by_key(addr, z, ref_audio_t=int(t))
+                    done += 1
                 cache[ck] = (z, t)
                 cache[(ck, "raw")] = job["raw"]
-                done += 1
             job["container"][job["key_name"]] = z
             job["container"]["ref_audio_t"] = int(t)
         item["audio_jobs"].clear()

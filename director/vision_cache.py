@@ -139,6 +139,40 @@ def _load_entry(path: Path, device) -> tuple[torch.Tensor, dict] | None:
     return merged, {"grid": grid, "deepstack": deepstack}
 
 
+def clear(keep_newer_than: float | None = None) -> int:
+    """Drop every persisted ViT output. Returns the number deleted.
+
+    Only rebuildable derived data lives here, so clearing is always safe — the
+    worst case is one extra vision-tower pass. ``keep_newer_than`` spares entries
+    written at or after that instant, which is how「清空缓存」avoids deleting what
+    the run that triggered it just produced.
+    """
+    d = _vit_dir()
+    if d is None or not d.is_dir():
+        return 0
+    deleted = 0
+    try:
+        files = [p for p in d.glob(f"{cache_layout.VIT_PREFIX}_*{cache_layout.VIT_SUFFIX}") if p.is_file()]
+    except Exception:
+        return 0
+    for p in files:
+        if keep_newer_than is not None:
+            try:
+                if p.stat().st_mtime >= keep_newer_than:
+                    continue
+            except OSError:
+                pass
+        try:
+            p.unlink()
+            deleted += 1
+        except OSError as exc:
+            log.debug("Could not delete ViT cache entry %s: %s", p.name, exc)
+    if deleted:
+        log.info("ViT cache cleared: %d file(s)", deleted)
+    _puts[0] = 0
+    return deleted
+
+
 def prune(max_bytes: int | None = None, cache_dir: Path | None = None) -> int:
     """Drop oldest entries until the cache fits ``max_bytes``. Returns bytes freed."""
     d = cache_dir or _vit_dir()

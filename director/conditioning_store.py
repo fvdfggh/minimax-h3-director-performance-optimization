@@ -18,11 +18,12 @@ import torch
 
 from .cache_layout import TEXT_PREFIX as _TEXT_PREFIX
 from .conditioning_keys import (
+    _canvas_bound,
     _get_cache_dir,
-    _has_visual_inputs,
     _prompt_hash,
     retime_conditioning_for_frames,
 )
+from .ref_latent_cache import attach_latents, detach_latents, strip_latents
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.conditioning.store")
 
@@ -132,8 +133,12 @@ def save_conditioning_cache(
             return cond
         
         del latent  # zero canvas — rebuilt from metadata on load, never stored
+        # The reference latents are not stored either — only their address in
+        # ``_reflat/``. One clip is routinely referenced by several prompts, and
+        # without this every one of those files would carry its own copy of the
+        # same video latent, which is by far the largest thing in the cache.
         cache_data = {
-            "positive": prepare_for_save(positive),
+            "positive": prepare_for_save(detach_latents(positive)),
             "negative": prepare_for_save(negative),
             # Kept as a key (value None) so readers of both old and new files can
             # use ``cache_data["latent"]`` without a KeyError.
@@ -147,7 +152,7 @@ def save_conditioning_cache(
                 "frame_count": int(frame_count) if frame_count else None,
                 # False ⇒ nothing in this payload was derived from the canvas,
                 # so the same file may serve any resolution.
-                "canvas_bound": _has_visual_inputs(ref_images, ref_videos, first_frame, last_frame),
+                "canvas_bound": _canvas_bound(ref_images, ref_videos, first_frame, last_frame),
                 "task_key": task_key,
                 "ref_image_size": ref_image_size,
                 "prompt_preview": prompt[:200] + "..." if len(prompt) > 200 else prompt,
@@ -178,8 +183,16 @@ def load_conditioning_cache(
     ref_videos: Any = None,
     first_frame: Any = None,
     last_frame: Any = None,
+    require_latents: bool = True,
 ) -> dict | None:
     """Load cached conditioning tensors from disk.
+
+    ``require_latents=False`` splits the hit into two: when the text encoding is
+    there but its reference latents were never encoded at *this* canvas, the
+    result comes back with ``latents_pending=True`` and a ``positive`` that has
+    been stripped of its reference blocks. The caller then re-derives the blocks
+    and re-encodes only those, instead of throwing away a perfectly good Qwen
+    prefill just because the resolution moved.
 
     ``segment_index`` is accepted for call-site compatibility but takes no part in
     the lookup: files are named by text hash alone, so any segment whose text
@@ -187,6 +200,9 @@ def load_conditioning_cache(
 
     Returns dict with 'positive', 'negative', 'latent' keys, or None if cache miss.
     Tensors are moved to CUDA (GPU) for use by the model.
+
+    The file holds only the text encoding plus the *addresses* of the reference
+    latents; those are re-loaded from :mod:`ref_latent_cache` on the way out.
 
     ``latent`` is the initial AV canvas. Files written before it was dropped from
     the payload still carry it and are used as-is; newer files store ``None`` and
@@ -238,7 +254,29 @@ def load_conditioning_cache(
                 return {k: move_to_device(v) for k, v in cond.items()}
             return cond
 
-        positive = move_to_device(cache_data["positive"])
+        # Put the reference latents back before anything else, resolving them at
+        # *this* run's canvas: the encoding names the source media, not a
+        # resolution. A canvas whose latents were never encoded (or whose entry
+        # was dropped by LRU / a cache clear) makes the whole encoding unusable,
+        # and sampling on it would silently ignore the references.
+        latents_pending = False
+        positive = attach_latents(cache_data["positive"], (width, height), ref_image_size)
+        if positive is None:
+            if require_latents:
+                log.info(
+                    "Cache invalidated for seg #%d (reference latents not encoded at %dx%d)",
+                    segment_index + 1, int(width), int(height),
+                )
+                return None
+            # Text is good, latents are not. Hand the encoding back bare so the
+            # run re-encodes only the references and keeps the Qwen prefill.
+            log.info(
+                "Text cache hit for seg #%d; latents pending at %dx%d",
+                segment_index + 1, int(width), int(height),
+            )
+            positive = strip_latents(cache_data["positive"])
+            latents_pending = True
+        positive = move_to_device(positive)
         negative = move_to_device(cache_data["negative"])
         latent = cache_data.get("latent")
         if latent is not None and meta.get("length") and int(meta.get("length")) != int(length):
@@ -279,8 +317,9 @@ def load_conditioning_cache(
             "positive": positive,
             "negative": negative,
             "latent": latent,
+            "latents_pending": latents_pending,
         }
-        
+
     except Exception as exc:
         log.warning("Failed to load conditioning cache for seg #%d: %s", segment_index + 1, exc)
         return None
@@ -332,8 +371,20 @@ def load_conditioning_by_key(
                 return {k: move_to_device(v) for k, v in cond.items()}
             return cond
 
+        # The second pass has no reference pixels of its own, so it can only get
+        # the latents back from ``_reflat/`` — resolved at the canvas the first
+        # pass recorded. A missing entry is reported as a miss rather than handed
+        # out reference-less.
+        meta = cache_data.get("metadata", {}) or {}
+        canvas = (int(meta.get("width") or 0), int(meta.get("height") or 0))
+        positive = attach_latents(
+            cache_data.get("positive"), canvas, str(meta.get("ref_image_size") or ""),
+        )
+        if positive is None:
+            log.info("No conditioning cache usable for key=%s (reference latents missing)", text_key)
+            return None
         return {
-            "positive": move_to_device(cache_data.get("positive")),
+            "positive": move_to_device(positive),
             "negative": move_to_device(cache_data.get("negative")),
             "latent": None,
             "metadata": cache_data.get("metadata", {}),

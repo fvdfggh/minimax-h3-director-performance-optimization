@@ -67,8 +67,14 @@ CACHE_ROOT = "minimax_director_opt_cache"
 # Only text is cached here. ``cond_image_`` / ``cond_video_`` used to be listed
 # next to it, but no writer was ever built for them — they were a naming
 # reservation from the layout unification (426a2c1). Reference image / video
-# encoding is cached by :mod:`vision_cache` instead, as ViT output under the
-# global ``_vit/`` directory. Don't re-add them here: look at ``_vit`` first.
+# encoding is cached outside this directory instead: the ViT pass under the
+# global ``_vit/`` (:mod:`vision_cache`) and the VAE latents under ``_reflat/``
+# (:mod:`ref_latent_cache`). Don't re-add them here.
+#
+# The file holds the text encoding plus the *addresses* of the reference latents
+# in ``_reflat/`` — never a second copy of them. ``prune_unused_conditioning_cache``
+# deletes it as soon as a run stops using its key (a canvas switch does exactly
+# that), which is why the latents themselves have to live outside it.
 TEXT_PREFIX = "cond_text"
 #: Glob matching every encoding cache regardless of kind.
 ENC_PREFIXES = (TEXT_PREFIX,)
@@ -88,6 +94,26 @@ VIT_SUFFIX = ".pt"
 #: the source pixels (DeepStack carries one tensor per injected layer), so this
 #: needs an explicit ceiling and LRU trimming.
 VIT_CACHE_MAX_BYTES = 8 * 1024**3
+
+# --- reference-latent (VAE output) cache, persisted ACROSS runs ---------------
+#
+# Same reasoning as ``_vit``, one layer down: the video / audio VAE encodes the
+# canvas-fitted reference pixels into the ``minimax_refs`` latents, and that pass
+# depends on nothing but those pixels and the VAE — not the prompt, the workflow
+# or the segment. The assembled conditioning in ``cond_text_`` used to bundle the
+# latents with the text, so a prompt edit or a canvas switch made *that* file a
+# miss and re-encoded the whole reference set; caching the latents here keeps one
+# encode per (media, canvas) pair reusable by every prompt and later run.
+#
+# Entries are addressed by **source media + canvas**, never by the fitted pixels.
+# That is what lets ``cond_text_`` store just the source hash and have the reader
+# supply its own canvas, so a text encoding survives a resolution change.
+REF_LATENT_CACHE_DIRNAME = "_reflat"
+REF_LATENT_PREFIX = "reflat"
+REF_LATENT_SUFFIX = ".pt"
+#: Soft cap in bytes. A reference-video latent is far smaller than the source
+#: frames, but a library of clips at several canvases adds up.
+REF_LATENT_MAX_BYTES = 8 * 1024**3
 
 # --- per-segment durable artefacts -------------------------------------------
 LATENT_SUFFIX = "_latent.pt"

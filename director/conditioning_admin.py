@@ -123,6 +123,24 @@ def clear_all_conditioning_cache(keep_newer_than: float | None = None) -> int:
             except OSError:
                 pass
 
+        # The two global derived caches live outside the per-node directories, so
+        # a workflow's cache wipe misses them unless it covers them too. Both hold
+        # only rebuildable model output — losing an entry costs one vision pass or
+        # one VAE pass, never correctness.
+        try:
+            from .ref_latent_cache import clear as _clear_ref_latents
+
+            deleted += _clear_ref_latents(keep_newer_than=keep_newer_than)
+        except Exception as exc:  # pragma: no cover - cleanup, never fatal
+            log.warning("Failed to clear reference-latent cache: %s", exc)
+
+        try:
+            from .vision_cache import clear as _clear_vit
+
+            deleted += _clear_vit(keep_newer_than=keep_newer_than)
+        except Exception as exc:  # pragma: no cover - cleanup, never fatal
+            log.warning("Failed to clear ViT cache: %s", exc)
+
         log.info("Cleared ALL conditioning cache files: %d total", deleted)
         return deleted
 

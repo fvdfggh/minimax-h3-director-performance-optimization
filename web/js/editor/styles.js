@@ -104,6 +104,7 @@ export const STYLES = `/* min-height = content only; height:100% fills LiteGraph
 .bd-seg-export-mode label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
 .bd-seg-export-mode input[type="radio"]{accent-color:#4fff8f;width:14px;height:14px}
 .bd-seg-export-hint{color:#888;font-size:11px;line-height:1.4}
+.bd-seg-export-hint.warn{color:#e0b34d}
 .bd-seg-export-count{color:#4fff8f;font-size:12px;font-weight:600}
 .bd-modal-overlay-fixed .bd-modal-list{flex:1;min-height:240px;max-height:min(480px,calc(100vh - 220px))}
 .bd-seg-export-item{display:flex;align-items:center;gap:10px;padding:8px 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:4px;color:#ccc;font-size:12px;line-height:1.4;border:1px solid transparent}

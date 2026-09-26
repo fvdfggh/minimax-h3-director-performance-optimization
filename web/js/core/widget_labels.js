@@ -22,6 +22,9 @@ const DIRECTOR_WIDGET_TOOLTIP_KEYS = {};
 export const DIRECTOR_GROUP_LABEL_KEYS = {
     bd_grp_sample: "widget.grpSample",
     bd_grp_advanced: "widget.grpAdvanced",
+    // 二级采样组：以前漏在这张表外，标题永远不被规范化（英文界面也一直是中文），
+    // 存档里一旦被写坏就再也纠正不回来。
+    bd_grp_second: "widget.grpSecond",
 };
 
 export function applyDirectorWidgetLabels(node) {

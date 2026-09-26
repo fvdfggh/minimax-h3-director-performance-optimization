@@ -84,7 +84,18 @@ export const frame_map_ioMixin = {
         return coerceTimelineFps(this.fpsInput?.value ?? this.frameRateWidget?.value ?? this.timeline.frameRate ?? 24);
     },
     syncFrameRateUI(value = null) {
-        const fps = coerceTimelineFps(value ?? this.fpsInput?.value ?? this.frameRateWidget?.value ?? this.timeline.frameRate ?? 24);
+        const raw = value ?? this.fpsInput?.value ?? this.frameRateWidget?.value ?? this.timeline.frameRate ?? 24;
+        const fps = coerceTimelineFps(raw);
+        // 夹取要**说出来**：静默把 1000 夹成 240，等于把一个明显错误的来源（源视频探测、
+        // 陈旧的输入框、导入的包）伪装成合法值「240」，事后完全查不出是谁写的。
+        const n = Number(raw);
+        if (Number.isFinite(n) && (n > 240 || n < 1)) {
+            console.warn(
+                `[MiniMax] 帧率 ${n} 超出 1–240，已夹为 ${fps}（来源：`
+                + `${value != null ? "本次调用的入参" : "时间轴帧率输入框 / frame_rate 控件"}）。`
+                + "若它来自源视频探测，说明该视频的帧率元数据不可信。",
+            );
+        }
         this.timeline.frameRate = fps;
         if (this.frameRateWidget) this.frameRateWidget.value = fps;
         if (this.fpsInput) this.fpsInput.value = fps;

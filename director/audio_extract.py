@@ -199,26 +199,72 @@ def _has_real_ids(seg_ids: list[str]) -> bool:
     return any(s and not s.startswith(_POSITIONAL_PREFIX) for s in seg_ids)
 
 
+def _take_rank(entry: dict[str, Any], pinned: set[str]) -> tuple[int, int]:
+    """Ordering key for「同一段同一来源有多个 take 时留哪个」.
+
+    A pinned take always outranks an unpinned one — a dangling「保留音频」pin is a
+    worse outcome than a slightly older waveform. Within the same pin state the
+    newest wins (``created`` is absent on the oldest rows, hence the ``0``).
+    """
+    return (1 if str(entry.get("id") or "") in pinned else 0, int(entry.get("created") or 0))
+
+
+def collapse_duplicate_takes(
+    entries: list[dict[str, Any]],
+    pinned: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep one take per ``(seg_id, variant)``; returns ``(kept, dropped)``.
+
+    Before extraction became「重新提取就地覆盖」the store accumulated one row per
+    press, and an existing ``index.json`` keeps those rows forever otherwise —
+    the rule has to be enforced on what is already on disk, not only on new
+    extractions, or「每段每来源一条」stays untrue for any cache that predates it.
+    """
+    pinned = pinned or set()
+    best: dict[tuple[str, str], dict[str, Any]] = {}
+    for entry in entries:
+        key = (str(entry.get("seg_id") or ""), str(entry.get("variant") or ""))
+        current = best.get(key)
+        # ``>=`` so a later row wins ties: the manifest is append-ordered.
+        if current is None or _take_rank(entry, pinned) >= _take_rank(current, pinned):
+            best[key] = entry
+    keep = {id(e) for e in best.values()}
+    kept = [e for e in entries if id(e) in keep]
+    dropped = [e for e in entries if id(e) not in keep]
+    return kept, dropped
+
+
 def sync_audio_slots(
     node_id: str | None,
     seg_ids: list[str] | None,
     workflow_name: str | None = None,
+    retain_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Re-bind every entry to the current timeline and drop the ones it lost.
 
-    Two jobs, in this order:
+    Three jobs, in this order:
 
+    0. **每段每来源只留一个** — legacy rows that piled up before re-extraction
+       overwrote in place are collapsed (pinned take wins, else the newest);
     1. **删除而删除** — an entry whose ``seg_id`` is gone means its card was
        deleted, so both of its files are unlinked;
     2. **随 index 移动** — ``index`` is rewritten from the current id order, so
        reordering or inserting a card in the middle carries the audio along.
 
+    ``retain_ids`` are the ids pinned on the timeline (``retainAudioId``): the
+    collapse keeps a pinned take over a newer unpinned one.
+
     Never raises. Returns the surviving entries (with fresh ``index`` values).
     """
     ids = [str(s or "").strip() for s in (seg_ids or [])]
+    pinned = {str(x).strip() for x in (retain_ids or []) if str(x).strip()}
     entries = read_audio_index(node_id, workflow_name)["entries"]
     if not entries:
         return []
+    entries, duplicates = collapse_duplicate_takes(entries, pinned)
+    if duplicates:
+        _delete_entry_files(node_id, workflow_name, duplicates)
+        write_audio_index(node_id, workflow_name, entries)
     if not _has_real_ids(ids):
         # Legacy timeline: no ids to match against. Skipping is the only safe
         # answer — positionally "reconciling" would delete audio that simply
@@ -252,6 +298,30 @@ def sync_audio_slots(
         _delete_entry_files(node_id, workflow_name, dropped)
         write_audio_index(node_id, workflow_name, kept)
     return kept
+
+
+def clear_audio_store(node_id: str | None, workflow_name: str | None = None) -> int:
+    """Delete every extracted-audio entry **and** the manifest. Returns files removed.
+
+    「清空节点所有缓存」has to ask for this by name: the store lives in its own
+    ``audio_extract/`` sub-directory under ``audio_*`` names, so the ``seg_*`` sweep
+    that clears the rest of the node cache never reaches it — which is exactly why
+    users kept reporting「清空了但提取的音频还在」.
+    """
+    d = audio_extract_dir(node_id, workflow_name, create=False)
+    if d is None:
+        return 0
+    removed = _delete_entry_files(node_id, workflow_name, read_audio_index(node_id, workflow_name)["entries"])
+    # The manifest names files that are now gone: dropping it too is what makes the
+    # next /audio_extract_list report nothing instead of dangling entries.
+    try:
+        index_path = d / AUDIO_INDEX_NAME
+        if index_path.is_file():
+            index_path.unlink()
+            removed += 1
+    except OSError as exc:
+        log.warning("Audio extract index unlink failed: %s", exc)
+    return removed
 
 
 def resolve_audio_file(
@@ -316,9 +386,10 @@ def list_audio_extracts(
     *,
     seg_ids: list[str] | None = None,
     index: int | None = None,
+    retain_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Entries for the「音频」tab, newest first (optionally one card only)."""
-    entries = sync_audio_slots(node_id, seg_ids or [], workflow_name)
+    entries = sync_audio_slots(node_id, seg_ids or [], workflow_name, retain_ids)
     rows = [_public_entry(e) for e in entries]
     if index is not None:
         rows = [r for r in rows if r["index"] == int(index)]
@@ -359,8 +430,9 @@ def audio_extract_availability(
     clip = clip_cache_path(
         node_id, idx, workflow_name=workflow_name, allow_prev=True, variant=variant
     )
+    has_clip = clip is not None and clip.is_file()
     has_clip_audio = False
-    if clip is not None and clip.is_file():
+    if has_clip:
         # ``None`` means ffprobe is missing — stay optimistic and let the ffmpeg
         # attempt decide rather than greying out a segment that is fine.
         has_clip_audio = _audio_io().video_has_audio(str(clip)) is not False
@@ -375,6 +447,9 @@ def audio_extract_availability(
         "index": idx,
         "hasWave": bool(has_wave),
         "hasClipAudio": bool(has_clip_audio),
+        # The clip file itself (even when it carries no audio): lets the picker and
+        # the skip-reason split「没渲染过」from「渲染了但里面没声音」.
+        "hasClip": bool(has_clip),
         "hasAvLatent": bool(has_latent),
         # Playable now (no VAE in an HTTP request).
         "extractable": bool(has_wave or has_clip_audio),
@@ -383,6 +458,34 @@ def audio_extract_availability(
         # Nothing playable, but a run with the VAE loaded could decode the latent.
         "needsVae": bool(has_latent and not has_wave and not has_clip_audio),
     }
+
+
+def skip_code(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    *,
+    workflow_name: str | None = None,
+    variant: str = segment_slots.VARIANT_FIRST,
+) -> str:
+    """Why :func:`_extract_one` produced nothing — a code the picker turns into advice.
+
+    Reasons stay language-free here so the frontend can render them in the user's
+    locale (see ``audioExtract.skip.*``). Without this the only feedback was
+    「跳过 N 段」, which is indistinguishable from a silent bug.
+    """
+    info = audio_extract_availability(
+        node_id, seg, plan, workflow_name=workflow_name, variant=variant
+    )
+    if info["hasWave"] or info["hasClipAudio"]:
+        # The probe says there IS something to read, yet nothing was written: the
+        # read failed midway (unreadable file / ffmpeg error) rather than being absent.
+        return "unreadable"
+    if info["hasClip"]:
+        return "no-audio-track"
+    if info["hasAvLatent"]:
+        return "latent-only"
+    return "no-cache"
 
 
 def inspect_audio_extract_status(
@@ -461,6 +564,11 @@ def _wav_info(path: Path) -> tuple[int, int, float]:
     return rate, channels, (frames / rate) if rate > 0 else 0.0
 
 
+def _seg_id_for(seg_ids: list[str], idx: int) -> str:
+    """Binding key of the card living at timeline ``idx`` (mirrors ``sync_audio_slots``)."""
+    return str(seg_ids[idx]) if 0 <= idx < len(seg_ids) else f"{_POSITIONAL_PREFIX}{idx}"
+
+
 def _extract_one(
     node_id: str | None,
     directory: Path,
@@ -470,15 +578,20 @@ def _extract_one(
     workflow_name: str | None,
     variant: str,
     seg_ids: list[str],
+    entry_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Write one segment's WAV (+ audio latent when available).
 
     Source priority is cheapest-first: the decoded waveform cache needs nothing
     but the stdlib; the rendered clip costs one ffmpeg pass; the latent would
     need a VAE and is only sliced, never decoded here.
+
+    ``entry_id`` — reuse the id of the take this one replaces. The filenames are
+    derived from it, so the previous bytes are overwritten in place and the
+    timeline's ``retainAudioId`` pin keeps pointing at the same entry.
     """
     idx = int(seg.index)
-    entry_id = uuid.uuid4().hex[:8]
+    entry_id = str(entry_id or "").strip() or uuid.uuid4().hex[:8]
     wav_name = f"audio_{entry_id}.wav"
     latent_name = f"audio_{entry_id}_latent.pt"
     wav_path = directory / wav_name
@@ -533,7 +646,7 @@ def _extract_one(
         _safe_unlink(latent_path)
         return None
 
-    seg_id = str(seg_ids[idx]) if 0 <= idx < len(seg_ids) else f"{_POSITIONAL_PREFIX}{idx}"
+    seg_id = _seg_id_for(seg_ids, idx)
     return {
         "id": entry_id,
         "seg_id": seg_id,
@@ -558,12 +671,14 @@ def run_audio_extract(
     workflow_name: str | None = None,
     variant: str = segment_slots.VARIANT_FIRST,
     seg_ids: list[str] | None = None,
+    retain_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Execute a「提取音频」request: write a WAV (+ audio latent) per segment.
 
-    Entries are **appended**, never replaced — an extraction is a snapshot the
-    user asked for, so re-running appends another take instead of destroying the
-    one already sitting in the「音频」tab.
+    **One entry per ``(segment, source)``**: re-extracting overwrites the previous
+    take — same id, same filenames — so the「音频」tab never accumulates duplicate
+    takes of the same clip, and a「保留音频」pin keeps pointing at the entry the user
+    pinned instead of dangling at a file a later extraction replaced.
     """
     ids = [str(s or "").strip() for s in (seg_ids or [])]
     directory = audio_extract_dir(node_id, workflow_name)
@@ -575,6 +690,11 @@ def run_audio_extract(
             "source": str(variant),
         }
 
+    existing = read_audio_index(node_id, workflow_name)["entries"]
+    previous = {
+        (str(e.get("seg_id") or ""), str(e.get("variant") or "")): e for e in existing
+    }
+
     by_index = {int(s.index): s for s in (getattr(plan, "segments", None) or [])}
     created: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -582,28 +702,57 @@ def run_audio_extract(
     for raw in sorted({int(i) for i in indices}):
         seg = by_index.get(raw)
         if seg is None:
-            skipped.append({"index": raw, "reason": "segment not in plan"})
+            skipped.append({"index": raw, "code": "not-in-plan"})
             continue
+        key = (_seg_id_for(ids, raw), str(variant))
+        prev = previous.get(key)
         try:
             entry = _extract_one(
                 node_id, directory, seg, plan,
                 workflow_name=workflow_name, variant=variant, seg_ids=ids,
+                entry_id=(prev or {}).get("id"),
             )
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("提取音频 segment %d failed: %s", raw + 1, exc)
-            skipped.append({"index": raw, "reason": str(exc)})
+            skipped.append({"index": raw, "code": "error", "reason": str(exc)})
             continue
         if entry is None:
-            skipped.append({"index": raw, "reason": "no playable audio source"})
+            # A code, not a sentence: the picker renders it in the user's locale and
+            # can say what to DO (「只有 latent，先跑一次」/「这段没声音」).
+            skipped.append({
+                "index": raw,
+                "code": skip_code(
+                    node_id, seg, plan, workflow_name=workflow_name, variant=variant
+                ),
+            })
             continue
         created.append(entry)
+        # This take replaced a latent-bearing one but has none of its own (no VAE
+        # in an HTTP request): drop the stale file rather than orphaning it.
+        if prev and prev.get("latent") and not entry.get("has_latent"):
+            _safe_unlink(directory / str(prev["latent"]))
 
     if created:
-        existing = read_audio_index(node_id, workflow_name)["entries"]
-        write_audio_index(node_id, workflow_name, list(existing) + created)
+        def _take_key(e: dict[str, Any]) -> tuple[str, str]:
+            return (str(e.get("seg_id") or ""), str(e.get("variant") or ""))
 
-    # Re-bind everything (also garbage-collects entries whose card is gone).
-    sync_audio_slots(node_id, ids, workflow_name)
+        replaced = {_take_key(e) for e in created}
+        # Same key, older row: rows written before「重新提取就地覆盖」each had their
+        # own random id, so dropping them from the index is not enough — their files
+        # would stay on disk forever.
+        in_use = {str(e.get(k) or "") for e in created for k in ("wav", "latent")}
+        for row in existing:
+            if _take_key(row) not in replaced:
+                continue
+            for field in ("wav", "latent"):
+                name = str(row.get(field) or "")
+                if name and name not in in_use:
+                    _safe_unlink(directory / name)
+        kept = [e for e in existing if _take_key(e) not in replaced]
+        write_audio_index(node_id, workflow_name, kept + created)
+
+    # Re-bind everything (also collapses legacy duplicates and GCs lost cards).
+    sync_audio_slots(node_id, ids, workflow_name, retain_ids)
 
     return {
         "entries": [_public_entry(e) for e in created],

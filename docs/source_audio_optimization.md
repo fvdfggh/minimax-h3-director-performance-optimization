@@ -41,10 +41,30 @@
 - 绑定方式：条目记的是时间轴卡片上的 **segment id**，位置是推导出来的 ——
   重排 / 中间插入时按当前 id 顺序重算索引（音频跟着卡片走），删除卡片时条目与文件一起删。
   旧时间轴若卡片没有 id，则跳过对账而不是猜（猜错会删掉用户还要用的音频）。
+- **每段每来源只有一条**（`(seg_id, variant)` 唯一）：重新提取同一个片段会**覆盖**上一条 ——
+  沿用原 **entry id**（文件名相同，字节就地替换），所以「音频」tab 不会堆重复条目，
+  已经在时间轴上钉住的「保留音频」也不会指向一个被覆盖掉的旧文件。旧 latent 若本次没切出来，
+  会顺手删掉，不留孤儿文件。
+  这条规则**对磁盘上已有的老条目同样生效**：`sync_audio_slots()`（每次打开「音频」tab、删除卡片、
+  提取音频时都会跑）会先调 `collapse_duplicate_takes()` 把同一 `(seg_id, variant)` 的多条收敛成
+  一条 —— 优先保留被「保留音频」钉住的那条（前端在载荷里带 `retainIds`，`_retain_ids()` 读它），
+  否则保留 `created` 最新的那条，并把被丢弃条目的 WAV/latent 一起删掉（只从索引里剔除会留下
+  永远不再被引用的文件）。重提取时同样会清掉同键的旧条目文件。
+  注意粒度是 **每段 × 每来源一条**：如果你对同一段分别从一采、二采各提取一次，会看到 **2 条**
+  （一条 `variant=1st`、一条 `variant=2nd`）。而「保留音频」是**每段一个**（`retainAudioId` 单值）。
+- **清空范围**：`audio_extract/` 在自己的子目录、文件名是 `audio_*`，`clear_cache` 的
+  `SEGMENT_GLOBS`（`seg_*` / `seg2_*`）扫不到它 —— 所以「清空缓存」**不动**提取音频（原设计），
+  而「清空节点所有缓存」（`clear_all=true`）会额外调 `clear_audio_store()` 把条目文件与
+  `index.json` 一起删掉。删完前端会调 `clearRetainedAudioPins()` 解掉时间轴上的
+  `retainAudioId`，否则运行时会去找一个已经不存在的条目。
+- **提取不出来的原因**：`_extract_one` 失败时 `run_audio_extract` 用 `skip_code()` 回一个**码**
+  （`no-cache` / `latent-only` / `no-audio-track` / `unreadable` / `not-in-plan` / `error`），
+  前端在结果区逐段翻成人话。码由 `audio_extract_availability` 的 `hasWave / hasClipAudio /
+  hasClip / hasAvLatent` 判定，所以「显示可提取」和「实际跳过」用的是同一份依据。
 
 ## 4. 保留音频（retainAudioId）
 
-在时间轴卡片上把某条提取音频标记为「保留」，该段运行时：
+在**卡片头部**（「引用上段」旁边）打开「保留音频」开关即可，该段运行时：
 
 - **Phase 2**：把这段 PCM 用 audio VAE 编码进 AV latent 的**音频流**，并把该流的 `noise_mask` 置零。
   UNet 看得到它、以它为条件生成画面，但永远不会重绘它。

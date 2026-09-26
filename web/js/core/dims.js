@@ -50,3 +50,23 @@ export function coerceTimelineFps(value, fallback = 24) {
     if (!Number.isFinite(fps) || fps <= 0) return coerceTimelineFps(fallback, 24);
     return Math.round(clamp(fps, 1, 240) * 100) / 100;
 }
+
+/**
+ * Is a *probed* frame rate believable enough to write into the timeline?
+ *
+ * Container metadata lies in two common ways: a variable-frame-rate file reports
+ * ``avg_frame_rate = 0/0``, and ``r_frame_rate`` on some containers is really the
+ * **time base** (``1000/1``). Copying either into the timeline silently ends up as
+ * the 240 ceiling — which looks like「帧率莫名其妙变成 240」and hides the cause.
+ *
+ * ``frame_count / duration`` is what actually plays, so a rate that disagrees with
+ * it by more than 2× is treated as untrustworthy and simply not applied (the user's
+ * current fps stays, with a console warning naming the numbers).
+ */
+export function isPlausibleVideoFps(fps, frameCount = 0, duration = 0) {
+    const n = Number(fps);
+    if (!Number.isFinite(n) || n <= 0 || n > 240) return false;
+    const derived = (frameCount > 0 && duration > 0) ? frameCount / duration : 0;
+    if (derived > 0 && n / derived > 2) return false;
+    return true;
+}

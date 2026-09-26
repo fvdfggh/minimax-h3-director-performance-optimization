@@ -25,6 +25,7 @@ prompt-enhance routes unreachable).
 
 from __future__ import annotations
 
+import json
 import os
 from typing import TYPE_CHECKING
 
@@ -60,15 +61,25 @@ def _safe_basename(name: str) -> str:
     return f"{stem}{ext}"
 
 
-def _plan_from_request(body: dict, timeline_data: str) -> "DirectorPlan":
+def _plan_from_request(body: dict, timeline_data) -> "DirectorPlan":
     """Build the ``DirectorPlan`` a picker request describes.
 
     Every picker endpoint (segment export / second sample / align-to-next)
     rebuilds the same plan from the same request fields. Centralising it means a
     new plan input only needs to be added here, next to the node's own defaults —
     the five copies used to drift apart.
+
+    ``timeline_data`` arrives in two shapes: the editor's
+    ``buildTimelinePayload()`` returns the *object* (``_writeTimelineWidget``
+    stringifies it separately for the widget), some callers pre-serialise it.
+    Both are accepted here — ``str()`` on a dict yields a Python repr, which
+    ``json.loads`` rejects with「Expecting property name enclosed in double
+    quotes」, so the conversion has to happen before it reaches the plan.
     """
     from .plan import build_director_plan
+
+    if isinstance(timeline_data, (dict, list)):
+        timeline_data = json.dumps(timeline_data, ensure_ascii=False)
 
     return build_director_plan(
         str(timeline_data),

@@ -88,6 +88,8 @@ export const run_selectionMixin = {
                 // 剩余片段的 id 顺序（调用方已 splice 过）：后端据此同步「提取音频」
                 // 的绑定 —— 被删卡片自己的音频随之删除，后面的重新编号。
                 seg_ids: (this.timeline.segments || []).map((s, i) => String(s?.id || `@${i}`)),
+                // 同一段有多个 take 时优保留被钉住的那个（「保留音频」）。
+                retainIds: (this.timeline.segments || []).map((s) => String(s?.retainAudioId || "")),
                 workflow_name: getStableWorkflowId(),
                 index: parseInt(index, 10) || 0,
             }),

@@ -370,6 +370,40 @@ def av_video_meta(path: str) -> dict:
         }
 
 
+def _sane_fps(fps: float, frame_count: int, duration: float) -> tuple[float, str]:
+    """Filter frame rates that containers report but that cannot be real.
+
+    Two everyday lies: a variable-frame-rate file reports ``avg_frame_rate = 0/0``
+    (so the code fell through to ``r_frame_rate``), and on some containers
+    ``r_frame_rate`` is the **time base** — ``1000/1``. Handing either to the UI ends
+    up clamped to the 240 ceiling, which looks like「帧率莫名其妙变成 240」.
+
+    ``frame_count / duration`` is what actually plays, so it wins whenever the
+    container's claim disagrees with it by more than 20 %. Returns
+    ``(fps, source)`` with ``fps == 0.0`` when nothing trustworthy is available.
+    """
+    derived = (float(frame_count) / float(duration)) if (frame_count > 0 and duration > 0) else 0.0
+
+    def plausible(value: float) -> bool:
+        return 1.0 <= value <= 240.0
+
+    if plausible(fps) and not (plausible(derived) and abs(fps - derived) > derived * 0.2):
+        return float(fps), "container"
+    if plausible(derived):
+        log.info(
+            "Video frame rate looks wrong (container %.3f vs %.3f from %d frames / %.3fs);"
+            " using the derived rate.", fps, derived, frame_count, duration,
+        )
+        return float(derived), "duration"
+    if plausible(fps):
+        return float(fps), "container"
+    log.warning(
+        "Video frame rate unusable (container %.3f, derived %.3f); leaving it unset.",
+        fps, derived,
+    )
+    return 0.0, "unusable"
+
+
 def probe_video_file(path: str) -> dict:
     """Probe container metadata and an accurate frame count for Director UI."""
     if not path or not os.path.isfile(path):
@@ -427,6 +461,11 @@ def probe_video_file(path: str) -> dict:
     if frame_count <= 0:
         raise ValueError(f"Could not determine frame count for video: {path}")
 
+    # 容器标称帧率可能不可信（VFR 的 0/0、r_frame_rate 实为时间基 1000/1）：
+    # 交给 _sane_fps 用「帧数 / 时长」交叉验证，宁可报 0 让调用方兜底 24。
+    fps_source = "default"
+    if native_fps > 0 or (frame_count > 0 and duration > 0):
+        native_fps, fps_source = _sane_fps(native_fps, frame_count, duration)
     if native_fps <= 0:
         native_fps = 24.0
 
@@ -435,6 +474,8 @@ def probe_video_file(path: str) -> dict:
         "height": height,
         "duration": duration,
         "native_fps": native_fps,
+        # 帧率取自容器 / 由帧数与时长推出 / 兜底 24 —— 排错时一眼看出是谁给的值。
+        "fps_source": fps_source,
         "frame_count": frame_count,
         "probe_method": method,
     }

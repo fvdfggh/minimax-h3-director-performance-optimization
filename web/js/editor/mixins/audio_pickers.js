@@ -5,8 +5,9 @@
  * result view here) plays them back.
  *
  * Unlike「分段导出」this never queues a prompt: everything it needs is already on
- * disk, so the extraction is a plain HTTP call and the artefacts are appended —
- * re-running appends another take instead of replacing one.
+ * disk, so the extraction is a plain HTTP call. One entry per ``(segment, source)``
+ * — re-extracting replaces the previous take, which is why「保留音频」is a plain
+ * on/off switch on the card head (next to「引用上段」) instead of a per-row pick.
  */
 
 import { invalidateR2vClipProbe } from "../../minimax_image_batch.js";
@@ -43,6 +44,9 @@ export const audio_pickersMixin = {
             // Every entry is bound to a segment id, so the backend can re-derive
             // positions (move with the card) and drop lost ones (delete).
             seg_ids: this._audioExtractSegIds(),
+            // 每段每来源只留一条时，钉住的条目优先保留 —— 否则「保留音频」的
+            // 指针会指向一个被当成旧 take 删掉的条目。
+            retainIds: (this.timeline.segments || []).map((s) => String(s?.retainAudioId || "")),
             source: source === "2nd" ? "2nd" : "1st",
         };
     },
@@ -128,13 +132,39 @@ export const audio_pickersMixin = {
         return bits.join(" ");
     },
 
-    /** 同一张卡片只能保留一条：勾上新的就把其余条目取消勾选（不重渲染，免得打断播放）。 */
-    _syncRetainBoxes(root, pickedId, on) {
-        if (!on || !root) return;
-        root.querySelectorAll(".bd-audio-retain-cb").forEach((cb) => {
-            const row = cb.closest(".bd-audio-item");
-            if (row && row.dataset.audioEntry !== String(pickedId)) cb.checked = false;
-        });
+    /** 「跳过」的原因：后端给的是**码**（no-cache / latent-only / no-audio-track /
+     *  unreadable / not-in-plan / error），这里翻成人话；未知码原样显示，不吞信息。
+     */
+    _audioSkipText(row) {
+        const code = String(row?.code || "");
+        if (code && code !== "error") {
+            const key = `audioExtract.skip.${code}`;
+            const text = t(key);
+            if (text && text !== key) return text;
+        }
+        return String(row?.reason || code || t("audioExtract.skip.unknown"));
+    },
+
+    /** 「清空节点所有缓存」也清掉了提取音频：解掉「保留音频」的指向并刷新探测。
+     *
+     * 不解的话时间轴上还钉着一个已被删除的条目 id，下次运行会去找一个不存在的文件。
+     */
+    clearRetainedAudioPins() {
+        let touched = false;
+        for (const seg of this.timeline?.segments || []) {
+            if (seg?.retainAudioId) {
+                seg.retainAudioId = "";
+                touched = true;
+            }
+        }
+        invalidateR2vClipProbe(null);
+        if (!touched) return;
+        try {
+            this.commit?.(false, { syncTimeline: true });
+        } catch (e) {
+            /* best-effort */
+        }
+        if (this.isImageBatch?.()) this.renderImageBatchGroups?.();
     },
 
     /** 这张卡片当前保留的条目 id（"" = 不保留）。 */
@@ -159,8 +189,33 @@ export const audio_pickersMixin = {
         }
     },
 
+    /** 卡片头部「保留音频」开关：本段出片锁定用提取出来的那条音轨。
+     *
+     * 每段每来源只留一条（重新提取是覆盖），所以这里就是一个开关：勾上时按需
+     * 查一次该段的条目、取最近提取的那条，避免每次渲染卡片都发请求。
+     */
+    async toggleRetainAudio(index, on, checkbox) {
+        if (!on) {
+            this.setRetainAudio(index, "", false);
+            return;
+        }
+        let entries = [];
+        try {
+            entries = (await this.listAudioExtracts?.(index)) || [];
+        } catch (e) {
+            console.error("[MiniMax] 读取提取音频失败", e);
+        }
+        const entry = entries[0];           // 列表按时间倒序：留下最近提取的那条
+        if (!entry) {
+            this._audioExtractToast?.(t("audioExtract.retainNone"));
+            if (checkbox) checkbox.checked = false;
+            return;
+        }
+        this.setRetainAudio(index, entry.id, true);
+    },
+
     /** One playable row: <audio> + meta + delete. Shared by the result view. */
-    _audioExtractRow(entry, { onDeleted, onRetain } = {}) {
+    _audioExtractRow(entry, { onDeleted } = {}) {
         const row = document.createElement("div");
         row.className = "bd-audio-item";
         const dur = (entry.duration_s || 0).toFixed(2);
@@ -178,24 +233,14 @@ export const audio_pickersMixin = {
         head.className = "bd-audio-meta";
         head.innerHTML = `<span class="bd-audio-src">${srcLabel}</span><span>${meta}</span>`;
 
-        // 保留音频：把这条提取音频设为该片段的固定音轨。同一张卡片互斥（只有一
-        // 个字段），勾上新的会自动顶掉旧的。
-        const retainWrap = document.createElement("label");
-        retainWrap.className = "bd-audio-retain";
-        retainWrap.title = t("audioExtract.retainHint");
-        const retainCb = document.createElement("input");
-        retainCb.type = "checkbox";
-        retainCb.className = "bd-audio-retain-cb";
-        retainCb.checked = this.retainedAudioId(entry.index) === String(entry.id);
-        retainCb.onchange = () => {
-            this.setRetainAudio(entry.index, entry.id, retainCb.checked);
-            if (typeof onRetain === "function") onRetain(entry.id, retainCb.checked);
-        };
-        retainWrap.appendChild(retainCb);
-        const retainText = document.createElement("span");
-        retainText.textContent = t("audioExtract.retain");
-        retainWrap.appendChild(retainText);
-        head.appendChild(retainWrap);
+        // 「保留音频」开关搬到了卡片头部（和「引用上段」一排），这里只标出这一条
+        // 当前是否被保留——每段每来源只有一条，所以不再需要在这儿勾选。
+        if (this.retainedAudioId(entry.index) === String(entry.id)) {
+            const retained = document.createElement("span");
+            retained.className = "bd-audio-retained";
+            retained.textContent = t("audioExtract.retained");
+            head.appendChild(retained);
+        }
 
         const player = document.createElement("audio");
         player.controls = true;
@@ -406,11 +451,9 @@ export const audio_pickersMixin = {
             // 音频 tab 的条目探测作废，否则新提取的音频最长要等一个 TTL 才出现。
             invalidateR2vClipProbe(null);
             this._audioExtractToast(t("audioExtract.done", { n: entries.length }));
-            this._renderAudioExtractResult(
-                { listEl, bodyEl, okBtn },
-                entries,
-                skipped.length,
-            );
+            this._renderAudioExtractResult({ listEl, bodyEl, okBtn }, entries, skipped);
+            // 卡片头的「保留音频」开关按条目数决定可不可点：提取完刷新卡片，开关立刻可用。
+            if (entries.length && this.isImageBatch?.()) this.renderImageBatchGroups?.();
         } catch (e) {
             okBtn.disabled = false;
             okBtn.textContent = t("audioExtract.extract");
@@ -419,7 +462,7 @@ export const audio_pickersMixin = {
         }
     },
 
-    _renderAudioExtractResult({ listEl, bodyEl, okBtn }, entries, skippedCount) {
+    _renderAudioExtractResult({ listEl, bodyEl, okBtn }, entries, skipped) {
         listEl.classList.remove("bd-loading");
         listEl.textContent = "";
         okBtn.textContent = t("audioExtract.extract");
@@ -434,20 +477,30 @@ export const audio_pickersMixin = {
         hint.textContent = t("audioExtract.resultHint");
         bodyEl.appendChild(title);
         bodyEl.appendChild(hint);
-        if (skippedCount > 0) {
+        const skippedRows = Array.isArray(skipped) ? skipped : [];
+        if (skippedRows.length) {
             const skip = document.createElement("div");
-            skip.className = "bd-seg-export-hint";
-            skip.textContent = t("audioExtract.skipped", { n: skippedCount });
+            skip.className = "bd-seg-export-hint warn";
+            skip.textContent = t("audioExtract.skipped", { n: skippedRows.length });
             bodyEl.appendChild(skip);
+            // 逐段给出**原因**：只报「跳过 N 段」时，「我这段明明有声音」无从查起。
+            for (const row of skippedRows) {
+                const line = document.createElement("div");
+                line.className = "bd-seg-export-hint warn";
+                line.textContent = t("audioExtract.skipLine", {
+                    n: Number(row?.index ?? 0) + 1,
+                    why: this._audioSkipText(row),
+                });
+                bodyEl.appendChild(line);
+            }
         }
 
         if (!entries.length) {
             listEl.textContent = t("audioExtract.noCache");
             return;
         }
-        const syncRetain = (pickedId, on) => this._syncRetainBoxes(listEl, pickedId, on);
         for (const entry of entries) {
-            const row = this._audioExtractRow(entry, { onRetain: syncRetain });
+            const row = this._audioExtractRow(entry);
             row.dataset.audioEntry = String(entry.id);
             listEl.appendChild(row);
         }

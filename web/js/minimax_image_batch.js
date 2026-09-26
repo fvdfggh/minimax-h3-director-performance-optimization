@@ -452,6 +452,15 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-continuity{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#9ab;cursor:pointer;user-select:none;flex-shrink:0}
 .bd-batch-continuity input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#6ab0ff;flex-shrink:0}
 .bd-batch-continuity span{white-space:nowrap}
+/* 「保留音频」与「引用上段」同排：同一套外观，绿一点以示区别。 */
+.bd-batch-retain{color:#7fbf9a}
+.bd-batch-retain input{accent-color:#4fff8f}
+/* 没提取过音频时开关不可用：跟输入框的禁用观感保持一致。 */
+.bd-batch-continuity.bd-disabled{cursor:not-allowed;opacity:.45}
+/* 批量面板里已有「提取音频」入口；那里可见时藏掉主工具栏的同名按钮，避免两个按钮。
+   纯声明式：面板与面板按钮的 hidden 各自由现有逻辑维护，这里只跟着它们走；非批量模式下
+   .bd-batch 带 hidden，主工具栏按钮照常出现，功能不会丢。 */
+.bd-wrap:has(.bd-batch:not(.hidden) .bd-batch-toolbar [data-a="batch-audio-extract"]:not(.hidden)) [data-a="audio-extract"]{display:none}
 .bd-batch-head-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
 .bd-batch-pager-row{grid-column:1/-1;display:flex;align-items:center;justify-content:flex-start;gap:6px;flex-wrap:wrap;margin:4px 0 6px;flex-shrink:0}
 .bd-batch-fc{display:flex;align-items:center;gap:6px;color:#aaa;font-size:12px}
@@ -565,15 +574,25 @@ export const IMAGE_BATCH_STYLES = `
 .bd-r2v-preview-tab:disabled{opacity:.45;cursor:not-allowed}
 .bd-r2v-clip-empty{font-size:11px;color:#7d7d7d;text-align:center;padding:4px 6px}
 .bd-r2v-clip-loading{font-size:11px;color:#7d7d7d;text-align:center;padding:4px 6px}
+/* ---- 「识别」tab：音频有效性校验（本段台词 vs 本段识别到，需要整块铺满而不是居中） ---- */
+.bd-asr-report{width:100%;max-height:100%;overflow:auto;box-sizing:border-box;text-align:left;font-size:11px;line-height:1.55;color:#cfe3f0;white-space:pre-wrap;word-break:break-word;padding:2px 4px}
+.bd-asr-scope{color:#8fb8d8;margin-bottom:3px}
+.bd-asr-head{margin-top:6px;font-weight:700;color:#e6e6e6}
+.bd-asr-line{display:flex;gap:6px;align-items:flex-start}
+.bd-asr-spk{flex:0 0 auto;min-width:54px;color:#8fb8d8}
+.bd-asr-text{flex:1;min-width:0}
+.bd-asr-line.warn .bd-asr-spk,.bd-asr-line.warn .bd-asr-text{color:#e0b34d}
+.bd-asr-none{color:#8a8a8a;font-style:italic}
+.bd-asr-none.warn{color:#e0b34d;font-style:normal}
+.bd-asr-batch{color:#9aa7b2}
+.bd-r2v-clip-body:has(.bd-asr-report){flex-direction:column;align-items:stretch;justify-content:flex-start;overflow-y:auto}
 /* ---- 「提取音频」条目：播放器 + 元信息 + 删除 ---- */
 .bd-audio-item{display:flex;flex-direction:column;gap:4px;width:100%;padding:6px;border:1px solid #2f3b47;border-radius:5px;background:#151b22;box-sizing:border-box}
 .bd-audio-item+.bd-audio-item{margin-top:6px}
 .bd-audio-item audio{width:100%;height:30px;min-width:0}
 .bd-audio-meta{display:flex;gap:8px;align-items:center;font-size:10px;color:#8fa3b5;font-variant-numeric:tabular-nums}
 .bd-audio-src{color:#9fb0c0}
-.bd-audio-retain{display:flex;align-items:center;gap:4px;margin-left:auto;cursor:pointer;user-select:none}
-.bd-audio-retain-cb{cursor:pointer}
-.bd-audio-retain:hover{color:#eaf6ff}
+.bd-audio-retained{margin-left:auto;font-size:10px;color:#4fff8f;border:1px solid #2f6b4a;border-radius:3px;padding:0 4px;white-space:nowrap}
 .bd-audio-del{align-self:flex-start;font-size:10px;padding:2px 8px;border:1px solid #4a3a3a;background:#241a1a;color:#c98a8a;cursor:pointer;border-radius:4px}
 .bd-audio-del:hover:not(:disabled){border-color:#8a5a5a;color:#ffdada}
 .bd-r2v-clip-body:has(.bd-audio-item){flex-direction:column;align-items:stretch;justify-content:flex-start;overflow-y:auto}
@@ -702,6 +721,7 @@ export function mountImageBatchPanel(root) {
                 <span data-i18n="toolbar.selectAll">全选</span>
             </label>
             <button type="button" class="bd-btn hidden" data-a="batch-audio-extract" data-i18n="toolbar.audioExtract" data-i18n-title="tooltip.audioExtract">提取音频</button>
+            <button type="button" class="bd-btn hidden" data-a="batch-asr-check" data-i18n="toolbar.asrCheck" data-i18n-title="tooltip.asrCheck">音频有效性校验</button>
             <span class="bd-meta" data-r="batch-hint" data-i18n="batch.hint.defaultImage">每组生成 1 张图片</span>
         </div>
         <div class="bd-batch-i2v-notice" data-r="batch-i2v-notice"></div>
@@ -719,7 +739,25 @@ export function mountImageBatchPanel(root) {
         runSelectAllWrap: panel.querySelector('[data-r="batch-run-all-wrap"]'),
         runSelectAllCb: panel.querySelector('[data-r="batch-run-all-cb"]'),
         audioExtractBtn: panel.querySelector('[data-a="batch-audio-extract"]'),
+        asrCheckBtn: panel.querySelector('[data-a="batch-asr-check"]'),
     };
+}
+
+/** 「音频有效性校验」entry point — r2v only; visibility is set in renderBatchGroups. */
+export function wireBatchAsrCheck(editor, batchUi) {
+    editor.batchAsrCheckBtn = batchUi.asrCheckBtn;
+    if (!batchUi.asrCheckBtn) {
+        // The element ships in this module's own markup, so a miss means the browser
+        // is still running a cached copy of these files — hard-reload before debugging.
+        console.warn(
+            "[MiniMax] 未找到「音频有效性校验」按钮：前端 JS 可能是被缓存的旧版本，请硬刷新（Ctrl+F5）。",
+        );
+        return;
+    }
+    batchUi.asrCheckBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void editor.openAsrCheckPicker?.();
+    });
 }
 
 /** 「提取音频」entry point — opens the picker; visibility is set per task. */
@@ -1988,7 +2026,9 @@ async function pickExistingR2vAssets(editor, seg, index, kind, scope) {
 function buildR2vAssetModule(editor, seg, index, kind, { externalLocked = false } = {}) {
     const meta = R2V_ASSET_META[kind];
     const commonPage = isR2vCommonPage(editor);
-    const scope = commonPage ? "common" : (editor.r2vScope?.[kind] || "segment");
+    // 素材组页上的 公共/片段 开关默认也停在**公共**：参考素材多数是所有片段共用的，
+    // 打开就该先看到它们（切到「片段」是每个模块各记一次的一键操作）。
+    const scope = commonPage ? "common" : (editor.r2vScope?.[kind] || "common");
     const st = r2vAssetStore(editor, seg, kind, scope);
     const all = r2vSortedAssets(st.items, meta.has);
     // 上传空位常驻首格并占用一个名额，每页素材数相应减一（总格子数不变，不换行）。
@@ -2556,6 +2596,9 @@ const AUDIO_PROBE_TTL_MS = 15000;
 export function invalidateR2vClipProbe(key) {
     // 音频 tab 的探测跟着一起失效：运行结束后该卡片可能多了（或少了）提取记录。
     _audioProbe.clear();
+    // 「保留音频」开关的可选性缓存也一起作废（新提取的条目要立刻让开关变可点）。
+    _audioEntryCountsAt = 0;
+    _audioEntryCounts.clear();
     if (key == null) {
         _clipProbe.clear();
         return;
@@ -2636,6 +2679,61 @@ function probeAudioExtract(editor, index) {
     return promise;
 }
 
+/* ---- 「保留音频」开关的可选性 -------------------------------------------------
+ * 没提取过音频就没有可保留的东西，开关必须置灰。判断一次要一次请求，而卡片会因
+ * 为输入提示词等操作频繁重渲染，所以**不用**每卡各打一次（那会把整条 timeline 序列化
+ * N 遍）：一次 `listAudioExtracts()`（不带 index = 全部卡片）聚合出每段条目数，缓存
+ * 一段时间；提取/运行结束会走 invalidateR2vClipProbe 清掉，需要新鲜时自然重查。
+ */
+const _audioEntryCounts = new Map();
+let _audioEntryCountsAt = 0;
+const AUDIO_ENTRY_TTL_MS = 60000;
+
+/** 每张卡片的提取音频条目数；``null`` = 探测失败（此时宁可放开，也不要误锁）。 */
+async function audioEntryCounts(editor) {
+    if (_audioEntryCountsAt && Date.now() - _audioEntryCountsAt < AUDIO_ENTRY_TTL_MS) {
+        return _audioEntryCounts;
+    }
+    try {
+        const entries = (await editor.listAudioExtracts?.()) || [];
+        _audioEntryCounts.clear();
+        for (const entry of entries) {
+            const idx = Number(entry?.index);
+            if (Number.isFinite(idx)) {
+                _audioEntryCounts.set(idx, (_audioEntryCounts.get(idx) || 0) + 1);
+            }
+        }
+        _audioEntryCountsAt = Date.now();
+        return _audioEntryCounts;
+    } catch (e) {
+        console.error("[MiniMax] 提取音频条目探测失败", e);
+        return null;
+    }
+}
+
+/** 同步读缓存：``number`` = 已知条目数，``null`` = 还没探测过。 */
+function peekAudioEntryCount(editor, index) {
+    if (!_audioEntryCountsAt || Date.now() - _audioEntryCountsAt >= AUDIO_ENTRY_TTL_MS) return null;
+    return _audioEntryCounts.get(Number(index)) || 0;
+}
+
+/** 探测回来后更新开关状态（不重渲染卡片，免得打断输入）。 */
+async function probeRetainAvailability(editor, index, checkbox, label) {
+    const counts = await audioEntryCounts(editor);
+    if (!checkbox || !checkbox.isConnected) return;
+    // counts === null 表示探测失败：保持可点，点击时再提示，不误锁。
+    const has = counts ? (counts.get(Number(index)) || 0) > 0 : null;
+    // 已经打开的不禁用：条目没了也得让用户能关掉这个开关。
+    checkbox.disabled = has === false && !checkbox.checked;
+    label?.classList.toggle("bd-disabled", checkbox.disabled);
+    if (label) {
+        const key = checkbox.disabled
+            ? "tooltip.retainAudioNone"
+            : (checkbox.checked ? "tooltip.retainAudioOn" : "tooltip.retainAudio");
+        label.title = t(key);
+    }
+}
+
 /** 只置灰 tab，不碰预览区内容（预热探测用）。 */
 async function probeAudioTab(editor, index, tab) {
     const entries = await probeAudioExtract(editor, index);
@@ -2675,12 +2773,8 @@ async function mountAudioTab(body, editor, index, tab) {
         return;
     }
     if (tab) tab.disabled = false;
-    // 同一张卡片只能保留一条：勾上新的就把其余条目取消勾选（不重渲染，免得打断
-    // 正在播放的音频）。
-    const syncRetainBoxes = (pickedId, on) => editor._syncRetainBoxes?.(body, pickedId, on);
     for (const entry of entries) {
         const row = editor._audioExtractRow(entry, {
-            onRetain: syncRetainBoxes,
             onDeleted: () => {
                 // 删掉的正是被保留的那条 → 取消该卡片的「保留音频」，否则运行时
                 // 会去读一个已经不存在的条目。
@@ -2706,7 +2800,7 @@ function mountR2vPreviewWithTabs(el, seg, index, running, fps, editor) {
     stopPlayer(el);
     el.innerHTML = "";
     if (!editor.r2vPreviewTab) editor.r2vPreviewTab = "1st";
-    const active = ["2nd", "audio"].includes(editor.r2vPreviewTab)
+    const active = ["2nd", "audio", "asr"].includes(editor.r2vPreviewTab)
         ? editor.r2vPreviewTab
         : "1st";
 
@@ -2734,11 +2828,27 @@ function mountR2vPreviewWithTabs(el, seg, index, running, fps, editor) {
     const tab1 = mkTab("1st", t("r2v.preview.first"));
     const tab2 = mkTab("2nd", t("r2v.preview.second"));
     const tab3 = mkTab("audio", t("r2v.preview.audio"));
+    // 「识别」永远可点：没有结果时它给出「去哪发起校验」的提示，而不是一个灰按钮。
+    const tab4 = mkTab("asr", t("r2v.preview.asr"));
     tabs.appendChild(tab1);
     tabs.appendChild(tab2);
     tabs.appendChild(tab3);
+    tabs.appendChild(tab4);
     el.appendChild(tabs);
     el.appendChild(body);
+
+    if (active === "asr") {
+        // 报告内容归 asr_check mixin 管（只有它知道最近一次核对了哪些片段）。
+        editor.renderAsrReportInto?.(body, index);
+        // 后台照旧预热其它 tab 的可用性，切回去时状态已就绪。
+        void probeSegmentClip(editor, index, "2nd").then((res) => {
+            if (res.ok) return;
+            tab2.disabled = true;
+            tab2.title = t("r2v.preview.noSecond");
+        });
+        void probeAudioTab(editor, index, tab3);
+        return;
+    }
 
     if (active === "1st") {
         if (running) {
@@ -3165,6 +3275,8 @@ export function renderImageBatchGroups(editor) {
     }
     // 只有会出音频的任务才有可提取的东西（图片批次没有音频轨）。
     editor.batchAudioExtractBtn?.classList.toggle("hidden", !isVideo);
+    // 「音频有效性校验」只针对参考主体生视频：只有 r2v 的提示词里才有台词块。
+    editor.batchAsrCheckBtn?.classList.toggle("hidden", key !== "r2v");
     const externalLocked = !!(editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.());
     if (editor.batchI2vNotice) {
         const needsRefs = key === "r2i" || key === "r2v";
@@ -3211,7 +3323,9 @@ export function renderImageBatchGroups(editor) {
     }
     const isR2v = key === "r2v" && variant === "refs";
     if (isR2v) {
-        if (editor.r2vPage == null) editor.r2vPage = editor.selectedIndex;
+        // 默认停在「公共素材」页：多数素材是各片段共用的，先看共用的那页更符合直觉
+        // （点素材组 chip / 时间轴片段即可切到该组）。
+        if (editor.r2vPage == null) editor.r2vPage = "common";
         if (typeof editor.r2vPage === "number" && editor.r2vPage >= segs.length) editor.r2vPage = 0;
         ctx.usageByIndex = segs.map((s) => computePromptRefUsage(editor, s));
         ctx.isR2v = true;
@@ -3311,6 +3425,38 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             contLabel.appendChild(contCb);
             contLabel.appendChild(contText);
             head.appendChild(contLabel);
+        }
+        // 「保留音频」：与「引用上段」同排。出片时把提取出来的那条音轨锁定为本段
+        // 固定音轨（不重绘、也跳过音频解码）；**没提取过音频就没有可保留的东西，
+        // 开关置灰不可点**（状态来自一次批量条目探测，见 audioEntryCounts）。
+        if (isVideo && !commonPage) {
+            const retainLabel = document.createElement("label");
+            retainLabel.className = "bd-batch-continuity bd-batch-retain";
+            const retainCb = document.createElement("input");
+            retainCb.type = "checkbox";
+            retainCb.className = "bd-batch-retain-check";
+            // 只读 timeline 字段：勾选时按需去后端取该段的条目（每段每来源仅一条）。
+            retainCb.checked = !!String(seg.retainAudioId || "");
+            const known = peekAudioEntryCount(editor, index);
+            retainCb.disabled = !retainCb.checked && known === 0;
+            retainLabel.classList.toggle("bd-disabled", retainCb.disabled);
+            retainLabel.title = t(retainCb.disabled ? "tooltip.retainAudioNone" : "tooltip.retainAudio");
+            retainCb.onclick = (e) => e.stopPropagation();
+            retainCb.onchange = (e) => {
+                e.stopPropagation();
+                void editor.toggleRetainAudio?.(index, retainCb.checked, retainCb);
+                retainLabel.title = t(retainCb.disabled
+                    ? "tooltip.retainAudioNone"
+                    : (retainCb.checked ? "tooltip.retainAudioOn" : "tooltip.retainAudio"));
+            };
+            const retainText = document.createElement("span");
+            retainText.setAttribute("data-i18n", "batch.retainAudio");
+            retainText.textContent = t("batch.retainAudio");
+            retainLabel.appendChild(retainCb);
+            retainLabel.appendChild(retainText);
+            head.appendChild(retainLabel);
+            // 未知（首次渲染）时先放开、探测回来再定；不是每张卡片各打一次请求。
+            if (known === null) void probeRetainAvailability(editor, index, retainCb, retainLabel);
         }
         // 对齐下段 (align-to-next): pin this segment's tail to the next
         // segment's opening. Cache-driven middle-out mode, so it only exists
@@ -3631,13 +3777,17 @@ export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {})
             const badgeText = (step && total)
                 ? t("batch.generatingStep", { step, total })
                 : t("batch.generating");
-            let img = host.querySelector("img.bd-live-preview");
+            // 「识别」tab 里放着校验报告：不要把采样帧塞进去（缩略图照旧更新）。
+            const showingReport = !!host.querySelector(".bd-asr-report");
+            let img = showingReport ? null : host.querySelector("img.bd-live-preview");
             let badge = host.querySelector(".bd-batch-live-badge");
-            if (!img) {
-                mountLivePreview(host, seg, badgeText);
-            } else {
-                img.src = frameSrc(imageB64);
-                if (badge) badge.textContent = badgeText;
+            if (!showingReport) {
+                if (!img) {
+                    mountLivePreview(host, seg, badgeText);
+                } else {
+                    img.src = frameSrc(imageB64);
+                    if (badge) badge.textContent = badgeText;
+                }
             }
             const pickThumb = editor.batchPicker?.querySelector?.(`.bd-batch-pick[data-batch-index="${segmentIndex}"] img.bd-batch-pick-thumb`);
             if (pickThumb) pickThumb.src = frameSrc(imageB64);

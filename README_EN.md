@@ -154,12 +154,12 @@ by the Director node, never by the group packers.
 | `scheduler` | `simple` | scheduler |
 | `shift_video` / `shift_audio` | 12.0 / 3.0 | `MiniMaxH3SigmaShift` |
 | `sigmas` + `use_sigmas` | off | custom noise schedule (`BasicScheduler` / `ManualSigmas`). When on: steps = `len(sigmas)-1`, denoise is fixed at 1.0 and `steps` / `scheduler` are ignored; an unwired or unparsable input falls back to defaults |
-| `conn_noise` | off | segment taper-redraw switch (see Continuity) |
+| ~~`conn_noise`~~ | — | **removed, always on**: taper-redraw is unconditional now (see Continuity). An old workflow's slot for it is dropped on load |
 | `upscale_model` | — | **mandatory** for second sampling; the run errors out without it |
 | `second_sigmas` | unwired | second-pass schedule; defaults to the Hailuo second-pass schedule `(0.85, 0.7250, 0.4219, 0.0)` (euler, 3 steps) |
 | `second_run_model` | main model | which MODEL socket the second pass uses |
 | `second_seed` | 20240 | fixed second-pass seed, independent of the first-pass seed |
-| `asr_model` | optional | audio validity check — wire it and run once; an「Audio validity check」button then appears on the node in r2v mode |
+| `asr_model` | optional | audio validity check — wire it and run once; the r2v toolbar then offers an「Audio validity check」button |
 | `workflow_name` | hidden | filled by the frontend; namespaces the on-disk cache |
 
 The group headers (`采样设置` / `高级采样` / `二级采样`) are a custom frontend `BDGROUP` widget —
@@ -258,10 +258,9 @@ Continuity is **opt-in per timeline** (`timeline.output.continuityEnabled`, off 
 - context frames can only be **5 / 22 / 39 / 56** (default 22 — aligned to the VAE's 17-frame cycle);
 - per segment you can switch off “reference previous” (default on); “align to next” is off by default
   and only available when that neighbour already holds an AV latent;
-- with `conn_noise` on, the previous tail is written into this segment's body prefix and re-drawn
-  (continue mode); the redraw amount comes from the timeline's 重绘幅度 (default 0.10 — 0 = hard seam
-  lock, 0.95 = almost no redraw);
-- with `conn_noise` off, only reference-frame guidance (guide) is applied;
+- taper-redraw is **always on** (the old `conn_noise` switch is gone): the previous tail is written
+  into this segment's body prefix and re-drawn (continue mode); the redraw amount comes from the
+  timeline's 重绘幅度 (default 0.10 — 0 = hard seam lock, 0.95 = almost no redraw);
 - **do not enable it together with a standalone H3 Motion Context node.**
 
 After swapping the source video the old cache no longer matches; if a segment needs its predecessor
@@ -318,22 +317,34 @@ is never silent.
 **Extract audio** stores PCM under `<node cache dir>/audio_extract/`, named by **entry id** (never a
 content hash, never a timeline position), so re-running or editing prompts cannot invalidate it and
 “clear cache” cannot delete it. Reordering moves entries with their card; deleting a card deletes its
-entries.
+entries. **One entry per segment + source** (keyed by `(seg_id, variant)`, so extracting both passes
+leaves one row for each): re-extracting overwrites the previous take (same id, files replaced in place)
+so nothing piles up, and **rows already on disk converge too** — opening the Audio tab or deleting a
+card drops duplicates (a「Keep audio」-pinned take wins, otherwise the newest) together with their
+files. While the batch toolbar offers the button, the duplicate one in the main toolbar hides itself.
+Use Clear-all to drop every extracted entry at once.
 
-**Retain audio** pins one extracted entry to a segment. Phase 2 VAE-encodes it into the AV latent's
-audio stream and zeroes that stream's `noise_mask`, so the UNet conditions on it but can never
-re-draw it; Phase 3 skips the audio VAE decode and muxes the *same* PCM back, so you hear exactly the
-clip you picked — no round-trip through the audio VAE.
+A segment that cannot be extracted says **why**, per segment: nothing rendered for that pass
+(`no-cache`), only an AV latent cached and an HTTP request has no audio VAE (`latent-only`), the cached
+clip carries no audio track (silent render — `no-audio-track`), the cache could not be read
+(`unreadable`), or the segment is not in the timeline the backend parsed (`not-in-plan`).
+
+**Retain audio** is a switch on the card head (next to「From prev」). Phase 2 VAE-encodes that segment's
+extracted audio into the AV latent's audio stream and zeroes that stream's `noise_mask`, so the UNet
+conditions on it but can never re-draw it; Phase 3 skips the audio VAE decode and muxes the *same* PCM
+back, so you hear exactly that clip — no round-trip through the audio VAE. It keeps the newest
+extraction; with none extracted yet, the switch tells you to extract first.
 
 ---
 
 ## Audio validity check (ASR)
 
 Wire an `asr_model` (`T8_MOSS_ModelLoader` from `Comfyui-MOSS-Transcribe-Diarize-T8`, type
-`T8_MOSS_TRANSCRIBE_MODEL`) and **run the node once**; r2v mode then shows an
-「Audio validity check」button on the node:
+`T8_MOSS_TRANSCRIBE_MODEL`) to reuse your loader settings — no run required, since with nothing wired
+the check builds that loader's own handle with its defaults. The **r2v toolbar** then offers an
+「Audio validity check」button next to「Extract audio」:
 
-1. click it and tick the segments to verify;
+1. click it, pick the cache source (1st / 2nd pass) and tick the segments to verify;
 2. the backend loads those segments' *cached* audio and compares it against the lines in each
    segment's **current** prompt, speaker by speaker (error rate + speaker alignment);
 3. the verdict opens in a dialog — nothing is written to `report` and nothing is regenerated.
@@ -377,7 +388,7 @@ position):
 | `segment_slots.json` | position → file-group map (first pass) |
 | `seg2_<hash>_*` / `segment_slots_2nd.json` | the second pass's own set |
 | `seg_XXXX_scratch_*.pt` | per-run scratch files |
-| `audio_extract/` | extracted audio (own lifecycle) |
+| `audio_extract/` | extracted audio (own lifecycle; only Clear-all touches it) |
 | `_vit/` | global ViT (vision tower) output cache, shared across workflows, capped at 8 GB |
 
 The fingerprint covers prompt, task, canvas, fps, reference files, source-video identity
@@ -387,8 +398,10 @@ re-renders that segment.
 Two node buttons:
 
 - **Clear cache** — drops the text-encoding cache, batch scratch files and legacy `*_frames_ht.pt`
-  windows; rendered segments survive.
-- **Clear all node cache** — additionally deletes every `seg_*` file, forcing a full re-render.
+  windows; rendered segments survive, and the Extract-audio store is left alone.
+- **Clear all node cache** — additionally deletes every `seg_*` file **and the whole
+  `audio_extract/` store** (manifest included), forcing a full re-render as well as a re-extract; the
+  timeline's Keep-audio pins are cleared too, since those entries no longer exist.
 
 Both confirm first (showing workflow id, node id and what will be deleted) and then POST
 `/minimax/director_opt/clear_cache` (`clear_all: true/false`).
@@ -431,6 +444,8 @@ Route prefix: `/minimax/director_opt` (`lib/constants.py`).
 | POST | `/second_sample_status` | second-sample availability |
 | POST | `/align_to_next_status` | “align to next” availability |
 | POST | `/remove_segment_slot` | drop one segment's cache files |
+| POST | `/asr_check_status` | audio validity check availability: which segments have audio for the chosen source, whether a model is ready |
+| POST | `/asr_check` | grade the picked segments' cached audio against their current prompts (nothing is regenerated) |
 | POST | `/clear_cache` | clear cache |
 | POST | `/export_pack`, `/import_pack`; GET `/download_pack` | director pack |
 
@@ -454,8 +469,10 @@ WebSocket events:
 | Uploads ≤ 95 MiB use `/upload/image`, larger ones use 8 MiB chunks | `core/upload.js` |
 | Continuity context can only be 5 / 22 / 39 / 56 and needs ≥ 2 segments | `h3_motion_context.py` |
 | `use_sigmas` on but nothing wired | logged, then falls back to the default schedule |
+| The frame rate mysteriously becomes 240 | 240 is the widget's ceiling, so something fed it a value above it (most often a source-video probe: some containers report their **time base** `1000/1` as the frame rate, and VFR files report `avg_frame_rate = 0/0`). A probed rate is now cross-checked against `frame count / duration` and simply not applied — with a warning — when it disagrees; clamping a frame rate also logs the raw value, so the console names the culprit |
 | Second sample without `upscale_model` | returns an error report, never a silent same-resolution export |
 | Widget values shifted after loading an old workflow | the frontend strips the removed `segment_images` output and repairs stale widget values; absurd width/height/total_frames are clamped back to safe defaults with a warning — save the workflow again to fix it permanently |
+| A few widgets **reset to their defaults on every refresh** (e.g. `use_sigmas` / `second_seed`) | that workflow was saved *while its values were shifted*: the wrong values were frozen **by name** in `widgets_values_named`, so every load restores them faithfully. Loading now detects and heals it (a group header holding anything but its own label is the proof → that widget and everything after it go back to defaults, and the console names them); save the workflow once and it stops coming back |
 | `/minimax/director_opt/*` returns 404 | PromptServer was not ready at import time; restart ComfyUI |
 | `import cv2` fails | OpenCV is intentionally not a dependency; decoding uses PyAV |
 | Washed-out / inverted colours | do not post-process `MiniMax H3 Fast Video VAE Opt` output with a non-H3 VAE path; the wrapper deliberately skips ComfyUI's `*2-1` transform |

@@ -8,7 +8,7 @@ import { ensureEditorStyles } from "../styles.js";
 import { bindFl2vEvents, mountFl2vPanel } from "../../minimax_fl2v.js";
 import { CUSTOM_ASPECT_RATIO, DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_GEN_FRAMES, RESOLUTION_ASPECTS } from "../../minimax_gen_timeline.js";
 import { aspectDisplayLabel } from "../../minimax_i18n.js";
-import { bindImageBatchEvents, mountImageBatchPanel, normalizeImageBatchSegments, renderImageBatchGroups, wireBatchAudioExtract, wireBatchRunSelectControls } from "../../minimax_image_batch.js";
+import { bindImageBatchEvents, mountImageBatchPanel, normalizeImageBatchSegments, renderImageBatchGroups, wireBatchAsrCheck, wireBatchAudioExtract, wireBatchRunSelectControls } from "../../minimax_image_batch.js";
 import { teardownPromptImageMentions } from "../../minimax_prompt_mentions.js";
 export const dom_shellMixin = {
     buildDOM() {
@@ -343,6 +343,7 @@ export const dom_shellMixin = {
         this.batchPicker = batchUi.picker;
         wireBatchRunSelectControls(this, batchUi);
         wireBatchAudioExtract(this, batchUi);
+        wireBatchAsrCheck(this, batchUi);
 
         this.fl2vUi = mountFl2vPanel(this.mainBody);
         this.fl2vTotalWrap = this.root.querySelector('[data-r="fl2v-total-wrap"]');

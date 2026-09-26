@@ -111,9 +111,11 @@ async def minimax_clear_cache(request):
     before the seam window became a clip — those are superseded dead weight,
     not part of the render. The durable rendered segments are kept.
 
-    With ``clear_all=true`` it additionally wipes every durable ``seg_*`` file —
-    every rendered frame / AV latent / audio / clip — forcing a full re-render on
-    the next run.
+    With ``clear_all=true`` it also wipes every durable ``seg_*`` file — every
+    rendered frame / AV latent / audio / clip — **and** the「提取音频」store
+    (``audio_extract/``), forcing a full re-render as well as a re-extract on the
+    next run. The store sits in its own sub-directory under ``audio_*`` names, so
+    the segment sweep cannot reach it: it has to be asked for by name.
 
     ``workflow_name`` is resolved to the same slug the cache layer uses, so the
     button always hits exactly the directory that holds this workflow's data.
@@ -132,7 +134,9 @@ async def minimax_clear_cache(request):
 
     workflow_name = str(body.get("workflow_name") or "").strip() or None
     clear_all = bool(body.get("clear_all"))
-    cleared = {"conditioning": 0, "batch": 0, "headtail": 0, "segments": 0}
+    cleared = {
+        "conditioning": 0, "batch": 0, "headtail": 0, "segments": 0, "audio_extract": 0,
+    }
 
     cache_dir = cache_layout.node_cache_dir(node_id, workflow_name, create=False)
 
@@ -187,6 +191,19 @@ async def minimax_clear_cache(request):
         # the position → files mapping from scratch.
         segment_slots.clear_slots(cache_dir)
         segment_slots.clear_slots(cache_dir, variant=segment_slots.VARIANT_SECOND)
+
+    # 5) clear_all → the「提取音频」store as well. Only here: ``audio_extract/`` holds
+    #    user-made takes that survive every other clear on purpose, and the plain
+    #    button's confirmation says so.
+    if clear_all:
+        try:
+            from .audio_extract import clear_audio_store
+
+            cleared["audio_extract"] = await asyncio.to_thread(
+                clear_audio_store, node_id, workflow_name
+            )
+        except Exception as exc:
+            log.warning("MiniMax H3 Director Opt clear audio extract failed: %s", exc)
 
     log.info(
         "MiniMax H3 Director Opt cleared caches for node %s (workflow '%s', clear_all=%s): %s",
@@ -371,6 +388,7 @@ async def minimax_remove_segment_slot(request):
                 node_id,
                 [str(x or "").strip() for x in seg_ids],
                 workflow_name,
+                _retain_ids(body),
             )
         return web.json_response({"removed": bool(removed)})
     except Exception as exc:
@@ -455,6 +473,19 @@ def _audio_seg_ids(body: dict, timeline_data: str) -> list[str]:
     return timeline_segment_ids(timeline_data)
 
 
+def _retain_ids(body: dict) -> list[str]:
+    """Ids pinned by「保留音频」in the timeline payload.
+
+    Pins live in the frontend's segment objects, not in the cache manifest, so the
+    backend can only avoid dropping a pinned take when they are sent along — the
+    duplicate sweep otherwise keeps whichever take is newest.
+    """
+    raw = body.get("retainIds")
+    if not isinstance(raw, list):
+        return []
+    return [str(x or "").strip() for x in raw]
+
+
 async def minimax_audio_extract_status(request):
     """Availability of every segment for「提取音频」(what the picker greys out)."""
     try:
@@ -533,6 +564,7 @@ async def minimax_audio_extract(request):
             workflow_name=workflow_name,
             variant=variant,
             seg_ids=_audio_seg_ids(body, str(timeline_data)),
+            retain_ids=_retain_ids(body),
         )
         return web.json_response(result)
     except Exception as exc:
@@ -569,6 +601,7 @@ async def minimax_audio_extract_list(request):
             workflow_name,
             seg_ids=_audio_seg_ids(body, str(timeline_data)),
             index=index,
+            retain_ids=_retain_ids(body),
         )
         return web.json_response({"node_id": node_id, "entries": rows})
     except Exception as exc:

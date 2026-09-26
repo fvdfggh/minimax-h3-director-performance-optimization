@@ -4,7 +4,7 @@
  * trailing comma an object literal needs.
  */
 
-import { resolveOutputDimensions } from "../../core/dims.js";
+import { isPlausibleVideoFps, resolveOutputDimensions } from "../../core/dims.js";
 import { buildClipFrameMap, deletedSourceRanges } from "../../core/frame_map.js";
 import { THUMB_PREFETCH_BATCH } from "../../core/layout_spec.js";
 import { relPath, uid, viewUrl } from "../../core/utils.js";
@@ -34,8 +34,17 @@ export const video_loadMixin = {
             probeMethod: serverProbe?.probe_method || "browser_estimate",
         };
 
-        if (syncNativeFps && nativeFps > 0) {
+        // 探测到的帧率只在**可信**时才写进时间轴：容器给的 1000/1（时间基）之类会被
+        // 夹成 240，看起来就像「帧率莫名其妙变成 240」，还查不出是哪来的。
+        const duration = meta.duration;
+        if (syncNativeFps && isPlausibleVideoFps(nativeFps, nativeFrameCount, duration)) {
             this.syncFrameRateUI(nativeFps);
+        } else if (syncNativeFps && nativeFps > 0) {
+            console.warn(
+                `[MiniMax] 源视频探测到的帧率 ${nativeFps} 不可信`
+                + `（帧数 ${nativeFrameCount} / 时长 ${duration}s），保持当前帧率 `
+                + `${this.getFrameRate()} 不变。`,
+            );
         }
 
         const fps = this.getFrameRate();

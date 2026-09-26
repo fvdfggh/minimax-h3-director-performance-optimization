@@ -17,6 +17,7 @@ from ..director.second_sampling import (
 from ..lib.constants import DEFAULT_HEIGHT, DEFAULT_TOTAL_FRAMES, DEFAULT_WIDTH
 from .director_common import (
     CLEAR_VRAM_BETWEEN_SEGMENTS,
+    CONN_NOISE,
     EXPORT_SOURCE_IMAGES,
     USE_CONDITIONING_CACHE,
     finalize_director_outputs,
@@ -256,21 +257,11 @@ class MiniMaxH3DirectorOpt:
                         ),
                     },
                 ),
-                # ── 段间锥形重绘开关（复用 conn_noise 开关）────────────────────
-                # 此开关控制「段间锥形重绘」是否启用：开启 = 把上一段尾写入本段 body 前缀并重绘
-                # (continue 模式，配合 sigma 自适应 remask，比旧锥形加噪更稳)；关闭 = 仅参考帧引导(guide)。
-                # 重绘幅度由时间轴面板「重绘幅度」(continuityRedraw，默认 0.10) 控制。
-                "conn_noise": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": (
-                            "段间锥形重绘开关：开启 = 把上一段尾写入本段 body 前缀并重绘"
-                            "(continue 模式，比旧锥形加噪更稳)；关闭 = 仅参考帧引导(guide)。"
-                            "重绘幅度由时间轴「重绘幅度」(continuityRedraw，默认 0.10) 控制。"
-                        ),
-                    },
-                ),
+                # ── 段间锥形重绘：开关已移除，恒开（见 director_common.CONN_NOISE）──
+                # 原 conn_noise BOOLEAN 已删除：把上一段尾写入本段 body 前缀并重绘
+                # (continue 模式，配合 sigma 自适应 remask)；重绘幅度仍由时间轴面板
+                # 「重绘幅度」(continuityRedraw，默认 0.10) 控制。
+                # 旧工作流的该档位由 node_migrations.js 的 REMOVED_DIRECTOR_WIDGETS 丢弃。
                 # ── 二级采样（二采）──────────────────────────────────────────
                 # 刻意放在 optional 最末尾：新增 widget 会占用 widgets_values 下标，
                 # 插在既有控件之前会让旧工作流整体错位。
@@ -403,8 +394,6 @@ class MiniMaxH3DirectorOpt:
         workflow_name=None,
         sigmas=None,
         use_sigmas=False,
-        # ── 连接帧加噪（仅 r2v/v2v/rv2v 生效）── BOOLEAN 开关，默认关闭 ──
-        conn_noise=False,
         # ── 二级采样（二采）—— 参数名与 INPUT_TYPES 末尾一致 ──
         upscale_model=None,
         second_run_model=RUN_MODEL_MAIN,
@@ -514,7 +503,7 @@ class MiniMaxH3DirectorOpt:
                 second_seed=second_seed,
                 audio_mode="movie",
                 decode_audio=True,
-                conn_noise=conn_noise,
+                conn_noise=CONN_NOISE,
             )
             if _sampled.get("error"):
                 _report = f"二次采样失败：{_sampled['error']}"
@@ -615,7 +604,7 @@ class MiniMaxH3DirectorOpt:
                 use_conditioning_cache=USE_CONDITIONING_CACHE,
                 clear_vram_between_segments=CLEAR_VRAM_BETWEEN_SEGMENTS,
                 workflow_name=workflow_name,
-                conn_noise=conn_noise,
+                conn_noise=CONN_NOISE,
             )
         )
 

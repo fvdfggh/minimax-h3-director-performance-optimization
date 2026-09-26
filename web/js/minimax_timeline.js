@@ -8,10 +8,20 @@ import { EXTERNAL_COMBINE_NODE_TYPE, EXTERNAL_GROUP_NODE_TYPES, findDirectorNode
 import { DIRECTOR_DOM_WIDGET_NAME } from "./core/layout_spec.js";
 import { clearAllDirectorRunStatus, isDirectorNodeDef, isMiniMaxH3DirectorOptNode, normalizeDirectorOutputs, patchDirectorWidgetValueMigration, sanitizeAllWidgetValues, sanitizeWidgetValues } from "./core/node_migrations.js";
 import { clamp } from "./core/utils.js";
-import { resolveTaskKey } from "./minimax_gen_timeline.js";
 import { DIRECTOR_GROUP_LABEL_KEYS, applyDirectorWidgetLabels } from "./core/widget_labels.js";
 import { onLocaleChange, t } from "./minimax_i18n.js";
 import { ensureImageBatchTimeline, renderImageBatchGroups, setImageBatchPreview } from "./minimax_image_batch.js";
+
+// 支持标记：用来确认浏览器**实际**加载的是哪一版前端 JS。ES module 的缓存有时会扛过
+// 普通 F5，导致「改了代码却没生效」——在控制台搜 "Director Opt UI" 即可判断。
+if (!globalThis.__mmxDirectorUiBuild) {
+    globalThis.__mmxDirectorUiBuild = "2026-09-26g";
+    console.info(
+        `[MiniMax] Director Opt UI build ${globalThis.__mmxDirectorUiBuild}` +
+        "（含 r2v 工具栏「音频有效性校验」按钮、参考素材默认公共页、" +
+        "空值兜底优先还原工作流里的值、按名字复写载入值）",
+    );
+}
 
 
 function drawGroupHeader(ctx, node, widget_width, y, H, label) {
@@ -476,8 +486,9 @@ app.registerExtension({
             //                          any legacy *_frames_ht.pt seam window (superseded by
             //                          *_frames_ht.mp4; never touches the durable segment files).
             //   · 清空节点所有缓存   → additionally wipes every durable seg_* file in the
-            //                          unified minimax_director_opt_cache dir, forcing a full
-            //                          re-render of every segment.
+            //                          unified minimax_director_opt_cache dir **and** the
+            //                          audio_extract/ store, forcing a full re-render of
+            //                          every segment (and a re-extract of the audio).
             const runClearCache = (clearAll) => {
                 const nodeId = String(this.id ?? "");
                 const wfName = getStableWorkflowId();
@@ -487,6 +498,7 @@ app.registerExtension({
                         t("cache.itemConditioning"),
                         t("cache.itemBatchScratch"),
                         t("cache.itemSegments"),
+                        t("cache.itemAudioExtract"),
                     ]
                     : [
                         t("cache.itemConditioning"),
@@ -520,6 +532,7 @@ app.registerExtension({
                         const batch = data.cleared?.batch ?? 0;
                         const segments = data.cleared?.segments ?? 0;
                         const headtail = data.cleared?.headtail ?? 0;
+                        const audio = data.cleared?.audio_extract ?? 0;
                         const msg = [
                             t("cache.clearedTitle"),
                             t("cache.labelWorkflow") + (wfName || t("cache.unnamedWorkflow")),
@@ -527,13 +540,18 @@ app.registerExtension({
                             t("cache.deletedBatch", { status: batch ? t("cache.removed") : t("cache.none") }),
                             ...(headtail ? [t("cache.deletedHeadtail", { count: headtail })] : []),
                             ...(clearAll ? [t("cache.deletedSegments", { status: segments ? t("cache.removed") : t("cache.none") })] : []),
+                            ...(clearAll ? [t("cache.deletedAudioExtract", { status: audio ? t("cache.removed") : t("cache.none") })] : []),
                         ].join("\n");
                         console.log(
                             `[MiniMax H3Director] cache cleared: ${cond} conditioning file(s), ` +
                             `${batch ? "batch scratch removed" : "no batch scratch"}, ` +
                             `${clearAll ? (segments ? "segment cache removed" : "no segment cache") : "segments kept"} ` +
+                            `${clearAll ? (audio ? "extracted audio removed" : "no extracted audio") : "extracted audio kept"} ` +
                             `(workflow '${wfName || ""}')`
                         );
+                        // 音频库被清空时，时间轴上钉着的「保留音频」条目 id 已经不存在了：
+                        // 解掉指向，否则下次运行会去找一个已被删除的文件。
+                        if (audio) this._minimaxEditor?.clearRetainedAudioPins?.();
                         window.alert(msg);
                     } catch (err) {
                         console.error("[MiniMax H3Director] clear cache error:", err);
@@ -545,49 +563,6 @@ app.registerExtension({
             // up by name), so they are built from t() and re-translated on switch.
             const clearBtn = this.addWidget("button", t("cache.buttonClear"), null, () => runClearCache(false));
             const clearAllBtn = this.addWidget("button", t("cache.buttonClearAll"), null, () => runClearCache(true));
-
-            // 「音频有效性校验」——只在 r2v 出现。按钮 widget 不参与
-            // widgets_values 序列化（serialize=false），所以加它不会让旧工作流的
-            // 控件值再错位一格。
-            const asrBtn = this.addWidget("button", t("asr.button"), null, () => {
-                const open = () => this._minimaxEditor?.openAsrCheckPicker?.();
-                if (this._minimaxEditor) open();
-                else setTimeout(open, 0);
-            });
-            asrBtn.serialize = false;
-
-            // 保存按钮原始 computeSize，隐藏/恢复时不能把它永久改掉。
-            const setAsrVisible = (visible) => {
-                if (visible) {
-                    if (asrBtn._bdAsrOrigComputeSize) {
-                        asrBtn.computeSize = asrBtn._bdAsrOrigComputeSize;
-                        asrBtn._bdAsrOrigComputeSize = null;
-                    }
-                } else if (!asrBtn._bdAsrOrigComputeSize) {
-                    asrBtn._bdAsrOrigComputeSize = asrBtn.computeSize;
-                    asrBtn.computeSize = () => [0, 0];
-                }
-                asrBtn.hidden = !visible;
-                if (!asrBtn.options) asrBtn.options = {};
-                asrBtn.options.hidden = !visible;
-                if (asrBtn.element) asrBtn.element.style.display = visible ? "" : "none";
-            };
-            const syncAsrButton = () => {
-                const tw = (this.widgets || []).find((w) => w?.name === "task_type");
-                setAsrVisible(resolveTaskKey(tw?.value || "") === "r2v");
-                finalizeDirectorWidgetOrder(this);
-                this.setDirtyCanvas?.(true, true);
-            };
-            const taskWidget = (this.widgets || []).find((w) => w?.name === "task_type");
-            if (taskWidget) {
-                const prevTaskCb = taskWidget.callback;
-                taskWidget.callback = function (...args) {
-                    const out = prevTaskCb?.apply(this, args);
-                    syncAsrButton();
-                    return out;
-                };
-            }
-            syncAsrButton();
             this._unsubCacheLocale?.();
             this._unsubCacheLocale = onLocaleChange(() => {
                 const relabel = (w, key) => {
@@ -597,7 +572,6 @@ app.registerExtension({
                 };
                 relabel(clearBtn, "cache.buttonClear");
                 relabel(clearAllBtn, "cache.buttonClearAll");
-                relabel(asrBtn, "asr.button");
                 this.setDirtyCanvas?.(true, true);
             });
 

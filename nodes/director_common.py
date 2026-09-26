@@ -43,6 +43,10 @@ USE_CONDITIONING_CACHE = True
 CLEAR_VRAM_BETWEEN_SEGMENTS = True
 #: Decode the timeline source clip onto the separate ``source_images`` output.
 EXPORT_SOURCE_IMAGES = False
+#: 段间锥形重绘（原 ``conn_noise`` 开关）：恒开。
+#: 开启 = 把上一段尾写入本段 body 前缀并重绘（continue 模式，配合 sigma 自适应 remask）；
+#: 关闭时只做参考帧引导(guide)。重绘幅度仍由时间轴「重绘幅度」(continuityRedraw) 控制。
+CONN_NOISE = True
 
 
 def timeline_required_inputs() -> dict:

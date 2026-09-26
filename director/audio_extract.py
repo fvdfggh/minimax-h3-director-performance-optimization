@@ -285,7 +285,7 @@ def sync_audio_slots(
             continue
         if sid in known:
             idx = int(position.get(sid, -1))
-            if int(entry.get("index") or -1) != idx:
+            if _entry_index(entry) != idx:
                 entry["index"] = idx
                 changed = True
             kept.append(entry)
@@ -365,10 +365,19 @@ def remove_audio_entry(
     return True
 
 
+def _entry_index(entry: dict[str, Any], default: int = -1) -> int:
+    """Segment index — 0 (first card) is valid, so never collapse it with `or`."""
+    raw = entry.get("index")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 def _public_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(entry.get("id") or ""),
-        "index": int(entry.get("index") or -1),
+        "index": _entry_index(entry),
         "variant": str(entry.get("variant") or segment_slots.VARIANT_FIRST),
         "sample_rate": int(entry.get("sample_rate") or 0),
         "channels": int(entry.get("channels") or 0),

@@ -32,7 +32,6 @@ from .plan_prompts import reinforce_r2v_prompt, reinforce_rv2v_prompt, reinforce
 from .plan_ranges import prepare_segment_clip
 from .plan_types import DirectorPlan, resolve_ref_image_size
 from .progress import report_director_progress, report_director_segment_preview
-from .segment_mp4_export import maybe_export_segment_mp4
 from .segment_runtime import frames_label, resolve_segment_raw_clip
 from ..lib.image_prep import assert_minimax_canvas, fit_canvas, fit_video_long_edge
 from ..lib.media_b64 import tensor_frame_to_jpeg_b64
@@ -653,7 +652,6 @@ def _decode_export_one_segment(
     decoded_segments,
     export_frame_counts,
     last_timeline_index,
-    mp4_run_dir,
     node_id,
     pending_prev_trim,
     plan,
@@ -770,15 +768,6 @@ def _decode_export_one_segment(
         workflow_name=workflow_name,
     )
 
-    # Export mp4
-    if mp4_run_dir is not None:
-        mp4_path = maybe_export_segment_mp4(
-            mp4_run_dir, plan, seg, chunk,
-            audio_dict if isinstance(audio_dict, dict) else None,
-        )
-        if mp4_path:
-            reports.append(f"  Segment {ui_idx + 1}/{timeline_seg_total}: mp4 → {mp4_path}")
-
     # Preview
     if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and chunk.shape[0] >= 1:
         try:
@@ -881,11 +870,6 @@ def _decode_export_one_segment(
                 replace_audio=False,
                 workflow_name=workflow_name,
             )
-            if mp4_run_dir is not None:
-                maybe_export_segment_mp4(
-                    mp4_run_dir, plan, prev_export_seg, new_chunk,
-                    new_audio_dict,
-                )
             reports.append(
                 f"  Seg #{prev_export_seg.index + 1}: phase-align trim — dropped "
                 f"{pending_trim}f orphaned tail (export {int(new_chunk.shape[0])}f)"

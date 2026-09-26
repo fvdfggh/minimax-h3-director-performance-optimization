@@ -2,9 +2,9 @@
 
 ``DirectorPlan`` / ``SegmentPlan`` are what every stage of the pipeline hands
 around, so they live in their own **leaf** module: ``plan`` *builds* them, while
-``segment_continuity``, ``segment_cache``, ``segment_runtime`` and
-``segment_mp4_export`` only need the shape. Splitting the model out is what
-removes the old ``plan`` ↔ ``segment_continuity`` import cycle.
+``segment_continuity``, ``segment_cache`` and ``segment_runtime`` only need the
+shape. Splitting the model out is what removes the old ``plan`` ↔
+``segment_continuity`` import cycle.
 
 The constants and normalisers below describe the same wire format (the timeline
 JSON's ``segmentExport`` / ``secondSample`` / ``refImageSize`` fields), so they

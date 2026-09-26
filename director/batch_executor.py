@@ -86,9 +86,6 @@ from .segment_cache import (
     save_segment_cache, slot_content_hash,
     sync_segment_slots,
 )
-from .segment_mp4_export import (
-    maybe_export_segment_mp4, new_segment_mp4_run_dir, export_run_mp4, run_mp4_path,
-)
 from .segment_continuity import concat_chunks_lazy, is_continuity_active, resolve_prev_segment_output
 from .vram_cleanup import cleanup_segment_vram
 from .batch_source_audio import build_source_audio_cache
@@ -397,12 +394,7 @@ def execute_director_batch(
     # Highest timeline index; its tail must never be phase-trimmed.
     last_timeline_index = max((s.index for s in all_segments), default=None)
 
-    # new_segment_mp4_run_dir already returns None unless export_mode == "segments".
-    # Do not invert the condition here: both branches would yield None and the
-    # per-segment mp4 would never be written.
-    mp4_run_dir = new_segment_mp4_run_dir(plan)
-    if mp4_run_dir is not None:
-        reports.append(f"Segment mp4 export dir: {mp4_run_dir}")
+    # 逐段 mp4 落盘功能已移除：段缓存是唯一持久化来源，片段直接走节点输出。
 
     # Two-pass sampling: Pass 1 builds every latent with head references only
     # (tail disabled); Pass 2 re-samples just the 对齐下段 (NEXT/BOTH) segments,
@@ -493,7 +485,6 @@ def execute_director_batch(
             decoded_segments=decoded_segments,
             export_frame_counts=export_frame_counts,
             last_timeline_index=last_timeline_index,
-            mp4_run_dir=mp4_run_dir,
             node_id=node_id,
             pending_prev_trim=pending_prev_trim,
             plan=plan,
@@ -689,23 +680,17 @@ def execute_director_batch(
         # clip that the selection was supposed to avoid.
         from .segment_cache import build_run_selection_clips
 
-        mp4_run_dir = new_segment_mp4_run_dir(plan, for_selection=True)
-        seg_outputs, run_audios, seg_counts, run_mp4s = build_run_selection_clips(
+        seg_outputs, run_audios, seg_counts = build_run_selection_clips(
             node_id, plan, [seg.index for seg in run_list], segment_outputs, segment_audios,
-            all_segments=all_segments, mp4_run_dir=mp4_run_dir,
+            all_segments=all_segments,
             workflow_name=workflow_name,
         )
         if not seg_outputs:
             raise ValueError("Batch mode: export list is empty.")
-        if run_mp4s:
-            reports.append(
-                "选择运行导出: " + ", ".join(f"#{p.split('seg_')[-1]}" for p in run_mp4s)
-            )
-        else:
-            reports.append(
-                "选择运行导出: "
-                + ", ".join(f"#{run[0] + 1}-{run[-1] + 1}" for run in continuous_export_runs([seg.index for seg in run_list]))
-            )
+        reports.append(
+            "选择运行导出: "
+            + ", ".join(f"#{run[0] + 1}-{run[-1] + 1}" for run in continuous_export_runs([seg.index for seg in run_list]))
+        )
         segment_outputs = seg_outputs
         export_frame_counts = seg_counts
         segment_audios = run_audios

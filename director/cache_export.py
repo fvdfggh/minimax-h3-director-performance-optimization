@@ -703,13 +703,12 @@ def build_run_selection_clips(
     audios: list | None = None,
     *,
     all_segments: list | None = None,
-    mp4_run_dir=None,
     workflow_name: str | None = None,
-) -> tuple[list, list, list[int], list[str]]:
+) -> tuple[list, list, list[int]]:
     """Collapse a「选择运行」into one clip per contiguous run — the「连续导出」layout.
 
-    Returns ``(clips, audios, frame_counts, mp4_paths)``, all aligned 1:1 and
-    ordered by timeline position.
+    Returns ``(clips, audios, frame_counts)``, all aligned 1:1 and ordered by
+    timeline position.
 
     A partial run used to be merged back onto the full timeline: unselected
     slots were re-read from the segment cache (or filled from the source video)
@@ -726,9 +725,11 @@ def build_run_selection_clips(
     ``sorted(run_indices)``; they are passed to the merge as overrides so nothing
     is re-read from disk. Missing entries are skipped rather than raising — a
     segment that failed to decode must not lose the whole run.
+
+    Nothing is written to disk here: segment caches are the only persistence,
+    the clips go straight to the node output.
     """
     from .segment_continuity import concat_chunks_lazy
-    from .segment_mp4_export import export_run_mp4
 
     run_list = sorted({int(i) for i in (run_indices or [])})
     chunk_by_index = {
@@ -746,7 +747,6 @@ def build_run_selection_clips(
     clips: list = []
     run_audios: list = []
     counts: list[int] = []
-    mp4_paths: list[str] = []
 
     for run in continuous_export_runs(run_list):
         present = [i for i in run if i in chunk_by_index]
@@ -787,18 +787,8 @@ def build_run_selection_clips(
         clips.append(clip)
         run_audios.append(audio if isinstance(audio, dict) else {})
         counts.append(int(clip.shape[0]))
-        if mp4_run_dir is not None:
-            path = export_run_mp4(
-                mp4_run_dir, plan,
-                seg_by_index.get(first) or seg_by_index.get(present[0]),
-                seg_by_index.get(last) or seg_by_index.get(present[-1]),
-                clip,
-                run_audios[-1] or None,
-            )
-            if path:
-                mp4_paths.append(path)
 
-    return clips, run_audios, counts, mp4_paths
+    return clips, run_audios, counts
 
 
 def _segment_can_stitch(

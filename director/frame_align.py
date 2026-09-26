@@ -5,10 +5,19 @@ from __future__ import annotations
 import torch
 
 
-def minimax_align_frame_count(frame_count: int) -> int:
-    """Round up to MiniMax H3 17k+5 frame grid (5, 22, 39, …)."""
+def minimax_align_frame_count(frame_count: int, continuity: bool = False) -> int:
+    """Round up to the MiniMax H3 frame grid.
+
+    Standalone segments land on 17k+5 (5, 22, 39, …). A segment that pins the
+    previous tail (「引用上段」) exports on 17k instead: the head pin itself is
+    17m+5 frames, so head + body still lands on the official 17k+5 grid.
+    """
     n = max(5, int(frame_count))
-    while n % 17 != 5:
+    step = 17
+    offset = 0 if continuity else 5
+    if continuity:
+        n = max(step, n)
+    while (n - offset) % step != 0:
         n += 1
     return n
 

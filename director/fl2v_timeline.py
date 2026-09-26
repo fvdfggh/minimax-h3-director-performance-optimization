@@ -31,13 +31,39 @@ DEFAULT_FL2V_DURATION_SEC = 5.0
 DEFAULT_FL2V_NEGATIVE = "bad video"
 
 
-def _duration_to_minimax_frames(seconds: float, fps: float = 24.0) -> int:
-    """Official MiniMax formula: max(5, round(a*fps)) then snap to 17k+5."""
+def _duration_to_minimax_frames(seconds: float, fps: float = 24.0, continuity: bool = False) -> int:
+    """Official MiniMax formula: max(5, round(a*fps)) then snap to the frame grid.
+
+    continuity=True (「引用上段」) snaps to 17k instead of 17k+5 — the pinned head
+    is 17m+5 frames, so head + body is back on the official grid.
+    """
     a = max(0.1, float(seconds or 0.1))
     rate = max(1.0, float(fps or 24.0))
     n = max(5, int(round(a * rate)))
-    rem = (5 - (n % 17)) % 17
-    return n + rem
+    step = 17
+    offset = 0 if continuity else 5
+    rem = (offset - (n % step)) % step
+    out = n + rem
+    return max(step, out) if continuity else out
+
+
+def _shot_continuity_from_prev(item: dict) -> bool:
+    """Per-shot「引用上段」flag. Missing ⇒ True (same default as segment_continuity).
+
+    Local copy keeps shot normalization free of the master-switch import order.
+    """
+    raw = None
+    if "continuityFromPrev" in item:
+        raw = item.get("continuityFromPrev")
+    elif "continuity_from_prev" in item:
+        raw = item.get("continuity_from_prev")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return str(raw).strip().lower() in {"true", "1", "yes", "on"}
 
 
 def _image_ref_from_raw(raw: Any) -> dict[str, Any] | None:
@@ -60,7 +86,12 @@ def _image_ref_from_raw(raw: Any) -> dict[str, Any] | None:
     }
 
 
-def _normalize_shots(raw_shots: list | None, *, frame_rate: float = 24.0) -> list[dict[str, Any]]:
+def _normalize_shots(
+    raw_shots: list | None,
+    *,
+    frame_rate: float = 24.0,
+    continuity_enabled: bool = False,
+) -> list[dict[str, Any]]:
     """Normalize explicit shots[]. Empty start+end is kept as a text-to-video shot."""
     out: list[dict[str, Any]] = []
     if not raw_shots:
@@ -76,7 +107,13 @@ def _normalize_shots(raw_shots: list | None, *, frame_rate: float = 24.0) -> lis
         except (TypeError, ValueError):
             dur = DEFAULT_FL2V_DURATION_SEC
         dur = max(0.1, dur)
-        fc = max(MIN_FL2V_FRAMES, _duration_to_minimax_frames(dur, frame_rate))
+        # 「引用上段」pins a 17m+5 head ⇒ this shot exports on the 17k grid.
+        continuity = bool(
+            continuity_enabled
+            and i > 0
+            and _shot_continuity_from_prev(item)
+        )
+        fc = max(MIN_FL2V_FRAMES, _duration_to_minimax_frames(dur, frame_rate, continuity))
         dim_src = start or end
         row = {
             "source_index": i,
@@ -549,7 +586,18 @@ def build_fl2v_director_plan(
     keyframes = _normalize_keyframes(
         timeline.get("keyframes") or timeline.get("segments") or []
     )
-    shots = _normalize_shots(timeline.get("shots"), frame_rate=fps)
+    # Shot frame counts depend on「引用上段」(17k grid), so resolve the master
+    # switch before normalizing. Final plan value re-resolves on the real count.
+    from .segment_continuity import resolve_continuity_settings
+
+    shot_continuity_enabled, _shot_overlap = resolve_continuity_settings(
+        timeline, segment_count=max(1, len(timeline.get("shots") or []))
+    )
+    shots = _normalize_shots(
+        timeline.get("shots"),
+        frame_rate=fps,
+        continuity_enabled=shot_continuity_enabled,
+    )
     used_explicit_shots = bool(shots)
     if not shots:
         if not keyframes:

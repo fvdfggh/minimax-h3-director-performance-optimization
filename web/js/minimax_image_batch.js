@@ -1,7 +1,8 @@
 /** Multi prompt-group UI for t2i / i2i / r2i / t2v / i2v / r2v (prompt batch mode). */
 
 
-import { DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, defaultDurationSec, defaultFrameCount, durationToClampedMiniMaxFrames, framesToDurationSec, imageBatchVariant, isContinuityMasterEnabled, isSegmentContinuityFromPrev, isVideoBatchTask, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, maxDurationSec, MINIMAX_CANVAS_MULTIPLE, minDurationSec, newBatchSegment, preferredDurationSecFromFrames, refAudioLabel, refImageLabel, refVideoLabel, resolveSegmentRefImageSize, resolveTaskKey, roundDurationSec, sumFrameCounts } from "./minimax_gen_timeline.js";
+import { DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, defaultDurationSec, defaultFrameCount, durationToClampedMiniMaxFrames, framesToDurationSec, imageBatchVariant, isContinuityMasterEnabled, isSegmentContinuityFromPrev, isVideoBatchTask, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, maxDurationSec, MINIMAX_CANVAS_MULTIPLE, minDurationSec, newBatchSegment, preferredDurationSecFromFrames, refAudioLabel, refImageLabel, refVideoLabel, resolveSegmentRefImageSize, resolveTaskKey, roundDurationSec, sumFrameCounts, usesContinuityFrameGrid } from "./minimax_gen_timeline.js";
+import { createDurationCombo } from "./core/duration_combo.js";
 import { refreshPromptTokenEditors, teardownPromptImageMentions, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
 import { hasDuplicateReferenceAudio, isReferenceAudioSourceFile, prepareLocalReferenceAudio } from "./minimax_ref_audio.js";
@@ -256,9 +257,9 @@ export function wireMediaDuration(mediaEl, durEl, onReady) {
  * User-facing seconds (1 decimal). durationSec is the source of truth when set;
  * only fall back to frames for legacy rows that never stored durationSec.
  */
-function resolveSegmentDurationSec(seg, defFc) {
+function resolveSegmentDurationSec(seg, defFc, continuity = false) {
     if (seg.durationSec != null && Number.isFinite(Number(seg.durationSec))) {
-        const { durationSec } = durationToClampedMiniMaxFrames(seg.durationSec, 24);
+        const { durationSec } = durationToClampedMiniMaxFrames(seg.durationSec, 24, continuity);
         return durationSec;
     }
     const fc = parseInt(seg.frameCount ?? seg.length ?? seg._videoFrameCount ?? defFc, 10) || defFc;
@@ -266,16 +267,16 @@ function resolveSegmentDurationSec(seg, defFc) {
 }
 
 /** Apply seconds to a segment by index (avoids stale closures after normalize). */
-function applyBatchSegmentDuration(editor, index, rawSec) {
+function applyBatchSegmentDuration(editor, index, rawSec, continuity = false) {
     const taskKey = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
     const seg = editor.timeline.segments?.[index];
     if (!seg || !isVideoBatchTask(taskKey)) return null;
     const clamped = clamp(
         Number(rawSec) || defaultDurationSec(taskKey),
         minDurationSec(),
-        maxDurationSec(),
+        maxDurationSec(continuity),
     );
-    const { frames, durationSec } = durationToClampedMiniMaxFrames(clamped, 24);
+    const { frames, durationSec } = durationToClampedMiniMaxFrames(clamped, 24, continuity);
     seg.durationSec = durationSec;
     seg.frameCount = frames;
     seg.length = frames;
@@ -348,15 +349,18 @@ function flushBatchDurationInputs(editor) {
         if (!live?.seg) continue;
         clearTimeout(input._t);
         input._t = null;
-        const displayed = parseFloat(input.value);
+        // Picker rows store the resolved seconds on the combo API; the visible
+        // text is a label, so parseFloat() would misread it.
+        const displayed = input.__bdDurCombo ? input.__bdDurCombo.getSec() : parseFloat(input.value);
         if (!Number.isFinite(displayed)) continue;
+        const cont = usesContinuityFrameGrid(live.seg, live.index, editor.timeline?.output);
         const current = Number(live.seg.durationSec);
         // Skip if already in sync (avoid churn while typing the same committed value).
         if (Number.isFinite(current) && roundDurationSec(displayed) === roundDurationSec(current)
             && input !== document.activeElement) {
             continue;
         }
-        applyBatchSegmentDuration(editor, live.index, displayed);
+        applyBatchSegmentDuration(editor, live.index, displayed, cont);
     }
 }
 
@@ -854,11 +858,14 @@ export function ensureImageBatchTimeline(editor) {
     // refs only on global, copy them into empty batch groups so generation actually
     // receives reference_image_* — otherwise it silently behaves like t2v/t2i.
     migrateGlobalRefsIntoBatchSegments(editor, taskKey);
-    for (const seg of editor.timeline.segments) {
+    for (let si = 0; si < editor.timeline.segments.length; si += 1) {
+        const seg = editor.timeline.segments[si];
         if (isVideoBatchTask(taskKey)) {
+            const cont = usesContinuityFrameGrid(seg, si, editor.timeline?.output);
             const { frames, durationSec } = durationToClampedMiniMaxFrames(
-                resolveSegmentDurationSec(seg, defFc),
+                resolveSegmentDurationSec(seg, defFc, cont),
                 24,
+                cont,
             );
             seg.durationSec = durationSec;
             seg.frameCount = frames;
@@ -900,13 +907,17 @@ export function normalizeImageBatchSegments(editor) {
     if (!segs.length) {
         editor.timeline.segments = [newBatchSegment({ durationSec: defSec })];
     }
-    for (const seg of editor.timeline.segments) {
+    for (let si = 0; si < editor.timeline.segments.length; si += 1) {
+        const seg = editor.timeline.segments[si];
         let fc = 1;
         let durationSec;
         if (isVideo) {
+            // 引用上段 pins a 17m+5 head, so this row exports on the 17k grid.
+            const cont = usesContinuityFrameGrid(seg, si, editor.timeline?.output);
             const resolved = durationToClampedMiniMaxFrames(
-                clamp(resolveSegmentDurationSec(seg, defFc) || defSec, minDurationSec(), maxDurationSec()),
+                clamp(resolveSegmentDurationSec(seg, defFc, cont) || defSec, minDurationSec(), maxDurationSec(cont)),
                 24,
+                cont,
             );
             fc = resolved.frames;
             durationSec = resolved.durationSec;
@@ -3414,6 +3425,17 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             contCb.onchange = (e) => {
                 e.stopPropagation();
                 seg.continuityFromPrev = !!contCb.checked;
+                // Grid flips between 17k+5 (standalone) and 17k (引用上段) — keep the
+                // typed seconds, re-align the frames and rebuild the picker options.
+                const combo = card.querySelector("input[data-batch-sec-index]")?.__bdDurCombo;
+                const cont = usesContinuityFrameGrid(seg, index, editor.timeline?.output);
+                const updated = applyBatchSegmentDuration(editor, index, seg.durationSec, cont);
+                combo?.setContinuity(cont, updated?.durationSec ?? seg.durationSec);
+                editor.updateVideoNameLabel?.();
+                editor.updateOutputPreview?.();
+                if (editor.totalFramesWidget) {
+                    editor.totalFramesWidget.value = sumFrameCounts(editor.timeline.segments);
+                }
                 // Flush timeline_data immediately so Queue Prompt cannot race the debounce.
                 editor.commit?.(false, { syncTimeline: true });
                 editor.flushTimelineSync?.();
@@ -3495,24 +3517,21 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         if (isVideo && !commonPage) {
             const secRow = document.createElement("label");
             secRow.className = "bd-batch-fc";
-            const curSec = resolveSegmentDurationSec(seg, defaultFrameCount(key));
-            const { frames, durationSec: syncedSec } = durationToClampedMiniMaxFrames(curSec, 24);
-            const playSec = framesToDurationSec(frames, 24);
+            // 引用上段 pins a 17m+5 head ⇒ this group exports on the 17k grid.
+            const contGrid = usesContinuityFrameGrid(seg, index, editor.timeline?.output);
+            const curSec = resolveSegmentDurationSec(seg, defaultFrameCount(key), contGrid);
+            const { frames, durationSec: syncedSec } = durationToClampedMiniMaxFrames(curSec, 24, contGrid);
             seg.durationSec = syncedSec;
             seg.frameCount = frames;
             seg.length = frames;
             seg._videoFrameCount = frames;
-            secRow.innerHTML = `${t("batch.seconds")} <input type="number" data-batch-sec-index="${index}" data-batch-seg-id="${seg.id || ""}" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${seg.durationSec}" title="${t("batch.durationTooltip", { frames, play: playSec })}">`;
-            const secInput = secRow.querySelector("input");
-            const applySec = () => {
-                const updated = applyBatchSegmentDuration(editor, index, secInput.value);
-                if (!updated) return;
-                const play = framesToDurationSec(updated.frameCount, 24);
-                secInput.value = String(updated.durationSec);
-                secInput.title = t("batch.durationTooltip", {
-                    frames: updated.frameCount,
-                    play,
-                });
+            const secText = document.createElement("span");
+            secText.textContent = `${t("batch.seconds")} `;
+            secRow.appendChild(secText);
+            const applySec = (nextSec) => {
+                const cont = usesContinuityFrameGrid(seg, index, editor.timeline?.output);
+                const updated = applyBatchSegmentDuration(editor, index, nextSec, cont);
+                if (!updated) return null;
                 editor.scheduleTimelineSync();
                 editor.scheduleRender?.();
                 editor.updateVideoNameLabel?.();
@@ -3521,23 +3540,22 @@ function appendBatchCard(list, editor, seg, index, ctx) {
                 if (editor.totalFramesWidget) {
                     editor.totalFramesWidget.value = sumFrameCounts(editor.timeline.segments);
                 }
+                return updated;
             };
-            if (externalLocked) {
-                secInput.readOnly = true;
-                secInput.disabled = true;
-                secInput.title = t("external.durationLocked");
-            } else {
-                secInput.onchange = applySec;
-                secInput.oninput = () => {
-                    clearTimeout(secInput._t);
-                    secInput._t = setTimeout(applySec, 200);
-                };
-                secInput.onblur = () => {
-                    clearTimeout(secInput._t);
-                    secInput._t = null;
-                    applySec();
-                };
-            }
+            // Picker instead of a free number: options are the real grid lengths.
+            const combo = createDurationCombo({
+                sec: syncedSec,
+                continuity: contGrid,
+                fps: 24,
+                disabled: !!externalLocked,
+                attrs: {
+                    "data-batch-sec-index": String(index),
+                    "data-batch-sec-id": seg.id || "",
+                },
+                onCommit: (nextSec) => applySec(nextSec),
+            });
+            if (externalLocked) combo.input.title = t("external.durationLocked");
+            secRow.appendChild(combo.el);
             meta.appendChild(secRow);
         }
         if (!externalLocked && !commonPage) {

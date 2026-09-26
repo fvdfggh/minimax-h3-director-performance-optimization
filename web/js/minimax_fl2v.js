@@ -4,8 +4,9 @@
  * Total duration = sum of shot durations. Timeline shows one block per shot.
  */
 
-import { defaultDurationSec, defaultFrameCount, durationToMiniMaxFrames, isContinuityMasterEnabled, isSegmentContinuityFromPrev, MAX_GEN_FRAMES, maxDurationSec, minDurationSec, minFrameCount, preferredDurationSecFromFrames, resolveTaskKey, roundDurationSec } from "./minimax_gen_timeline.js";
+import { defaultDurationSec, defaultFrameCount, durationToMiniMaxFrames, isContinuityMasterEnabled, isSegmentContinuityFromPrev, MAX_GEN_FRAMES, maxDurationSec, minDurationSec, minFrameCount, preferredDurationSecFromFrames, quantizeDurationSec, resolveTaskKey, roundDurationSec, usesContinuityFrameGrid } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
+import { createDurationCombo } from "./core/duration_combo.js";
 import { clamp, uid, viewUrl } from "./core/utils.js";
 import { uploadToInput } from "./core/upload.js";
 
@@ -113,7 +114,8 @@ export function newFl2vShot(overrides = {}) {
     let durationSec = overrides.durationSec != null && Number.isFinite(Number(overrides.durationSec))
         ? Number(overrides.durationSec)
         : defaultDurationSec("fl2v");
-    durationSec = clamp(roundDurationSec(durationSec), minDurationSec(), maxDurationSec());
+    // 2-decimal quantization: grid seconds (136f = 5.67s) must survive sync.
+    durationSec = clamp(quantizeDurationSec(durationSec), minDurationSec(), maxDurationSec());
     const shot = {
         id: overrides.id || uid(),
         durationSec,
@@ -133,9 +135,17 @@ export function newFl2vShot(overrides = {}) {
     return shot;
 }
 
-function shotFrameCount(shot, fps = 24) {
-    const sec = clamp(Number(shot?.durationSec) || defaultDurationSec("fl2v"), minDurationSec(), maxDurationSec());
-    return clamp(durationToMiniMaxFrames(sec, fps), minFrameCount("fl2v"), MAX_GEN_FRAMES);
+/**
+ * Frame count for one shot.「引用上段」pins a 17m+5 head before sampling, so those
+ * shots export on the 17k grid (17k + 17m + 5 still lands on the official grid).
+ */
+function shotFrameCount(shot, fps = 24, continuity = false) {
+    const sec = clamp(
+        Number(shot?.durationSec) || defaultDurationSec("fl2v"),
+        minDurationSec(),
+        maxDurationSec(continuity),
+    );
+    return clamp(durationToMiniMaxFrames(sec, fps, continuity), minFrameCount("fl2v"), MAX_GEN_FRAMES);
 }
 
 /** Migrate legacy flat segments/keyframes → shots[]. */
@@ -226,7 +236,7 @@ export function flattenFl2vShotsToSegments(editor) {
     const shots = editor.timeline.shots || [];
     let cursor = 0;
     const segs = shots.map((shot, i) => {
-        const fc = shotFrameCount(shot, fps);
+        const fc = shotFrameCount(shot, fps, usesContinuityFrameGrid(shot, i, editor.timeline?.output));
         const startImage = shot.startImage || null;
         const endImage = shot.endImage || null;
         const seg = {
@@ -274,8 +284,9 @@ export function flattenFl2vShotsToKeyframes(editor) {
     const shots = editor.timeline.shots || [];
     const keyframes = [];
     let cursor = 0;
-    for (const shot of shots) {
-        const fc = shotFrameCount(shot, fps);
+    for (let i = 0; i < shots.length; i += 1) {
+        const shot = shots[i];
+        const fc = shotFrameCount(shot, fps, usesContinuityFrameGrid(shot, i, editor.timeline?.output));
         const startImage = shot.startImage;
         const endImage = shot.endImage;
         const hasStart = !!startImage?.imageFile;
@@ -357,10 +368,12 @@ export function recomputeFl2vTotals(editor) {
     const shots = editor.timeline.shots || [];
     let totalSec = 0;
     let totalFrames = 0;
-    for (const shot of shots) {
-        const sec = clamp(Number(shot.durationSec) || defaultDurationSec("fl2v"), minDurationSec(), maxDurationSec());
-        shot.durationSec = roundDurationSec(sec);
-        const fc = shotFrameCount(shot, fps);
+    for (let i = 0; i < shots.length; i += 1) {
+        const shot = shots[i];
+        const cont = usesContinuityFrameGrid(shot, i, editor.timeline?.output);
+        const sec = clamp(Number(shot.durationSec) || defaultDurationSec("fl2v"), minDurationSec(), maxDurationSec(cont));
+        shot.durationSec = quantizeDurationSec(sec);
+        const fc = shotFrameCount(shot, fps, cont);
         totalSec += shot.durationSec;
         totalFrames += fc;
     }
@@ -413,7 +426,10 @@ export function getFl2vContentEndFrames(editor) {
     if (end > 0) return end;
     const shots = editor?.timeline?.shots || [];
     if (shots.length) {
-        return shots.reduce((a, s) => a + shotFrameCount(s, fl2vFps(editor)), 0);
+        return shots.reduce(
+            (a, s, i) => a + shotFrameCount(s, fl2vFps(editor), usesContinuityFrameGrid(s, i, editor?.timeline?.output)),
+            0,
+        );
     }
     return 0;
 }
@@ -480,14 +496,14 @@ export function fl2vStartIndices(editor) {
 
 
 
-export function setFl2vShotDurationSec(editor, shotIndex, seconds) {
+export function setFl2vShotDurationSec(editor, shotIndex, seconds, continuity = false) {
     const shots = editor.timeline.shots || [];
     const shot = shots[shotIndex];
     if (!shot) return;
     shot.durationSec = clamp(
-        roundDurationSec(Number(seconds) || defaultDurationSec("fl2v")),
+        quantizeDurationSec(Number(seconds) || defaultDurationSec("fl2v")),
         minDurationSec(),
-        maxDurationSec(),
+        maxDurationSec(continuity),
     );
     syncFl2vFromShots(editor);
 }
@@ -505,6 +521,7 @@ export function rippleFl2vRightEdge(segments, index, newEndFrame, minLen, editor
         const seg = (segments || editor.timeline.segments || [])[index];
         if (shot && seg) {
             const fps = fl2vFps(editor);
+            const cont = usesContinuityFrameGrid(shot, index, editor.timeline?.output);
             const newLen = Math.max(minLen, Math.round(newEndFrame) - (parseInt(seg.start, 10) || 0));
             // Prefer nice seconds that map near this frame count.
             const roughSec = newLen / fps;
@@ -513,20 +530,20 @@ export function rippleFl2vRightEdge(segments, index, newEndFrame, minLen, editor
                 Math.round(roughSec),
                 roundDurationSec(roughSec),
             ]) {
-                if (cand < minDurationSec() || cand > maxDurationSec()) continue;
-                if (Math.abs(durationToMiniMaxFrames(cand, fps) - newLen) <= Math.abs(durationToMiniMaxFrames(best, fps) - newLen)) {
+                if (cand < minDurationSec() || cand > maxDurationSec(cont)) continue;
+                if (Math.abs(durationToMiniMaxFrames(cand, fps, cont) - newLen) <= Math.abs(durationToMiniMaxFrames(best, fps, cont) - newLen)) {
                     best = cand;
                 }
             }
-            shot.durationSec = clamp(roundDurationSec(best), minDurationSec(), maxDurationSec());
+            shot.durationSec = clamp(roundDurationSec(best), minDurationSec(), maxDurationSec(cont));
             // Preview: temporarily layout segments without full sync (drag path).
             const fps2 = fps;
             let cursor = 0;
             for (let i = 0; i < editor.timeline.shots.length; i++) {
                 const s = editor.timeline.shots[i];
                 const fc = i === index
-                    ? clamp(durationToMiniMaxFrames(shot.durationSec, fps2), minFrameCount("fl2v"), MAX_GEN_FRAMES)
-                    : shotFrameCount(s, fps2);
+                    ? clamp(durationToMiniMaxFrames(shot.durationSec, fps2, cont), minFrameCount("fl2v"), MAX_GEN_FRAMES)
+                    : shotFrameCount(s, fps2, usesContinuityFrameGrid(s, i, editor.timeline?.output));
                 if (segments[i]) {
                     segments[i].start = cursor;
                     segments[i].length = fc;
@@ -965,7 +982,8 @@ function renderFl2vShotCards(editor) {
         card.dataset.shotIndex = String(i);
         const startUrl = shot.startImage?.imageFile ? fl2vViewUrl(shot.startImage.imageFile) : "";
         const endUrl = shot.endImage?.imageFile ? fl2vViewUrl(shot.endImage.imageFile) : "";
-        const fc = shotFrameCount(shot, fl2vFps(editor));
+        const contGrid = usesContinuityFrameGrid(shot, i, editor.timeline?.output);
+        const fc = shotFrameCount(shot, fl2vFps(editor), contGrid);
         const badge = shot.startImage?.imageFile && shot.endImage?.imageFile
             ? t("fl2v.badge.startEnd")
             : (shot.endImage?.imageFile && !shot.startImage?.imageFile
@@ -1001,8 +1019,7 @@ function renderFl2vShotCards(editor) {
             <div class="bd-fl2v-shot-foot">
                 <label class="bd-fl2v-shot-row" title="${t("tooltip.fl2vShotDuration")}">
                     ${t("panel.fl2v.duration")}
-                    <input type="number" class="bd-num" data-r="shot-sec" min="${minDurationSec()}" max="${maxDurationSec()}" step="0.1" value="${shot.durationSec}">
-                    ${t("panel.fl2v.seconds")}
+                    <span data-r="shot-sec-slot"></span>
                 </label>
                 <button type="button" class="bd-r2v-pick-existing" data-a="fl2v-pick-existing" title="${t("mediaPicker.pickExistingHint")}">${t("mediaPicker.pickExisting")}</button>
             </div>
@@ -1023,6 +1040,14 @@ function renderFl2vShotCards(editor) {
                 if (Array.isArray(editor.timeline?.segments) && editor.timeline.segments[i]) {
                     editor.timeline.segments[i].continuityFromPrev = !!enabled;
                 }
+                // Grid flips 17k+5 ⇄ 17k: rebuild the picker options (seconds kept) and
+                // re-derive the frame count — shots are the source of truth.
+                const combo = card.querySelector('[data-r="shot-sec"]')?.__bdDurCombo;
+                combo?.setContinuity(
+                    usesContinuityFrameGrid(shot, i, editor.timeline?.output),
+                    shot.durationSec,
+                );
+                syncFl2vFromShots(editor);
                 // Do not commit() here: that rebuilds every shot card and eats the click.
                 editor.scheduleTimelineSync?.();
                 editor.scheduleRender?.();
@@ -1093,18 +1118,23 @@ function renderFl2vShotCards(editor) {
                 e.stopPropagation();
             });
         });
-        const secInput = card.querySelector('[data-r="shot-sec"]');
-        secInput?.addEventListener("click", (e) => e.stopPropagation());
-        secInput?.addEventListener("keydown", (e) => e.stopPropagation());
-        const applySec = () => {
-            setFl2vShotDurationSec(editor, i, secInput.value);
-            editor.commit?.(false, { syncTimeline: true });
-            updateFl2vDetailUI(editor);
-            editor.updateVideoNameLabel?.();
-            editor.scheduleRender?.();
-            editor.updateDomWidgetHeight?.();
-        };
-        secInput?.addEventListener("change", applySec);
+        // Duration picker: grid options (17k+5 standalone / 17k with「引用上段」).
+        const secSlot = card.querySelector('[data-r="shot-sec-slot"]');
+        const shotCombo = createDurationCombo({
+            sec: shot.durationSec,
+            continuity: contGrid,
+            fps: fl2vFps(editor),
+            attrs: { "data-r": "shot-sec" },
+            onCommit: (nextSec) => {
+                setFl2vShotDurationSec(editor, i, nextSec, contGrid);
+                editor.commit?.(false, { syncTimeline: true });
+                updateFl2vDetailUI(editor);
+                editor.updateVideoNameLabel?.();
+                editor.scheduleRender?.();
+                editor.updateDomWidgetHeight?.();
+            },
+        });
+        secSlot?.appendChild(shotCombo.el);
         ui.shotsEl.appendChild(card);
     });
 }

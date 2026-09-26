@@ -615,6 +615,12 @@ export const interactionMixin = {
                 const fc = Math.max(1, parseInt(seg.frameCount ?? seg.length, 10) || 1);
                 const sec = preferredDurationSecFromFrames(fc, 24);
                 const play = framesToDurationSec(fc, 24);
+                // Duration picker renders a label, not the raw number.
+                const combo = input.__bdDurCombo;
+                if (combo) {
+                    combo.setSec(sec);
+                    continue;
+                }
                 if (input.value !== String(sec)) input.value = String(sec);
                 input.title = t("batch.durationTooltip", { frames: fc, play });
             }
@@ -631,6 +637,11 @@ export const interactionMixin = {
                 const shot = shots[index];
                 if (!input || !shot || input === document.activeElement) continue;
                 const sec = roundDurationSec(Number(shot.durationSec) || 0);
+                const combo = input.__bdDurCombo;
+                if (combo) {
+                    combo.setSec(sec);
+                    continue;
+                }
                 if (input.value !== String(sec)) input.value = String(sec);
             }
             if (this.fl2vUi?.totalInput && this.fl2vUi.totalInput !== document.activeElement) {

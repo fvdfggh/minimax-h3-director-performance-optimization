@@ -87,22 +87,57 @@ export function isCustomAspectRatio(aspectRatio) {
  * max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17
  * where a = duration seconds (UI stores 1 decimal place, matching official workflows).
  *
+ * Grid depends on「引用上段」:
+ * - standalone   → 17k + 5 (5, 22, 39, …) — the plain MiniMax grid.
+ * - 引用上段     → 17k     (17, 34, 51, …) — the head pin (context is 17m+5)
+ *                  is prepended before sampling, so 17k + 17m + 5 lands back
+ *                  on the official 17k+5 grid.
+ *
  * Note for t2v/i2v UI: group "秒数" is the user intent; the toolbar tag Xs (Yf) and
  * output preview seconds use aligned frames (Yf / fps). Play length can differ slightly
  * from the typed seconds (e.g. 7 → 175f ≈ 7.3s) — that is snap, not an 8s hard cap.
  */
-export function durationToMiniMaxFrames(seconds, fps = 24) {
-    const a = Math.max(0.1, Number(seconds) || 0.1);
-    const n = Math.max(5, Math.round(a * fps));
-    const rem = ((5 - (n % 17)) % 17 + 17) % 17;
-    return n + rem;
+export const FRAME_GRID_STEP = 17;
+/** Standalone segment grid offset: 17k + 5. */
+export const FRAME_GRID_OFFSET = 5;
+/** 引用上段 grid offset: 17k (head pin carries the +5). */
+export const FRAME_GRID_OFFSET_CONTINUITY = 0;
+/** Selectable options start at k = 1 (17k+5 → 22f, 17k → 17f). */
+export const MIN_FRAME_GRID_K = 1;
+
+export function frameGridOffset(continuity) {
+    return continuity ? FRAME_GRID_OFFSET_CONTINUITY : FRAME_GRID_OFFSET;
 }
 
-/** MiniMax H3 frame grid: snap up to 17k+5 (min 5). */
-export function alignMiniMaxFrameCount(n) {
-    n = Math.max(5, parseInt(n, 10) || 5);
-    while (n % 17 !== 5) n += 1;
-    return n;
+/** Frame count for grid index k (k >= 1) on the standalone / 引用上段 grid. */
+export function gridFrameCount(k, continuity = false) {
+    const kk = Math.max(MIN_FRAME_GRID_K, parseInt(k, 10) || 1);
+    return FRAME_GRID_STEP * kk + frameGridOffset(continuity);
+}
+
+/** True when this row is really pinned to the previous one (⇒ 17k grid). */
+export function usesContinuityFrameGrid(segOrShot, index, output) {
+    return isContinuityMasterEnabled(output) && isSegmentContinuityFromPrev(segOrShot, index);
+}
+
+export function durationToMiniMaxFrames(seconds, fps = 24, continuity = false) {
+    const a = Math.max(0.1, Number(seconds) || 0.1);
+    const rate = Math.max(1, Number(fps) || 24);
+    const n = Math.max(5, Math.round(a * rate));
+    const offset = frameGridOffset(continuity);
+    const step = FRAME_GRID_STEP;
+    const rem = (((offset - (n % step)) % step) + step) % step;
+    return Math.max(continuity ? step : 5, n + rem);
+}
+
+/** MiniMax H3 frame grid: snap up to 17k+5 (standalone) or 17k (引用上段). */
+export function alignMiniMaxFrameCount(n, continuity = false) {
+    const offset = frameGridOffset(continuity);
+    const step = FRAME_GRID_STEP;
+    const minFrames = continuity ? step : 5;
+    let v = Math.max(minFrames, parseInt(n, 10) || minFrames);
+    while ((((v - offset) % step) + step) % step !== 0) v += 1;
+    return v;
 }
 
 /** Round user-facing duration to 1 decimal place (official workflow step). */
@@ -110,6 +145,17 @@ export function roundDurationSec(seconds) {
     const n = Number(seconds);
     if (!Number.isFinite(n)) return 0.1;
     return Math.round(n * 10) / 10;
+}
+
+/**
+ * Grid resolution for stored seconds: 2 decimals.
+ * A 17k frame count is rarely a clean 1-decimal second (136f = 5.67s), so the
+ * 1-decimal round would drift the row off its own grid on the next normalize.
+ */
+export function quantizeDurationSec(seconds) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n)) return 0.1;
+    return Math.round(n * 100) / 100;
 }
 
 /** Raw inverse: frames → seconds (may look ugly, e.g. 124 → 5.17). Prefer preferredDurationSecFromFrames for UI. */
@@ -215,7 +261,10 @@ export function imageBatchRequiresFixedOutput(taskKey) {
 }
 
 /** Maximum frames per diffusion segment (model / VRAM practical limit). */
-export const MAX_GEN_FRAMES = 512;
+export const MAX_GEN_FRAMES = 720;
+
+/** Longest duration offered by the duration picker (seconds) — 30s @ 24fps. */
+export const DURATION_MAX_SEC = 30;
 
 /** MiniMax H3 ReferenceToVideo supports up to 9 reference images. */
 export const MAX_REFERENCE_IMAGES = 9;
@@ -298,31 +347,57 @@ export function minDurationSec() {
 }
 
 /** Max 1-decimal seconds whose aligned frame count still fits in MAX_GEN_FRAMES. */
-export function maxDurationSec() {
+export function maxDurationSec(continuity = false) {
     let sec = roundDurationSec(framesToDurationSec(MAX_GEN_FRAMES, 24));
-    while (sec > 0.1 && durationToMiniMaxFrames(sec, 24) > MAX_GEN_FRAMES) {
+    while (sec > 0.1 && durationToMiniMaxFrames(sec, 24, continuity) > MAX_GEN_FRAMES) {
         sec = roundDurationSec(sec - 0.1);
     }
     return sec;
 }
 
 /**
- * Frame count for a duration, capped to MAX_GEN_FRAMES on the 17k+5 grid.
+ * Frame count for a duration, capped to MAX_GEN_FRAMES on the active grid
+ * (17k+5 standalone / 17k with「引用上段」).
  * Returns the 1-decimal seconds that produced that count (may step down near the cap).
  */
-export function durationToClampedMiniMaxFrames(seconds, fps = 24) {
-    let sec = roundDurationSec(seconds);
-    let fc = durationToMiniMaxFrames(sec, fps);
+export function durationToClampedMiniMaxFrames(seconds, fps = 24, continuity = false) {
+    let sec = quantizeDurationSec(seconds);
+    let fc = durationToMiniMaxFrames(sec, fps, continuity);
     while (sec > 0.1 && fc > MAX_GEN_FRAMES) {
-        sec = roundDurationSec(sec - 0.1);
-        fc = durationToMiniMaxFrames(sec, fps);
+        sec = quantizeDurationSec(sec - 0.1);
+        fc = durationToMiniMaxFrames(sec, fps, continuity);
     }
     if (fc > MAX_GEN_FRAMES) {
-        fc = alignMiniMaxFrameCount(MAX_GEN_FRAMES);
-        while (fc > MAX_GEN_FRAMES) fc -= 17;
+        fc = alignMiniMaxFrameCount(MAX_GEN_FRAMES, continuity);
+        while (fc > MAX_GEN_FRAMES) fc -= FRAME_GRID_STEP;
         sec = preferredDurationSecFromFrames(fc, fps);
     }
     return { frames: fc, durationSec: sec };
+}
+
+/**
+ * Selectable durations: every grid step from k = 1 up to DURATION_MAX_SEC,
+ * rendered as seconds (frames / fps). Options differ by「引用上段」.
+ */
+export function durationOptions(continuity = false, fps = 24) {
+    const rate = Math.max(1, Number(fps) || 24);
+    const out = [];
+    for (let k = MIN_FRAME_GRID_K; k <= 4096; k += 1) {
+        const frames = gridFrameCount(k, continuity);
+        const sec = frames / rate;
+        if (sec > DURATION_MAX_SEC + 1e-6) break;
+        out.push({ k, frames, sec: Math.round(sec * 100) / 100 });
+    }
+    return out;
+}
+
+/** Picker row text: "5.17 秒 · 124 帧". */
+export function formatDurationOption(opt) {
+    const sec = Number(opt?.sec);
+    return t("duration.optionLabel", {
+        sec: Number.isFinite(sec) ? sec.toFixed(2) : "0.00",
+        frames: opt?.frames ?? 0,
+    });
 }
 
 export function sumFrameCounts(segments) {

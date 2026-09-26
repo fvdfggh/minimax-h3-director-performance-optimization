@@ -357,6 +357,20 @@ export const STYLES = `/* min-height = content only; height:100% fills LiteGraph
 .bd-video-tag{color:#4fff8f;font-size:10px}
 .bd-num{width:42px;background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:5px 4px;font-size:11px;text-align:center;-moz-appearance:textfield}
 .bd-num::-webkit-outer-spin-button,.bd-num::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+/* Searchable duration picker (frame-grid options rendered as seconds). */
+/* flex:0 0 auto — card rows are flex/grid and would otherwise shrink the input
+   and clip the selected value ("5.17s · 124帧"). */
+.bd-dur-combo{position:relative;display:inline-flex;align-items:center;flex:0 0 auto;vertical-align:middle}
+.bd-dur-combo .bd-dur-input{width:160px;min-width:150px;flex:0 0 auto;text-align:left;padding:5px 6px;cursor:pointer}
+.bd-dur-combo.bd-disabled .bd-dur-input{opacity:.55;cursor:not-allowed}
+/* Mounted on <body> (ComfyUI node DOM lives in a CSS-transformed canvas). */
+.bd-dur-list{position:absolute;z-index:2147483000;min-width:150px;width:max-content;max-width:320px;max-height:240px;overflow-y:auto;background:#141414;border:1px solid #333;border-radius:4px;box-shadow:0 6px 18px rgba(0,0,0,.55);padding:2px}
+.bd-dur-list.hidden{display:none!important}
+.bd-dur-opt{padding:4px 8px;font-size:11px;color:#ddd;white-space:nowrap;cursor:pointer}
+.bd-dur-opt:hover{background:#26333f}
+.bd-dur-opt.selected{color:#7fe3a1}
+.bd-dur-opt.cursor{background:#2f4a63}
+.bd-dur-opt.bd-dur-empty{color:#777;cursor:default}
 .bd-output label{color:#888;font-size:10px;white-space:nowrap}
 .bd-output .bd-out-fixed{display:flex;gap:4px;align-items:center}
 .bd-output .bd-out-fixed.hidden{display:none}

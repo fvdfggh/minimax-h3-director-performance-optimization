@@ -408,8 +408,15 @@ def build_plan_from_external_groups(
     )
 
     from .segment_continuity import (
+        resolve_continuity_settings,
         resolve_segment_continuity_from_prev,
         timeline_row_for_index,
+    )
+
+    # A group that pins the previous segment exports on the 17k grid (the head pin
+    # carries the +5), so the master switch must be known before frame math.
+    group_continuity_enabled, _group_overlap = resolve_continuity_settings(
+        timeline, segment_count=max(1, len(all_indexed))
     )
 
     segments: list[SegmentPlan] = []
@@ -420,12 +427,20 @@ def build_plan_from_external_groups(
             prompt = concat_common_segment_prompt(fallback_prompt, group_prompt)
         else:
             prompt = group_prompt or fallback_prompt
+        row = timeline_row_for_index(timeline, int(src_index))
+        if not row and isinstance(g, dict):
+            row = g
+        continuity = bool(
+            group_continuity_enabled
+            and plan_idx > 0
+            and resolve_segment_continuity_from_prev(row, segment_index=plan_idx)
+        )
         try:
             dur = float(g.get("duration_sec") or DEFAULT_FL2V_DURATION_SEC)
         except (TypeError, ValueError):
             dur = DEFAULT_FL2V_DURATION_SEC
-        fc = max(MIN_FL2V_FRAMES, _duration_to_minimax_frames(dur, fps))
-        fc = minimax_align_frame_count(fc)
+        fc = max(MIN_FL2V_FRAMES, _duration_to_minimax_frames(dur, fps, continuity))
+        fc = minimax_align_frame_count(fc, continuity)
         start_f = cursor
         end_f = cursor + fc
         cursor = end_f

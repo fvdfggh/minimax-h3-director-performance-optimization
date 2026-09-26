@@ -420,8 +420,14 @@ def _layout_image_batches(
     segment_frame_counts: list[int] | None = None,
 ) -> tuple[list[torch.Tensor], int]:
     if export_segments or (is_batch and not video_batch):
-        images_out = segment_outputs
-        frame_count = sum(int(s.shape[0]) for s in segment_outputs)
+        # 段帧在批处理里以 uint8 驻留（省 3/4 内存）；节点 IMAGE 输出是
+        # float32 [0,1]，这里统一还原 —— 跨 dtype 不能直接 .to()。
+        from ..director.cache_codecs import _frames_from_disk as _frames_to_float
+        images_out = [
+            _frames_to_float(s) if torch.is_tensor(s) and s.dtype == torch.uint8 else s
+            for s in segment_outputs
+        ]
+        frame_count = sum(int(s.shape[0]) for s in images_out)
         # Batch mode drops the per-segment frames once the merge owns them; the
         # counts still describe the merged clip, so keep the report accurate.
         if not segment_outputs and segment_frame_counts:

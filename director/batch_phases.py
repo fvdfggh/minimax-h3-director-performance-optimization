@@ -8,6 +8,7 @@ anything (what Phase 1 staged for this segment).
 """
 
 from __future__ import annotations
+import gc
 import logging
 
 import torch
@@ -18,6 +19,8 @@ from .batch_source_audio import align_pcm_to_frames
 from .batch_helpers import _av_latent_canvas_matches, _build_minimax_inputs, _decode_av_latent, _latent_for_cache, _load_batch_conditioning, _load_batch_latent, _load_batch_ref, _prev_context_available, _save_batch_conditioning, _save_batch_latent, _save_batch_ref, _trim_decoded_to_export
 from .batch_prepare import _rebuild_empty_latent, prepare_segment_materials
 from .cache_paths import slot_content_hash
+# 帧以 uint8 驻留（见 append 处）：范围与 float32 [0,1] 不同，必须走这个转换。
+from .cache_codecs import _frames_to_disk as _to_uint8
 from .cache_readback import load_segment_audio
 from .cache_store import load_next_segment_av_latent, load_segment_av_latent, load_segment_handoff_meta, save_segment_cache
 from .conditioning_keys import text_cache_key
@@ -631,10 +634,13 @@ def _sample_one_segment(
     completed_av_latents[seg.index] = samples
     completed_av_handoff[seg.index] = handoff
 
-    # Free conditioning from GPU (UNet stays!)
-    del positive, negative, latent, samples
+    # Free this segment's CPU-side refs and GPU conditioning (UNet stays).
+    # ``samples`` is still held by ``completed_av_latents[seg.index]`` above —
+    # Phase 3 decodes from there, so only the local name goes away here.
+    del positive, negative, latent, samples, ref_data
     if clear_vram_between_segments and torch.cuda.is_available():
         torch.cuda.empty_cache()
+    gc.collect()
 
     reports.append(
         f"  Seg #{seg.index + 1}: sampled {sample_len}f → latent saved to disk"
@@ -782,7 +788,9 @@ def _decode_export_one_segment(
             log.debug("Segment preview skipped: %s", exc)
 
     run_pos_map[seg.index] = len(segment_outputs)
-    segment_outputs.append(chunk)
+    # 以 uint8 驻留：整段帧留到合并时也只占 1/4 内存（渲染本就是 8-bit，
+    # float32 只是中间格式）。读回时由 _to_float 还原成 [0,1] float32。
+    segment_outputs.append(_to_uint8(chunk))
     audio_out = audio_dict if isinstance(audio_dict, dict) else {}
     segment_audios.append(audio_out)
     decoded_segments.append(seg)
@@ -848,7 +856,7 @@ def _decode_export_one_segment(
             # the untrimmed one already appended above).
             run_pos = run_pos_map.get(prev_export_seg.index)
             if run_pos is not None and run_pos < len(segment_outputs):
-                segment_outputs[run_pos] = new_chunk
+                segment_outputs[run_pos] = _to_uint8(new_chunk)
                 segment_audios[run_pos] = new_audio_dict
                 export_frame_counts[run_pos] = int(new_chunk.shape[0])
             # concat_chunks_lazy reads from disk — the cache must match.

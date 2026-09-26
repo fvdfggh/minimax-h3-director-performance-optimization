@@ -55,6 +55,8 @@ from .conditioning_cache import (
     text_cache_key,
 )
 from .core_sampling import sample_single_stage
+# 段帧以 uint8 驻留（batch_phases 落库时转换）：使用前统一在这里还原成 float32。
+from .cache_codecs import _frames_from_disk as _frames_to_float
 from .frame_align import minimax_align_frame_count
 from .audio_export import (
     AUDIO_MODE_GENERATE, AUDIO_MODE_MUTE, AUDIO_MODE_SOURCE,
@@ -373,6 +375,11 @@ def execute_director_batch(
     # Release the staged pixels/captions; Phase 2 only needs the latents now.
     pending.clear()
     pending_meta.clear()
+    # 编码缓存只在 Phase 1 用：除了参考 latent，它还钉着未缩放的原始参考媒体
+    # （batch_prepare 的 ``cache[(ck, "raw")] = job["raw"]``）。Phase 2/3 不再需要，
+    # 提前放掉 —— 否则这些原始张量会跟着整个 run 常驻内存。
+    vae_cache.clear()
+    aud_cache.clear()
     gc.collect()
 
     reports.append(f"Phase 1 complete: {len(run_list)} segments prepared")
@@ -680,8 +687,12 @@ def execute_director_batch(
         # clip that the selection was supposed to avoid.
         from .segment_cache import build_run_selection_clips
 
+        # Chunks are parked as uint8 (1/4 the RAM); stitching blends in float32,
+        # so lift one copy here and release the uint8 originals right away.
+        chunks_float = [_frames_to_float(c) for c in segment_outputs]
+        segment_outputs.clear()
         seg_outputs, run_audios, seg_counts = build_run_selection_clips(
-            node_id, plan, [seg.index for seg in run_list], segment_outputs, segment_audios,
+            node_id, plan, [seg.index for seg in run_list], chunks_float, segment_audios,
             all_segments=all_segments,
             workflow_name=workflow_name,
         )
@@ -757,7 +768,7 @@ def execute_director_batch(
         # just double peak RAM. Bind it to a real clip (no placeholder) so the
         # slot always carries actual frames.
         if segment_outputs:
-            combined = segment_outputs[0]
+            combined = _frames_to_float(segment_outputs[0])
         else:
             hh = int(getattr(plan, "height", 480) or 480)
             ww = int(getattr(plan, "width", 864) or 864)

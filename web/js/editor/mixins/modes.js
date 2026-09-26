@@ -5,6 +5,7 @@
  */
 
 import { getDirectorMode, isVideoBatchTask } from "../../minimax_gen_timeline.js";
+import { refreshR2vSideSelection } from "../../minimax_image_batch.js";
 export const modesMixin = {
     getDirectorMode() {
         return getDirectorMode(this.globalTask?.value || this.taskTypeWidget?.value);
@@ -62,6 +63,7 @@ export const modesMixin = {
             if (cb) cb.checked = runOn;
             this._decoupleRunSelectFromExportUI(el);
         });
+        refreshR2vSideSelection(this);
     },
     _decoupleRunSelectFromExportUI(scope) {
         if (!scope || !scope.querySelectorAll) return;

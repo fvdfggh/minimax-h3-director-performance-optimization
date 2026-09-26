@@ -26,9 +26,12 @@ import { DIRECTOR_UI_MAX_EXTRA_H, bindDomWidgetContentComputeSize, getImageBatch
 export function getDirectorUiHeight(editor) {
     if (editor?.getDirectorMode?.() === "prompt_batch") {
         const batchH = getImageBatchUiHeight(editor);
-        // t2v / i2v / r2v show the main timeline track above batch cards.
+        // t2v / i2v show the main timeline track above batch cards;
+        // r2v replaced it with the external side panel (no track height).
         if (editor?.usesBatchTimeline?.()) {
-            const track = editor?.canvasHeight || RULER_H + SEG_LABEL_H + TRACK_H;
+            const track = editor?.isR2vBatch?.()
+                ? 0
+                : (editor?.canvasHeight || RULER_H + SEG_LABEL_H + TRACK_H);
             // toolbar + track + batch panel (batchH already includes list max-height cap)
             return batchH + track + 100;
         }

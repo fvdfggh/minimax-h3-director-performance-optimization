@@ -391,13 +391,19 @@ export function durationOptions(continuity = false, fps = 24) {
     return out;
 }
 
-/** Picker row text: "5.17 秒 · 124 帧". */
+/** Picker row text: "5.17s · 124帧". */
 export function formatDurationOption(opt) {
     const sec = Number(opt?.sec);
     return t("duration.optionLabel", {
         sec: Number.isFinite(sec) ? sec.toFixed(2) : "0.00",
         frames: opt?.frames ?? 0,
     });
+}
+
+/** Compact field text for narrow columns: seconds only (frames stay in the tooltip). */
+export function formatDurationShort(opt) {
+    const sec = Number(opt?.sec);
+    return t("duration.shortLabel", { sec: Number.isFinite(sec) ? sec.toFixed(2) : "0.00" });
 }
 
 export function sumFrameCounts(segments) {

@@ -54,11 +54,9 @@ export const STYLES = `/* min-height = content only; height:100% fills LiteGraph
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-main{
   flex:0 0 auto;min-height:320px;height:auto;max-height:none
 }
-/* 素材组列：保持内部滚动、不被外层高度裁剪。
-   具体高度（1280）由卡片内 .bd-batch-r2v .bd-batch-r2v-assets 统一定义，
-   这里不再重复写死，避免两个数字打架。 */
+/* 素材组列：按内容撑开（不内部滚动）——详见 image_batch 里的 .bd-batch-r2v-assets。 */
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v-assets{
-  flex:1 1 auto;overflow-y:auto
+  flex:0 0 auto;overflow:visible
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{
   flex:0 0 auto;min-height:140px;max-height:none;overflow:visible
@@ -68,6 +66,10 @@ export const STYLES = `/* min-height = content only; height:100% fills LiteGraph
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-editor{
   flex:0 0 auto;min-height:120px;max-height:none;height:360px;overflow:auto;resize:vertical
+}
+/* r2v 提示词容器加高（与卡片内 .bd-batch-r2v 的 min-height 保持一致）。 */
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-r2v .bd-token-editor{
+  height:410px
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source,
@@ -358,13 +360,14 @@ export const STYLES = `/* min-height = content only; height:100% fills LiteGraph
 .bd-num{width:42px;background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:5px 4px;font-size:11px;text-align:center;-moz-appearance:textfield}
 .bd-num::-webkit-outer-spin-button,.bd-num::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
 /* Searchable duration picker (frame-grid options rendered as seconds). */
-/* flex:0 0 auto — card rows are flex/grid and would otherwise shrink the input
-   and clip the selected value ("5.17s · 124帧"). */
+/* flex:0 0 auto — card rows are flex/grid and would otherwise shrink the input.
+   Width is set inline by the component (compact / full); no min-width here, it
+   used to pin the field at 150px and defeat that. */
 .bd-dur-combo{position:relative;display:inline-flex;align-items:center;flex:0 0 auto;vertical-align:middle}
-.bd-dur-combo .bd-dur-input{width:160px;min-width:150px;flex:0 0 auto;text-align:left;padding:5px 6px;cursor:pointer}
+.bd-dur-combo .bd-dur-input{width:72px;min-width:0;max-width:100%;flex:0 0 auto;text-align:left;padding:5px 6px;cursor:pointer}
 .bd-dur-combo.bd-disabled .bd-dur-input{opacity:.55;cursor:not-allowed}
 /* Mounted on <body> (ComfyUI node DOM lives in a CSS-transformed canvas). */
-.bd-dur-list{position:absolute;z-index:2147483000;min-width:150px;width:max-content;max-width:320px;max-height:240px;overflow-y:auto;background:#141414;border:1px solid #333;border-radius:4px;box-shadow:0 6px 18px rgba(0,0,0,.55);padding:2px}
+.bd-dur-list{position:absolute;z-index:2147483000;transform-origin:top left;min-width:150px;width:max-content;max-width:320px;max-height:240px;overflow-y:auto;background:#141414;border:1px solid #333;border-radius:4px;box-shadow:0 6px 18px rgba(0,0,0,.55);padding:2px}
 .bd-dur-list.hidden{display:none!important}
 .bd-dur-opt{padding:4px 8px;font-size:11px;color:#ddd;white-space:nowrap;cursor:pointer}
 .bd-dur-opt:hover{background:#26333f}

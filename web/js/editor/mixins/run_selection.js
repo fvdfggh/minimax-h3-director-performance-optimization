@@ -224,12 +224,15 @@ export const run_selectionMixin = {
         const enabled = this.isRunSelectEnabled() && canRunSelect;
         // r2v uses timeline checkboxes (fl2v-style); other batch tasks use the card bar.
         const useBatchBar = this.isImageBatch() && canRunSelect && !this.isR2vBatch();
+        // r2v 的外挂竖栏顶部已有「选择运行 / 全选」，工具栏这里就撤掉（竖栏没显示时保留兜底）。
+        const sidePanelOn = !!this._r2vSidePanel
+            && !this._r2vSidePanel.classList.contains("hidden");
         this.btnRunSelectToggle?.classList.toggle("active", enabled);
         this.btnRunSelectToggle?.classList.toggle("bd-btn-run-select", true);
-        this.btnRunSelectToggle?.classList.toggle("hidden", !canRunSelect || useBatchBar);
+        this.btnRunSelectToggle?.classList.toggle("hidden", !canRunSelect || useBatchBar || sidePanelOn);
         this.batchRunSelectBtn?.classList.toggle("active", enabled);
         this.batchRunSelectBtn?.classList.toggle("hidden", !useBatchBar);
-        this.runSelectAllWrap?.classList.toggle("hidden", !enabled || useBatchBar);
+        this.runSelectAllWrap?.classList.toggle("hidden", !enabled || useBatchBar || sidePanelOn);
         this.batchRunSelectAllWrap?.classList.toggle("hidden", !enabled || !useBatchBar);
         // Keep the chip hidden while a run is active — otherwise commit/sync
         // re-shows it on top of the green progress title.

@@ -8,7 +8,7 @@ import { clamp, uid } from "../../core/utils.js";
 import { ensureFl2vTimeline, setFl2vToolbar, updateFl2vDetailUI, updateFl2vToolbarBtns } from "../../minimax_fl2v.js";
 import { DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, MAX_GEN_FRAMES, MINIMAX_CANVAS_MULTIPLE, NO_VIDEO_UPLOAD_TASKS, defaultFrameCount, genLayoutHint, getDirectorMode, isCustomAspectRatio, isVideoBatchTask, minFrameCount, normalizeAspectRatioLabel, resolveTaskKey, sumFrameCounts, taskUsesReferenceAudios, taskUsesReferenceImages, taskUsesReferenceVideo } from "../../minimax_gen_timeline.js";
 import { t } from "../../minimax_i18n.js";
-import { ensureImageBatchTimeline, setR2vToolbar, setToolbarDisabledForBatch, updateR2vToolbarBtns } from "../../minimax_image_batch.js";
+import { ensureImageBatchTimeline, hideR2vSidePanel, setR2vToolbar, setToolbarDisabledForBatch, syncR2vSidePanel, updateR2vToolbarBtns } from "../../minimax_image_batch.js";
 export const task_layoutMixin = {
     ensureGenTimeline() {
         const key = this.getTaskKey();
@@ -310,7 +310,9 @@ export const task_layoutMixin = {
         this._taskKey = taskKey;
 
         const isR2v = isBatch && taskKey === "r2v";
-        const showBatchTrack = isBatch && isVideoBatchTask(taskKey);
+        // r2v no longer shows the canvas track: segments live in the external
+        // side panel (see syncR2vSidePanel) instead.
+        const showBatchTrack = isBatch && isVideoBatchTask(taskKey) && !isR2v;
         // fl2v / t2v / i2v / r2v use the main timeline track; image batch + gen hide it.
         const hideTimeline = (isBatch && !showBatchTrack) || isGen;
         const hideVideoUpload = hideTimeline || NO_VIDEO_UPLOAD_TASKS.has(taskKey) || isR2v;
@@ -480,5 +482,13 @@ export const task_layoutMixin = {
         if (!isBatch || showBatchTrack) this.scheduleRender();
         this.scheduleTimelineSync();
         this.updateRunSelectUI();
+        // r2v: external side panel replaces the deleted canvas track; other modes hide it.
+        if (isR2v) {
+            // 进入 r2v 才允许收缩一次（时间轴已移除，高度预算变小）；之后只增不减。
+            this._r2vShrinkPending = true;
+            syncR2vSidePanel(this);
+        } else {
+            hideR2vSidePanel(this);
+        }
     }
 };

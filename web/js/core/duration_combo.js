@@ -11,6 +11,7 @@ import {
     durationOptions,
     durationToClampedMiniMaxFrames,
     formatDurationOption,
+    formatDurationShort,
     framesToDurationSec,
 } from "../minimax_gen_timeline.js";
 import { t } from "../minimax_i18n.js";
@@ -45,6 +46,7 @@ export function createDurationCombo({
     continuity = false,
     fps = 24,
     disabled = false,
+    compact = false,
     attrs = {},
     onCommit = null,
 } = {}) {
@@ -84,8 +86,9 @@ export function createDurationCombo({
 
     function displayLabel(frames) {
         const exact = options.find((o) => o.frames === frames);
-        if (exact) return exact.label;
-        return formatDurationOption({ sec: framesToDurationSec(frames, rate), frames });
+        const opt = exact || { sec: framesToDurationSec(frames, rate), frames };
+        // Narrow columns (external side panel): seconds only, frames live in the tooltip.
+        return compact ? formatDurationShort(opt) : (exact ? exact.label : formatDurationOption(opt));
     }
 
     function syncTitle() {
@@ -96,13 +99,15 @@ export function createDurationCombo({
         });
     }
 
-    /** Grow the field so the selected value (seconds + frames) is never clipped. */
+    /** Size the field to the selected value — compact stays窄, full shows 秒+帧. */
     function fitWidth() {
         const wide = [...(input.value || "")].reduce(
             (w, ch) => w + (ch.charCodeAt(0) > 0x2e80 ? 11 : 6.2),
             0,
         );
-        input.style.width = `${Math.round(Math.max(150, Math.min(260, wide + 26)))}px`;
+        const min = compact ? 44 : 150;
+        const max = compact ? 72 : 260;
+        input.style.width = `${Math.round(Math.max(min, Math.min(max, wide + 20)))}px`;
     }
 
     function setValue(nextSec) {
@@ -165,14 +170,19 @@ export function createDurationCombo({
 
     function reposition() {
         const r = input.getBoundingClientRect();
+        // rect 已含画布缩放：位置直接用屏幕坐标，尺寸换算回逻辑像素后整体 scale，
+        // 这样弹层和输入框在缩放画布时一起变小。
+        const rawScale = Number(globalThis?.app?.canvas?.ds?.scale);
+        const scale = Number.isFinite(rawScale) && rawScale > 0 ? rawScale : 1;
         const below = window.innerHeight - r.bottom;
         const above = r.top;
         const openUp = below < 140 && above > below;
         const scrollX = window.scrollX || window.pageXOffset || 0;
         const scrollY = window.scrollY || window.pageYOffset || 0;
+        list.style.transform = scale === 1 ? "none" : `scale(${scale})`;
         list.style.left = `${Math.round(r.left + scrollX)}px`;
-        list.style.minWidth = `${Math.round(Math.max(150, r.width))}px`;
-        list.style.maxHeight = `${Math.round(Math.max(120, Math.min(240, (openUp ? above : below) - 10)))}px`;
+        list.style.minWidth = `${Math.round(Math.max(150, r.width / scale))}px`;
+        list.style.maxHeight = `${Math.round(Math.max(120, Math.min(240, (openUp ? above : below) - 10)) / scale)}px`;
         if (openUp) {
             list.style.top = "auto";
             list.style.bottom = `${Math.round(
@@ -220,7 +230,7 @@ export function createDurationCombo({
         if (!opt) return;
         current.sec = opt.sec;
         current.frames = opt.frames;
-        input.value = opt.label;
+        input.value = displayLabel(opt.frames);
         fitWidth();
         syncTitle();
         closeList();

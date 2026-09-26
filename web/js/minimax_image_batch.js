@@ -1,7 +1,7 @@
 /** Multi prompt-group UI for t2i / i2i / r2i / t2v / i2v / r2v (prompt batch mode). */
 
 
-import { DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, defaultDurationSec, defaultFrameCount, durationToClampedMiniMaxFrames, framesToDurationSec, imageBatchVariant, isContinuityMasterEnabled, isSegmentContinuityFromPrev, isVideoBatchTask, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, maxDurationSec, MINIMAX_CANVAS_MULTIPLE, minDurationSec, newBatchSegment, preferredDurationSecFromFrames, refAudioLabel, refImageLabel, refVideoLabel, resolveSegmentRefImageSize, resolveTaskKey, roundDurationSec, sumFrameCounts, usesContinuityFrameGrid } from "./minimax_gen_timeline.js";
+import { DEFAULT_ASPECT_RATIO, DEFAULT_MEGAPIXELS, defaultDurationSec, defaultFrameCount, durationToClampedMiniMaxFrames, formatDurationOption, framesToDurationSec, imageBatchVariant, isContinuityMasterEnabled, isSegmentContinuityFromPrev, isVideoBatchTask, MAX_REFERENCE_AUDIOS, MAX_REFERENCE_IMAGES, MAX_REFERENCE_VIDEOS, maxDurationSec, MINIMAX_CANVAS_MULTIPLE, minDurationSec, newBatchSegment, preferredDurationSecFromFrames, refAudioLabel, refImageLabel, refVideoLabel, resolveSegmentRefImageSize, resolveTaskKey, roundDurationSec, sumFrameCounts, usesContinuityFrameGrid } from "./minimax_gen_timeline.js";
 import { createDurationCombo } from "./core/duration_combo.js";
 import { refreshPromptTokenEditors, teardownPromptImageMentions, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import { t } from "./minimax_i18n.js";
@@ -284,7 +284,10 @@ function applyBatchSegmentDuration(editor, index, rawSec, continuity = false) {
     // Stale drag preview must not override batch totals.
     if (editor._previewSegments) editor._previewSegments = null;
     normalizeImageBatchSegments(editor);
-    return editor.timeline.segments[index] || null;
+    // Keep every mounted picker (page cards + external side panel) on the same grid/seconds.
+    const live = editor.timeline.segments[index];
+    if (live) syncDurationCombos(editor, live, continuity, live.durationSec);
+    return live || null;
 }
 
 /**
@@ -389,6 +392,37 @@ function stopAllPlayers(root) {
 }
 
 export const IMAGE_BATCH_STYLES = `
+/* ——— r2v 外挂竖栏：挂 body（跟随节点框右侧），替代节点内已删除的时间轴 ——— */
+/* transform-origin: panel 挂 body, 由 JS 按画布缩放整体 scale（左上角为锚点）。 */
+/* z-index 只压过画布上的节点，不压 ComfyUI 侧边栏 / 菜单 / 对话框。 */
+.bd-r2v-side{position:fixed;z-index:700;width:300px;height:800px;transform-origin:top left;display:flex;flex-direction:column;gap:6px;padding:8px;background:#121212;border:1px solid #2c2c2c;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.5);overflow:hidden}
+.bd-r2v-side.hidden{display:none!important}
+/* 顶部常驻：选择运行 / 全选 / 新增素材 */
+.bd-r2v-side-head{flex-shrink:0;padding-bottom:2px;border-bottom:1px solid rgba(255,255,255,.06)}
+.bd-r2v-side-head-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.bd-r2v-side-head-row .bd-btn{padding:4px 8px;font-size:11px}
+.bd-r2v-side-list{display:flex;flex-direction:column;gap:6px;overflow-y:auto;min-height:0;flex:1 1 auto}
+.bd-r2v-side-card{position:relative;display:flex;gap:8px;align-items:stretch;background:#181818;border:1px solid #2c2c2c;border-radius:8px;padding:6px 8px;flex-shrink:0}
+/* 左上角运行小框：绝对定位，不挤占左侧跳转区 */
+.bd-r2v-side-run{position:absolute;top:5px;left:6px;margin:0;z-index:1}
+.bd-r2v-side-card:has(.bd-r2v-side-run) .bd-r2v-side-main{padding-left:18px}
+/* 未勾选运行：只弱化文字/选项，左上角小框照常显示可点；勾选后自动恢复 */
+.bd-r2v-side-card.run-skipped{background:#141414;border-color:#262626}
+.bd-r2v-side-card.run-skipped .bd-r2v-side-main b,
+.bd-r2v-side-card.run-skipped .bd-r2v-side-main span{color:#6f6f6f}
+.bd-r2v-side-card.run-skipped .bd-r2v-side-opts{opacity:.5}
+.bd-r2v-side-card.run-skipped .bd-r2v-side-run{opacity:1}
+.bd-r2v-side-card.selected{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.3)}
+.bd-r2v-side-card.running{border-color:#4fff8f}
+.bd-r2v-side-main{flex:0 0 104px;display:flex;flex-direction:column;justify-content:center;gap:2px;cursor:pointer;user-select:none;min-width:0;border-radius:6px;padding:4px 6px;transition:background .12s,box-shadow .12s}
+.bd-r2v-side-main:hover{background:#243440;box-shadow:inset 0 0 0 1px rgba(106,154,202,.35)}
+.bd-r2v-side-main:hover b{color:#eafff0}
+.bd-r2v-side-main b{color:#f0f0f0;font-size:11px;white-space:nowrap}
+.bd-r2v-side-main span{font-size:10px;color:#8aa;white-space:nowrap}
+/* 选项两列排布（时间选择器 / 引用上段 · 保留音频 / 对齐下段） */
+.bd-r2v-side-opts{flex:1 1 auto;display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;min-width:0;align-items:center;justify-items:start}
+.bd-r2v-side-opts .bd-batch-continuity{font-size:10px;min-width:0;max-width:100%}
+.bd-r2v-side-opts .bd-batch-continuity span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .bd-btn.bd-disabled,.bd-btn:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
 .bd-mode button.bd-disabled,.bd-mode button:disabled{opacity:.38;cursor:not-allowed;pointer-events:none}
 .bd-batch{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;flex:0 0 auto}
@@ -482,10 +516,10 @@ export const IMAGE_BATCH_STYLES = `
 /* 素材组列独立加高: 不再强制与右侧提示词列等高(align-items:start),
    左侧素材组列按自身 min-height 成形, 右侧提示词列按内容自适应 */
 .bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:start;min-height:0;flex:1 1 auto}
-/* 素材组列：最低高度 1080（与 r2v 行高预算一致）并封顶，超出内部滚动；
-   不再随素材数量被撑高 —— 1080 是「素材框」自己的高度，不是外层列表的。 */
-.bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0;overflow-y:auto;flex:1 1 auto}
-.bd-batch-r2v .bd-batch-r2v-assets{min-height:1080px;max-height:1080px}
+/* 素材组列：按内容撑开，不再内部滚动（时间轴移除后节点内空间足够）。
+   去掉 1080 的 min/max 与 overflow，素材放多少就多高。 */
+.bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0;overflow:visible;flex:0 0 auto}
+.bd-batch-r2v .bd-batch-r2v-assets{min-height:0;max-height:none;overflow:visible}
 .bd-batch-r2v-assets>.bd-r2v-section{flex:0 0 auto}
 .bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:320px;flex:1 1 auto}
 .bd-r2v-section{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0;box-sizing:border-box}
@@ -533,6 +567,9 @@ export const IMAGE_BATCH_STYLES = `
 .bd-r2v-fold-btn{min-width:22px;height:22px;border:1px solid #3a4a5a;border-radius:5px;background:#1b222b;color:#9fb0c0;font-size:11px;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
 .bd-r2v-fold-btn:hover{border-color:#6a9aca;color:#eaf6ff;background:#26313d}
 .bd-batch-r2v .bd-r2v-section.folded{cursor:default}
+/* 折叠内容常驻 DOM（只隐藏）：展开/收起不再重建卡片，预览 tab 不会重载。 */
+.bd-batch-r2v .bd-r2v-section-body{display:flex;flex-direction:column;gap:8px;min-width:0}
+.bd-batch-r2v .bd-r2v-section.folded>.bd-r2v-section-body{display:none!important}
 
 /* ---- r2v 布局改造：素材 tile hover 热区 ---- */
 .bd-batch-r2v .bd-batch-ref,.bd-batch-r2v .bd-batch-video,.bd-batch-r2v .bd-batch-audio{position:relative}
@@ -665,7 +702,7 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-prompts textarea{background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;font-family:inherit;line-height:1.35}
 .bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea,
 .bd-batch-plain .bd-batch-prompts .bd-token-wrap,.bd-batch-source .bd-batch-prompts .bd-token-wrap{min-height:120px;height:100%;resize:vertical;overflow:auto}
-.bd-batch-r2v .bd-batch-prompts textarea,.bd-batch-r2v .bd-batch-prompts .bd-token-wrap{min-height:360px;height:100%;flex:1;resize:vertical;overflow:auto}
+.bd-batch-r2v .bd-batch-prompts textarea,.bd-batch-r2v .bd-batch-prompts .bd-token-wrap{min-height:410px;height:100%;flex:1;resize:vertical;overflow:auto}
 .bd-batch-r2v .bd-batch-prompts textarea{background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
 .bd-batch-preview{background:#0d0d0d;border:1px solid #333;border-radius:4px;min-height:100px;display:flex;flex-direction:column;align-items:stretch;justify-content:center;overflow:hidden;color:#555;font-size:10px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{width:100%;max-width:220px;min-height:160px;justify-self:end}
@@ -1561,7 +1598,13 @@ function createR2vSection({
     fold.title = t(folded ? "r2v.fold.expand" : "r2v.fold.collapse");
     fold.onclick = (e) => {
         e.stopPropagation();
-        onToggleFold?.();
+        // 就地切 class，不重建卡片 —— 整卡重建会让右侧预览 tab 的
+        // <video>/<img> 重新创建、重新加载并丢播放进度。
+        const next = !section.classList.contains("folded");
+        section.classList.toggle("folded", next);
+        fold.textContent = next ? "▸" : "▾";
+        fold.title = t(next ? "r2v.fold.expand" : "r2v.fold.collapse");
+        onToggleFold?.(next);
     };
     actions.appendChild(fold);
 
@@ -2061,19 +2104,23 @@ function buildR2vAssetModule(editor, seg, index, kind, { externalLocked = false 
         onScopeChange: (s) => {
             if (!editor.r2vScope) editor.r2vScope = {};
             editor.r2vScope[kind] = s;
-            editor.renderImageBatchGroups?.();
-            editor.updateDomWidgetHeight?.();
+            // 只重建这一个素材模块：卡片右侧预览保持不重载。
+            refreshR2vAssetModule(editor, seg, index, kind);
         },
-        onToggleFold: () => {
+        onToggleFold: (next) => {
             if (!editor.r2vFold) editor.r2vFold = {};
-            editor.r2vFold[pageKey] = !folded;
-            editor.renderImageBatchGroups?.();
+            editor.r2vFold[pageKey] = !!next;
+            // 只记录状态 + 让节点高度跟随，卡片 DOM 不重建（预览不重载）。
+            // 结构性高度变化：允许节点收缩一次（否则折叠后留着空白）。
+            editor._r2vShrinkPending = true;
             editor.updateDomWidgetHeight?.();
         },
         onPickExisting: externalLocked ? null : () => pickExistingR2vAssets(editor, seg, index, kind, scope),
     });
 
-    if (folded) return section;
+    // 折叠内容放进 body：折叠时只 CSS 隐藏，DOM 保持（含预览/缩略图）。
+    const body = document.createElement("div");
+    body.className = "bd-r2v-section-body";
 
     const grid = document.createElement("div");
     grid.className = meta.grid;
@@ -2106,18 +2153,39 @@ function buildR2vAssetModule(editor, seg, index, kind, { externalLocked = false 
         };
         grid.appendChild(slot);
     }
-    section.appendChild(grid);
+    body.appendChild(grid);
 
-    section.appendChild(createMiniPager({
+    body.appendChild(createMiniPager({
         page,
         count: pageCount,
         onChange: (p) => {
             editor.r2vAssetPage[pageKey] = p;
-            editor.renderImageBatchGroups?.();
-            editor.updateDomWidgetHeight?.();
+            // 翻页同样只重建本模块，避免预览重载。
+            refreshR2vAssetModule(editor, seg, index, kind);
         },
     }));
+    section.appendChild(body);
+    section.dataset.r2vModule = kind;
     return section;
+}
+
+/**
+ * 只重建某一个素材模块（公共/片段切换、翻页）——
+ * 整卡重建会让右侧预览 tab 的 <video>/<img> 重新加载，这里就地替换该模块即可。
+ */
+function refreshR2vAssetModule(editor, seg, index, kind) {
+    const card = batchCardEl(editor, index);
+    const host = card?.querySelector?.(".bd-batch-r2v-assets");
+    const old = host?.querySelector?.(`:scope > [data-r2v-module="${kind}"]`);
+    if (!old) {
+        // 就地节点不存在（结构已变）→ 退回整卡重建。
+        editor.renderImageBatchGroups?.();
+        editor.updateDomWidgetHeight?.();
+        return;
+    }
+    const externalLocked = !!(editor.hasExternalI2vGroups?.() || editor.hasExternalR2vGroups?.());
+    old.replaceWith(buildR2vAssetModule(editor, seg, index, kind, { externalLocked }));
+    editor.updateDomWidgetHeight?.();
 }
 
 function appendR2vMediaSections(card, seg, index, editor, { externalLocked = false } = {}) {
@@ -3227,11 +3295,13 @@ function renderBatchGroupPicker(editor, ctx) {
             const runCb = document.createElement("input");
             runCb.type = "checkbox";
             runCb.className = "bd-batch-run-check";
+            runCb.setAttribute("data-batch-run-id", seg.id || "");
             runCb.checked = runEnabled;
             runCb.title = t("tooltip.batchRunCheck");
             runCb.onclick = (e) => {
                 e.stopPropagation();
                 editor.toggleSegmentRun(index);
+                syncBatchChecks(editor, seg, "run", runCb.checked);
             };
             head.appendChild(runCb);
         }
@@ -3354,6 +3424,9 @@ export function renderImageBatchGroups(editor) {
     }
     refreshPromptTokenEditors(list);
     editor.updateDomWidgetHeight?.();
+    // r2v: external side panel mirrors the cards; other batch modes hide it.
+    if (editor.isR2vBatch?.()) syncR2vSidePanel(editor);
+    else hideR2vSidePanel(editor);
 }
 
 function appendBatchCard(list, editor, seg, index, ctx) {
@@ -3398,11 +3471,13 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             const runCb = document.createElement("input");
             runCb.type = "checkbox";
             runCb.className = "bd-batch-run-check";
+            runCb.setAttribute("data-batch-run-id", seg.id || "");
             runCb.checked = runEnabled;
             runCb.title = t("tooltip.batchRunCheck");
             runCb.onclick = (e) => {
                 e.stopPropagation();
                 editor.toggleSegmentRun(index);
+                syncBatchChecks(editor, seg, "run", runCb.checked);
             };
             head.appendChild(runCb);
         }
@@ -3421,6 +3496,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             const contCb = document.createElement("input");
             contCb.type = "checkbox";
             contCb.className = "bd-batch-continuity-check";
+            contCb.setAttribute("data-batch-cont-id", seg.id || "");
             contCb.checked = isSegmentContinuityFromPrev(seg, index);
             contCb.onchange = (e) => {
                 e.stopPropagation();
@@ -3431,6 +3507,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
                 const cont = usesContinuityFrameGrid(seg, index, editor.timeline?.output);
                 const updated = applyBatchSegmentDuration(editor, index, seg.durationSec, cont);
                 combo?.setContinuity(cont, updated?.durationSec ?? seg.durationSec);
+                syncBatchChecks(editor, seg, "cont", contCb.checked);
                 editor.updateVideoNameLabel?.();
                 editor.updateOutputPreview?.();
                 if (editor.totalFramesWidget) {
@@ -3457,6 +3534,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             const retainCb = document.createElement("input");
             retainCb.type = "checkbox";
             retainCb.className = "bd-batch-retain-check";
+            retainCb.setAttribute("data-batch-retain-id", seg.id || "");
             // 只读 timeline 字段：勾选时按需去后端取该段的条目（每段每来源仅一条）。
             retainCb.checked = !!String(seg.retainAudioId || "");
             const known = peekAudioEntryCount(editor, index);
@@ -3467,6 +3545,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             retainCb.onchange = (e) => {
                 e.stopPropagation();
                 void editor.toggleRetainAudio?.(index, retainCb.checked, retainCb);
+                syncBatchChecks(editor, seg, "retain", retainCb.checked);
                 retainLabel.title = t(retainCb.disabled
                     ? "tooltip.retainAudioNone"
                     : (retainCb.checked ? "tooltip.retainAudioOn" : "tooltip.retainAudio"));
@@ -3490,6 +3569,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             const nextCb = document.createElement("input");
             nextCb.type = "checkbox";
             nextCb.className = "bd-batch-continuity-check";
+            nextCb.setAttribute("data-batch-next-id", seg.id || "");
             const canAlign = !!editor.canAlignToNext?.(index);
             nextCb.checked = canAlign && seg.continuityToNext === true;
             nextCb.disabled = !canAlign;
@@ -3499,6 +3579,7 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             nextCb.onchange = (e) => {
                 e.stopPropagation();
                 seg.continuityToNext = !!nextCb.checked;
+                syncBatchChecks(editor, seg, "next", nextCb.checked);
                 editor.commit?.(false, { syncTimeline: true });
                 editor.flushTimelineSync?.();
             };
@@ -3548,6 +3629,8 @@ function appendBatchCard(list, editor, seg, index, ctx) {
                 continuity: contGrid,
                 fps: 24,
                 disabled: !!externalLocked,
+                // 窄：卡片头一行放不下「秒 + 帧」；帧数在 tooltip 与下拉选项里。
+                compact: true,
                 attrs: {
                     "data-batch-sec-index": String(index),
                     "data-batch-sec-id": seg.id || "",
@@ -3758,6 +3841,416 @@ function appendBatchCard(list, editor, seg, index, ctx) {
         }
 
         list.appendChild(card);
+}
+
+// ——— r2v 外挂竖栏：挂在节点框外右侧，替代已删除的画布时间轴 ———
+// 卡片左侧点击 = 跳到页内对应组（selectBatchGroup）；右侧是时长选择器 +
+// 「引用上段」「保留音频」「对齐下段」，判定与页内卡片完全一致。
+
+function r2vSideExternalLocked(editor) {
+    return !!(editor?.hasExternalI2vGroups?.() || editor?.hasExternalR2vGroups?.());
+}
+
+/** 外挂竖栏固定高度（逻辑像素；画布缩放时随 scale 一起缩）。 */
+const R2V_SIDE_HEIGHT = 800;
+
+/** 画布缩放：body 上的外挂面板要自己缩放（节点在 canvas transform 容器里会自动缩）。 */
+function canvasScale() {
+    const s = Number(globalThis?.app?.canvas?.ds?.scale);
+    return Number.isFinite(s) && s > 0 ? s : 1;
+}
+
+/** 对齐锚点：素材部分（素材框），拿不到再退到卡片列表／整个节点框。 */
+function r2vSideAnchorRect(editor) {
+    const root = editor?.root;
+    const assets = root?.querySelector?.(".bd-batch-r2v-assets");
+    const list = root?.querySelector?.(".bd-batch-list");
+    const host = editor?.container;
+    const el = (assets?.isConnected && assets) || (list?.isConnected && list) || host;
+    return el?.getBoundingClientRect?.() || null;
+}
+
+function positionR2vSidePanel(editor) {
+    const panel = editor?._r2vSidePanel;
+    const host = editor?.container;
+    if (!panel || !host?.isConnected) return;
+    const r = r2vSideAnchorRect(editor);
+    const hostR = host.getBoundingClientRect();
+    if (!r || (!r.width && !r.height)) return;
+    // rect 已含画布缩放：位置直接用；宽/高为逻辑像素再整体 scale，
+    // 字体间距与节点内 UI 一起缩放。顶部对齐素材部分，横向贴节点框右侧。
+    const scale = canvasScale();
+    // 高度固定 R2V_SIDE_HEIGHT（不随素材内容变化）。
+    // 只在数值真的变了才写样式，避免布局 settle 时反复重排。
+    const next = {
+        left: Math.round(hostR.right + 8 * scale),
+        top: Math.round(r.top),
+        height: R2V_SIDE_HEIGHT,
+        scale,
+    };
+    const prev = panel._bdSideRect;
+    if (prev
+        && prev.left === next.left
+        && prev.top === next.top
+        && prev.height === next.height
+        && prev.scale === next.scale) {
+        return;
+    }
+    panel._bdSideRect = next;
+    panel.style.left = `${next.left}px`;
+    panel.style.top = `${next.top}px`;
+    panel.style.height = `${next.height}px`;
+    panel.style.transform = next.scale === 1 ? "none" : `scale(${next.scale})`;
+}
+
+function r2vSidePanelTick(editor) {
+    const panel = editor?._r2vSidePanel;
+    if (!panel || panel.classList.contains("hidden")) {
+        editor._r2vSideRaf = null;
+        return;
+    }
+    // 跟随节点移动/缩放：host 已在 CSS transform 容器里，rect 即屏幕坐标。
+    positionR2vSidePanel(editor);
+    editor._r2vSideRaf = requestAnimationFrame(() => r2vSidePanelTick(editor));
+}
+
+function ensureR2vSidePanel(editor) {
+    let panel = editor._r2vSidePanel;
+    if (!panel || !panel.isConnected) {
+        panel?.remove();
+        panel = document.createElement("div");
+        panel.className = "bd-r2v-side hidden";
+        panel.addEventListener("pointerdown", (e) => e.stopPropagation());
+        // 头部常驻：选择运行 / 全选 / 新增素材（每次 sync 重建，状态始终最新）。
+        const head = document.createElement("div");
+        head.className = "bd-r2v-side-head";
+        const list = document.createElement("div");
+        list.className = "bd-r2v-side-list";
+        panel.append(head, list);
+        document.body.appendChild(panel);
+        editor._r2vSidePanel = panel;
+    }
+    return panel;
+}
+
+/** 双向同步同一组的「保留音频」/「对齐下段」勾选（页内卡片 ⇄ 外挂竖栏）。 */
+function syncBatchChecks(editor, seg, kind, checked) {
+    if (!seg?.id) return;
+    const attr = `data-batch-${kind}-id`;
+    document.querySelectorAll(`input[${attr}]`).forEach((cb) => {
+        if (cb.getAttribute(attr) !== String(seg.id)) return;
+        if (cb.checked !== checked) cb.checked = checked;
+        if (kind === "retain") {
+            const label = cb.closest("label");
+            if (label) {
+                label.title = t(cb.disabled
+                    ? "tooltip.retainAudioNone"
+                    : (checked ? "tooltip.retainAudioOn" : "tooltip.retainAudio"));
+            }
+        }
+    });
+}
+
+/** 所有挂载点的时长选择器同步到同一网格与秒数（页内卡片 ⇄ 外挂竖栏）。 */
+function syncDurationCombos(editor, seg, continuity, sec) {
+    if (!seg?.id) return;
+    document.querySelectorAll("input[data-batch-sec-id]").forEach((input) => {
+        if (input.getAttribute("data-batch-sec-id") !== String(seg.id)) return;
+        input.__bdDurCombo?.setContinuity?.(!!continuity, sec);
+    });
+}
+
+/** 顶部常驻控件：选择运行 / 全选 / 新增素材（与页内工具栏同一套 editor 方法）。 */
+function buildR2vSideHead(editor) {
+    const head = document.createElement("div");
+    head.className = "bd-r2v-side-head-row";
+    const externalLocked = r2vSideExternalLocked(editor);
+    const runSelectOn = !!(editor.isRunSelectEnabled?.() && editor.supportsRunSelect?.());
+    const segs = editor.timeline?.segments || [];
+
+    const runBtn = document.createElement("button");
+    runBtn.type = "button";
+    runBtn.className = `bd-btn bd-batch-run-select${runSelectOn ? " active" : ""}`;
+    runBtn.textContent = t("toolbar.runSelect");
+    runBtn.title = t("tooltip.batchRunSelect");
+    runBtn.onclick = (e) => {
+        e.stopPropagation();
+        editor.toggleRunSelectMode?.();
+    };
+    head.appendChild(runBtn);
+
+    const allLabel = document.createElement("label");
+    allLabel.className = `bd-batch-run-all${runSelectOn ? "" : " hidden"}`;
+    allLabel.title = t("tooltip.runSelectAll");
+    const allCb = document.createElement("input");
+    allCb.type = "checkbox";
+    allCb.checked = runSelectOn && segs.length > 0
+        && segs.every((_, i) => !!editor.isSegmentRunEnabled?.(i));
+    allCb.onchange = (e) => {
+        e.stopPropagation();
+        if (!editor.isRunSelectEnabled?.()) return;
+        editor.setRunSelectionAll?.(allCb.checked);
+        // 页内卡片 / chip / 竖栏的运行勾选一起跟上（部分实现不触发重渲染）。
+        (editor.timeline?.segments || []).forEach((s, i) => {
+            syncBatchChecks(editor, s, "run", !!editor.isSegmentRunEnabled?.(i));
+        });
+    };
+    allCb.onclick = (e) => e.stopPropagation();
+    const allText = document.createElement("span");
+    allText.textContent = t("toolbar.selectAll");
+    allLabel.append(allCb, allText);
+    head.appendChild(allLabel);
+
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.className = "bd-btn bd-btn-primary";
+    addBtn.textContent = t("batch.addRefGroup");
+    addBtn.disabled = externalLocked;
+    addBtn.onclick = (e) => {
+        e.stopPropagation();
+        addImageBatchGroup(editor);
+    };
+    head.appendChild(addBtn);
+    return head;
+}
+
+function buildR2vSideCard(editor, seg, index) {
+    const key = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
+    const externalLocked = r2vSideExternalLocked(editor);
+    const masterCont = isContinuityMasterEnabled(editor.timeline?.output);
+    const contGrid = usesContinuityFrameGrid(seg, index, editor.timeline?.output);
+
+    const runSelectOn = !!(editor.isRunSelectEnabled?.() && editor.supportsRunSelect?.());
+    const runEnabled = !runSelectOn || !!editor.isSegmentRunEnabled?.(index);
+
+    const card = document.createElement("div");
+    card.className = "bd-r2v-side-card"
+        + (index === editor.selectedIndex ? " selected" : "")
+        + (runSelectOn && !runEnabled ? " run-skipped" : "");
+    card.dataset.sideIndex = String(index);
+
+    // 左上角运行小框（与页内「运行勾选」一致；未勾选只弱化文字，不隐藏小框）。
+    if (runSelectOn) {
+        const runCb = document.createElement("input");
+        runCb.type = "checkbox";
+        runCb.className = "bd-batch-run-check bd-r2v-side-run";
+        runCb.setAttribute("data-batch-run-id", seg.id || "");
+        runCb.checked = runEnabled;
+        runCb.title = t("tooltip.batchRunCheck");
+        runCb.onclick = (e) => {
+            e.stopPropagation();
+            editor.toggleSegmentRun(index);
+            syncBatchChecks(editor, seg, "run", runCb.checked);
+        };
+        card.appendChild(runCb);
+    }
+
+    // 左：点击跳转到页内对应组（r2v 无源视频 seek，跳转 = 选中并翻到该组页）。
+    const main = document.createElement("div");
+    main.className = "bd-r2v-side-main";
+    main.title = t("r2v.side.jumpHint");
+    const title = document.createElement("b");
+    title.textContent = t("batch.groupTitle.asset", { n: index + 1 });
+    const fc = Math.max(1, parseInt(seg.frameCount ?? seg.length, 10) || 1);
+    const meta = document.createElement("span");
+    meta.textContent = formatDurationOption({ sec: framesToDurationSec(fc, 24), frames: fc });
+    main.append(title, meta);
+    main.addEventListener("click", (e) => {
+        e.stopPropagation();
+        selectBatchGroup(editor, index);
+        refreshR2vSideSelection(editor);
+    });
+    card.appendChild(main);
+
+    const opts = document.createElement("div");
+    opts.className = "bd-r2v-side-opts";
+
+    // 时长选择器（网格与页内一致：独立 17k+5 / 引用上段 17k）。
+    const curSec = resolveSegmentDurationSec(seg, defaultFrameCount(key), contGrid);
+    const resolved = durationToClampedMiniMaxFrames(curSec, 24, contGrid);
+    seg.durationSec = resolved.durationSec;
+    seg.frameCount = resolved.frames;
+    seg.length = resolved.frames;
+    seg._videoFrameCount = resolved.frames;
+    const combo = createDurationCombo({
+        sec: resolved.durationSec,
+        continuity: contGrid,
+        fps: 24,
+        disabled: externalLocked,
+        // 窄栏放不下「秒 + 帧」：只显示秒数，帧数留在 tooltip 与下拉选项里。
+        compact: true,
+        attrs: { "data-batch-sec-id": seg.id || "" },
+        onCommit: (nextSec) => {
+            const cont = usesContinuityFrameGrid(seg, index, editor.timeline?.output);
+            const updated = applyBatchSegmentDuration(editor, index, nextSec, cont);
+            if (!updated) return;
+            editor.scheduleTimelineSync?.();
+            editor.scheduleRender?.();
+            editor.updateVideoNameLabel?.();
+            editor.updateOutputPreview?.();
+            if (editor.totalFramesWidget) {
+                editor.totalFramesWidget.value = sumFrameCounts(editor.timeline.segments);
+            }
+        },
+    });
+    if (externalLocked) combo.input.title = t("external.durationLocked");
+    opts.appendChild(combo.el);
+
+    // 引用上段（第 1 段无上段，不显示 — 与页内一致）。
+    if (masterCont && index > 0) {
+        const contLabel = document.createElement("label");
+        contLabel.className = "bd-batch-continuity";
+        contLabel.title = externalLocked
+            ? t("external.durationLocked")
+            : t("tooltip.segmentContinuityFromPrev");
+        const contCb = document.createElement("input");
+        contCb.type = "checkbox";
+        contCb.setAttribute("data-batch-cont-id", seg.id || "");
+        contCb.disabled = externalLocked;
+        contCb.checked = isSegmentContinuityFromPrev(seg, index);
+        contCb.onchange = (e) => {
+            e.stopPropagation();
+            seg.continuityFromPrev = !!contCb.checked;
+            // 网格在 17k+5 / 17k 之间切换：保持秒数、重对齐帧数并刷新两侧选择器。
+            const cont = usesContinuityFrameGrid(seg, index, editor.timeline?.output);
+            applyBatchSegmentDuration(editor, index, seg.durationSec, cont);
+            combo.setContinuity(cont, seg.durationSec);
+            syncBatchChecks(editor, seg, "cont", contCb.checked);
+            editor.updateVideoNameLabel?.();
+            editor.updateOutputPreview?.();
+            if (editor.totalFramesWidget) {
+                editor.totalFramesWidget.value = sumFrameCounts(editor.timeline.segments);
+            }
+            editor.commit?.(false, { syncTimeline: true });
+            editor.flushTimelineSync?.();
+        };
+        contCb.onclick = (e) => e.stopPropagation();
+        const contText = document.createElement("span");
+        contText.textContent = t("batch.continuityFromPrev");
+        contLabel.append(contCb, contText);
+        opts.appendChild(contLabel);
+    }
+
+    // 保留音频。
+    {
+        const retainLabel = document.createElement("label");
+        retainLabel.className = "bd-batch-continuity bd-batch-retain";
+        const retainCb = document.createElement("input");
+        retainCb.type = "checkbox";
+        retainCb.setAttribute("data-batch-retain-id", seg.id || "");
+        retainCb.checked = !!String(seg.retainAudioId || "");
+        const known = peekAudioEntryCount(editor, index);
+        retainCb.disabled = externalLocked || (!retainCb.checked && known === 0);
+        retainLabel.classList.toggle("bd-disabled", retainCb.disabled);
+        retainLabel.title = t(retainCb.disabled
+            ? "tooltip.retainAudioNone"
+            : (retainCb.checked ? "tooltip.retainAudioOn" : "tooltip.retainAudio"));
+        retainCb.onchange = (e) => {
+            e.stopPropagation();
+            void editor.toggleRetainAudio?.(index, retainCb.checked, retainCb);
+            syncBatchChecks(editor, seg, "retain", retainCb.checked);
+            retainLabel.title = t(retainCb.disabled
+                ? "tooltip.retainAudioNone"
+                : (retainCb.checked ? "tooltip.retainAudioOn" : "tooltip.retainAudio"));
+        };
+        retainCb.onclick = (e) => e.stopPropagation();
+        const retainText = document.createElement("span");
+        retainText.textContent = t("batch.retainAudio");
+        retainLabel.append(retainCb, retainText);
+        opts.appendChild(retainLabel);
+        // 未知（首次渲染）时先放开、探测回来再定 — 与页内同一条缓存。
+        if (known === null) void probeRetainAvailability(editor, index, retainCb, retainLabel);
+    }
+
+    // 对齐下段（仅在「选择运行」下可用 — 与页内一致）。
+    if (masterCont && editor.isRunSelectEnabled?.()) {
+        const canAlign = !!editor.canAlignToNext?.(index);
+        const nextLabel = document.createElement("label");
+        nextLabel.className = "bd-batch-continuity bd-batch-continuity-next";
+        const nextCb = document.createElement("input");
+        nextCb.type = "checkbox";
+        nextCb.setAttribute("data-batch-next-id", seg.id || "");
+        nextCb.checked = canAlign && seg.continuityToNext === true;
+        nextCb.disabled = !canAlign || externalLocked;
+        nextLabel.title = canAlign
+            ? t("tooltip.segmentContinuityToNext")
+            : t("tooltip.segmentContinuityToNextNoCache");
+        nextCb.onchange = (e) => {
+            e.stopPropagation();
+            seg.continuityToNext = !!nextCb.checked;
+            syncBatchChecks(editor, seg, "next", nextCb.checked);
+            editor.commit?.(false, { syncTimeline: true });
+            editor.flushTimelineSync?.();
+        };
+        nextCb.onclick = (e) => e.stopPropagation();
+        const nextText = document.createElement("span");
+        nextText.textContent = t("batch.continuityToNext");
+        nextLabel.append(nextCb, nextText);
+        opts.appendChild(nextLabel);
+        if (!canAlign) nextLabel.classList.add("bd-disabled");
+    }
+
+    card.appendChild(opts);
+    return card;
+}
+
+/** 只刷新选中态，不重建（重建会打断正在展开的时长下拉）。 */
+export function refreshR2vSideSelection(editor) {
+    const panel = editor?._r2vSidePanel;
+    if (!panel) return;
+    panel.querySelectorAll(".bd-r2v-side-card").forEach((card) => {
+        card.classList.toggle(
+            "selected",
+            parseInt(card.dataset.sideIndex, 10) === editor.selectedIndex,
+        );
+    });
+}
+
+export function syncR2vSidePanel(editor) {
+    if (!editor?.isR2vBatch?.() || !editor.root?.isConnected) {
+        hideR2vSidePanel(editor);
+        return;
+    }
+    const panel = ensureR2vSidePanel(editor);
+    const headEl = panel.querySelector(".bd-r2v-side-head");
+    const listEl = panel.querySelector(".bd-r2v-side-list");
+    const segs = editor.timeline?.segments || [];
+    const runningIdx = editor._runHighlightSeg;
+    // 顶部常驻控件每次重建：选择运行开关状态 / 全选勾选 / 新增按钮禁用都跟当前状态。
+    headEl.innerHTML = "";
+    headEl.appendChild(buildR2vSideHead(editor));
+    listEl.innerHTML = "";
+    segs.forEach((seg, index) => {
+        if (!seg) return;
+        const card = buildR2vSideCard(editor, seg, index);
+        if (index === runningIdx) card.classList.add("running");
+        listEl.appendChild(card);
+    });
+    panel.classList.remove("hidden");
+    positionR2vSidePanel(editor);
+    // 竖栏接管后撤掉工具栏上的重复入口（选择运行 / 全选 / 添加素材组）。
+    updateR2vToolbarBtns(editor);
+    editor.updateRunSelectUI?.();
+    if (editor._r2vSideRaf == null) {
+        editor._r2vSideRaf = requestAnimationFrame(() => r2vSidePanelTick(editor));
+    }
+}
+
+export function hideR2vSidePanel(editor) {
+    const panel = editor?._r2vSidePanel;
+    if (!panel) return;
+    panel.classList.add("hidden");
+    if (editor._r2vSideRaf != null) {
+        cancelAnimationFrame(editor._r2vSideRaf);
+        editor._r2vSideRaf = null;
+    }
+}
+
+export function destroyR2vSidePanel(editor) {
+    if (editor?._r2vSideRaf != null) cancelAnimationFrame(editor._r2vSideRaf);
+    editor._r2vSideRaf = null;
+    editor?._r2vSidePanel?.remove();
+    editor._r2vSidePanel = null;
 }
 
 export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {}) {
@@ -4069,25 +4562,33 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
         // 非 r2v: 若节点比当前内容所需更高(曾被 r2v 撑大), 缩回, 使状态栏贴在当前红框(640)外部底部而非悬在远处。
         const node = editor?.node;
         if (node?.size) {
-            const needH = budget + inset + 4;
-            if (hasR2vCard) {
-                // r2v: 节点只增不减, 避免素材框/状态栏被 .bd-wrap overflow:hidden 裁掉。
-                if ((node.size[1] || 0) < needH - 2) {
-                    node.setSize?.([node.size[0], needH]);
-                    node.setDirtyCanvas?.(true, true);
-                }
-            } else if ((node.size[1] || 0) > needH + 2) {
-                // 非 r2v: 节点可缩回, 使状态栏贴在当前红框(640)外部底部而非悬在远处。
+            // r2v 素材框按内容撑开：节点高度跟内容走（wrap.scrollHeight），不再套固定预算，
+            // 否则素材被裁进固定高度、出现内部滚动条。
+            const contentH = hasR2vCard ? Math.max(0, Number(wrap.scrollHeight) || 0) : 0;
+            const needH = (contentH > 0 ? contentH : budget) + inset + 4;
+            // 运行状态激活时不收缩（进度回执会反复触发布局）。
+            // 缩放/滚动画布会持续触发布局 settle，此时 r2v 只允许「只增不减」，
+            // 否则节点高度来回变、卡片内部布局跟着跳。r2v 的收缩只在进入该模式时
+            // 执行一次（时间点轴被移除后的高度预算变小）。
+            const runActive = !!editor.runStatusEl?.classList?.contains("active");
+            const allowShrink = !runActive && (!hasR2vCard || !!editor._r2vShrinkPending);
+            if (allowShrink && (node.size[1] || 0) > needH + 2) {
+                node.setSize?.([node.size[0], needH]);
+                node.setDirtyCanvas?.(true, true);
+            } else if ((node.size[1] || 0) < needH - 2) {
+                // 内容比节点高: 撑高节点, 避免素材框/状态栏被 .bd-wrap overflow:hidden 裁掉。
                 node.setSize?.([node.size[0], needH]);
                 node.setDirtyCanvas?.(true, true);
             }
+            // 收缩窗口只覆盖模式切换后紧接的这一次布局。
+            editor._r2vShrinkPending = false;
         }
 
         if (main) {
             main.style.flex = "1 1 0";
             main.style.minHeight = "0";
             main.style.overflow = "hidden";
-            if (trusted && slotH > 0) {
+            if (trusted && slotH > 0 && !hasR2vCard) {
                 main.style.height = `${mainH}px`;
                 main.style.maxHeight = `${mainH}px`;
             } else {
@@ -4112,7 +4613,7 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
         panel.style.flex = "1 1 0";
         panel.style.minHeight = "0";
         panel.style.overflow = "hidden";
-        if (trusted && slotH > 0) {
+        if (trusted && slotH > 0 && !hasR2vCard) {
             panel.style.height = `${batchH}px`;
             panel.style.maxHeight = `${batchH}px`;
         } else {
@@ -4130,11 +4631,13 @@ export function syncBatchPanelFillHeight(editor, opts = {}) {
             batchH - (batchToolbar?.offsetHeight || 0) - noticeH - pickerH - 10,
         );
         list.style.flex = "0 0 auto";
-        // 素材框(.bd-batch-r2v-assets)自身已用 CSS 固定 min/max=1080，外层 list 不再塞 1080，
-        // 直接按 rowH 预算(listH)成形，卡片内素材框负责内部滚动，状态栏贴底可见。
         const listFloor = 0;
         list.style.minHeight = "";
-        if (trusted && slotH > 0) {
+        if (hasR2vCard) {
+            // r2v: 列表按内容成形（素材框内容撑开多高就多高），节点高度由内容驱动。
+            list.style.height = "";
+            list.style.maxHeight = "none";
+        } else if (trusted && slotH > 0) {
             list.style.height = `${listH}px`;
             list.style.maxHeight = `${listH}px`;
         } else {
@@ -4261,7 +4764,10 @@ export function updateR2vToolbarBtns(editor) {
     const addBtn = editor?.root?.querySelector?.('[data-a="r2v-add-group"]');
     if (!addBtn) return;
     const externalLocked = !!(editor?.hasExternalI2vGroups?.() || editor?.hasExternalR2vGroups?.());
-    const show = !!editor?.isR2vBatch?.() && !externalLocked;
+    // 外挂竖栏顶部已有「+ 添加素材组」：竖栏在就撤掉工具栏这一个（没显示时保留兜底）。
+    const sidePanelOn = !!editor?._r2vSidePanel
+        && !editor._r2vSidePanel.classList.contains("hidden");
+    const show = !!editor?.isR2vBatch?.() && !externalLocked && !sidePanelOn;
     addBtn.classList.toggle("hidden", !show);
     addBtn.disabled = !show;
 }

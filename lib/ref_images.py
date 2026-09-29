@@ -15,17 +15,26 @@ def reference_image_label(index: int) -> str:
 
 
 def flatten_reference_kwargs(kwargs: dict) -> dict[str, torch.Tensor | None]:
+    """Collect the ``reference_image_<N>`` slots of a kwargs mapping.
+
+    The limit enforced here is the *count* the official node accepts, not the id:
+    stored ids are renumbered to gap-free slots before the model call, so an id
+    above the UI slot count is usable as long as the payload does not carry more
+    than :data:`MAX_REFERENCE_IMAGES` of them.
+    """
     refs: dict[str, torch.Tensor | None] = {}
     for key, value in kwargs.items():
         if not key.startswith(REF_IMAGE_KEY_PREFIX):
             continue
         index = int(key.removeprefix(REF_IMAGE_KEY_PREFIX))
-        if index < 0 or index >= MAX_REFERENCE_IMAGES:
-            raise ValueError(
-                f"Invalid reference image slot {key!r}; "
-                f"use reference_image_0 … reference_image_{MAX_REFERENCE_IMAGES - 1} only."
-            )
+        if index < 0:
+            raise ValueError(f"Invalid reference image slot {key!r}; expected a non-negative id.")
         refs[key] = value
+    if len(refs) > MAX_REFERENCE_IMAGES:
+        raise ValueError(
+            f"Too many reference images: {len(refs)} payload slot(s), official limit is "
+            f"{MAX_REFERENCE_IMAGES}. Reference fewer materials or remove the extra slots."
+        )
     return refs
 
 

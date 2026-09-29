@@ -28,6 +28,23 @@ from .ref_latent_cache import attach_latents, detach_latents, strip_latents
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.conditioning.store")
 
 
+def _has_ref_blocks(positive: Any) -> bool:
+    """True when the encoding still carries its ``minimax_refs`` blocks.
+
+    A file written before the reference blocks existed (or one whose blocks were
+    stripped on an earlier partial hit) has no such group at all, so
+    :func:`attach_latents` has nothing to resolve and reports success. Checking
+    the group here is what stops such a file from being served as a full hit to a
+    run that does pass reference materials.
+    """
+    for row in (positive or []):
+        if isinstance(row, (list, tuple)) and len(row) >= 2 and isinstance(row[1], dict):
+            blocks = row[1].get("minimax_refs")
+            if isinstance(blocks, (list, tuple)) and len(blocks) > 0:
+                return True
+    return False
+
+
 def av_frame_count(width: int, height: int, length: int) -> int | None:
     """Aligned frame count a canvas of ``(width, height, length)`` samples to.
 
@@ -181,6 +198,8 @@ def load_conditioning_cache(
     workflow_name: str | None = None,
     *,
     ref_videos: Any = None,
+    ref_audios: Any = None,
+    ref_video_audios: Any = None,
     first_frame: Any = None,
     last_frame: Any = None,
     require_latents: bool = True,
@@ -273,6 +292,25 @@ def load_conditioning_cache(
             log.info(
                 "Text cache hit for seg #%d; latents pending at %dx%d",
                 segment_index + 1, int(width), int(height),
+            )
+            positive = strip_latents(cache_data["positive"])
+            latents_pending = True
+        elif (ref_images or ref_videos or ref_audios or ref_video_audios) \
+                and not _has_ref_blocks(cache_data["positive"]):
+            # This run passes reference material, but the cached payload has no
+            # reference blocks at all (written before they existed, or by a
+            # text-only save). attach_latents had nothing to resolve, so the file
+            # would otherwise be served as a full hit and the references would
+            # silently never reach the model.
+            if require_latents:
+                log.info(
+                    "Cache invalidated for seg #%d (encoding carries no reference blocks)",
+                    segment_index + 1,
+                )
+                return None
+            log.info(
+                "Text cache hit for seg #%d; references never encoded — re-encoding them.",
+                segment_index + 1,
             )
             positive = strip_latents(cache_data["positive"])
             latents_pending = True

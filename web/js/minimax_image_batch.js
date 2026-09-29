@@ -3009,9 +3009,10 @@ export function computePromptRefUsage(editor, seg) {
             ...collectPromptTags(seg?.prompt, tag),
         ]);
         const used = tags.size;
-        // 编号越界（如 <Picture 12>）同样不生效：plan.py 按 index >= MAX 截断。
-        const maxTag = [...tags].reduce((acc, n) => (n > acc ? n : acc), 0);
-        const over = used > max || maxTag > max;
+        // 只按「引用数量」判超限。编号只是用户侧的标识：运行时会把该段实际引用到的
+        // 素材重编号成 1..N（batch_prepare._renumber_r2v_references），所以
+        // <Picture 10> 这种高编号本身并不越界，不该报警。
+        const over = used > max;
         res[kind] = { used, max, over };
         totalUsed += used;
         if (over) res.over = true;
@@ -3032,8 +3033,8 @@ export function computeCommonRefUsage(editor) {
         const max = R2V_REF_LIMITS[kind];
         const tags = collectPromptTags(g.prompt, tag);
         const used = tags.size;
-        const maxTag = [...tags].reduce((acc, n) => (n > acc ? n : acc), 0);
-        const over = used > max || maxTag > max;
+        // 只按「引用数量」判超限（编号会在运行时重编号），见 computePromptRefUsage。
+        const over = used > max;
         res[kind] = { used, max, over };
         totalUsed += used;
         if (over) res.over = true;

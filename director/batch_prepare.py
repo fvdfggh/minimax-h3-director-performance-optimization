@@ -29,6 +29,14 @@ import logging
 import re
 from typing import Any
 
+# Payload key prefixes, imported from the modules that *build* those keys: a
+# hand-copied literal once said "ref_image_" where the official payload uses
+# "reference_image_", so _filter_refs_by_prompt matched nothing and every
+# reference image was silently dropped from r2v conditioning.
+from ..lib.ref_audios import REF_AUDIO_KEY_PREFIX as _REF_AUD_PREFIX
+from ..lib.ref_images import REF_IMAGE_KEY_PREFIX as _REF_IMG_PREFIX
+from ..lib.ref_videos import REF_VIDEO_KEY_PREFIX as _REF_VID_PREFIX
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.batch.prepare")
 
 
@@ -195,15 +203,9 @@ def _filter_refs_by_prompt(
     return filtered
 
 
-_REF_IMG_PREFIX = "ref_image_"
-
-
-_REF_VID_PREFIX = "ref_video_"
-
-
-_REF_AUD_PREFIX = "ref_audio_"
-
-
+#: Must match ``plan_refs.ref_video_audios_to_dict`` — the official node pairs a
+#: soundtrack with ``ref_video_<N>`` through exactly this key. (``_REF_IMG_*`` /
+#: ``_REF_VID_*`` / ``_REF_AUD_*`` are imported at the top of this module.)
 _REF_VAUD_PREFIX = "ref_video_audio_"
 
 

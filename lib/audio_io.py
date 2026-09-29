@@ -75,12 +75,19 @@ def video_has_audio(path: str) -> bool | None:
 
 
 def _parse_ffmpeg_audio_info(stderr: str) -> tuple[int, int]:
+    """Sample rate / channels from ffmpeg's banner, or ``(0, 2)`` when absent.
+
+    ``0`` means "not advertised". Decoding runs with ``-v error`` and pipes PCM
+    to stdout, so this banner is usually empty — returning 44100 there used to
+    overwrite the sample rate ffprobe had already detected, relabelling 32kHz
+    PCM as 44.1kHz (playback 1.375x fast, pitch raised).
+    """
     match = re.search(r", (\d+) Hz, (\w+), ", stderr)
     if match:
         ar = int(match.group(1))
         ac = {"mono": 1, "stereo": 2}.get(match.group(2), 2)
         return ar, ac
-    return 44100, 2
+    return 0, 2
 
 
 def _probe_audio_stream(path: str) -> tuple[int, int]:
@@ -396,6 +403,8 @@ def _load_full_audio(path: str) -> dict[str, Any] | None:
         return None
     if not res.stdout:
         return None
+    # ffmpeg was told ``-ar ar``, so the PCM really is at ``ar``. Only let the
+    # banner override that when it actually advertised a rate (0 = nothing parsed).
     parsed_ar, _ = _parse_ffmpeg_audio_info(res.stderr.decode(*_ENCODE_ARGS))
     if parsed_ar > 0:
         ar = parsed_ar

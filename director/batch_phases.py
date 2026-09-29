@@ -211,6 +211,9 @@ def _prepare_one_segment(
             ref_image_size=ref_image_size, ref_images=ref_images,
             workflow_name=workflow_name,
             ref_videos=ref_videos, first_frame=first_frame, last_frame=last_frame,
+            # Any reference material means the encoding must carry reference
+            # blocks, or the hit is only worth its text half.
+            ref_audios=ref_audios, ref_video_audios=ref_video_audios,
             # Two-level hit: a canvas we have never encoded at still has a usable
             # text encoding, so take it and leave the latents to the VAEs.
             require_latents=False,
@@ -583,6 +586,10 @@ def _sample_one_segment(
                 head_seconds=float(trim_frames or 0) / _fps,
             )
             retain_active = True
+            log.info(
+                "保留音频: seg #%d Phase 2 锁定提取音轨 %s（Phase 3 跳过音频解码）。",
+                seg.index + 1, retain_entry.get("entry_id") or "?",
+            )
             reports.append(
                 f"  Seg #{seg.index + 1}: 保留音频 ON — 锁定提取音频 "
                 f"({retain_entry.get('entry_id') or '?'})"

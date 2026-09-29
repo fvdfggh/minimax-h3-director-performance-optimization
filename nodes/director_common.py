@@ -506,6 +506,16 @@ def finalize_director_outputs(
         segment_frame_counts=segment_frame_counts if use_generated else None,
         audio_mode=audio_mode,
     )
+    #「保留音频」takes those segments off the AV-latent audio decode in Phase 3,
+    # so the summary must not claim every clip was model-generated.
+    retained_segments = int(getattr(plan, "retained_segment_count", 0) or 0)
+    if not retained_segments:
+        try:
+            from ..director.audio_retain import build_retain_index
+
+            retained_segments = len(build_retain_index(plan))
+        except Exception:  # pragma: no cover - defensive
+            retained_segments = 0
     report = report + source_audio_report_note(
         plan,
         audio_out,
@@ -514,6 +524,7 @@ def finalize_director_outputs(
         used_generated_audio=bool(use_generated and segment_audios),
         audio_mode=audio_mode,
         source_fallback=source_fallback,
+        retained_segments=retained_segments,
     )
 
     # Merged layout: ``images_out`` is the merged clip and every length has been

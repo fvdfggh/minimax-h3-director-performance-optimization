@@ -31,6 +31,12 @@ from ..lib.audio_io import load_reference_audio
 from ..lib.ref_audios import MAX_REFERENCE_AUDIOS, ref_audios_dict
 from ..lib.ref_images import MAX_REFERENCE_IMAGES, REF_IMAGE_KEY_PREFIX
 from ..lib.ref_videos import MAX_REFERENCE_VIDEOS, ref_videos_dict
+
+#: Sanity bound on a *stored* reference id (not the UI slot count). An id is a
+#: timeline address: only the materials the prompt names are sent, and those are
+#: renumbered to gap-free 1..N before the model call. This exists purely to
+#: reject malformed payloads.
+_MAX_REF_SLOT_ID = 64
 from ..lib.video_io import (
     load_reference_video_clip,
     load_timeline_segment,
@@ -110,7 +116,16 @@ def _load_refs(ref_list: list[dict]) -> list[SegmentRef]:
     refs: list[SegmentRef] = []
     for item in ref_list or []:
         index = int(item.get("index", item.get("slot", len(refs))))
-        if index < 0 or index >= MAX_REFERENCE_IMAGES:
+        # Only a sanity bound: the *stored* id is a timeline address, not a model
+        # slot. A run sends just the materials the prompt names and renumbers them
+        # to gap-free 1..N (batch_prepare._renumber_r2v_references), so an id past
+        # the 9 UI slots must survive to that stage instead of being dropped here.
+        if index < 0 or index >= _MAX_REF_SLOT_ID:
+            log.warning(
+                "Reference image id %d is out of range — dropped (%s).",
+                index + 1,
+                item.get("imageFile") or item.get("fileName") or "?",
+            )
             continue
         tensor = load_reference_tensor(item)
         if tensor is not None:
@@ -151,7 +166,8 @@ def _load_ref_audios(audio_list: list[dict]) -> list[SegmentRefAudio]:
         if not isinstance(item, dict):
             continue
         index = int(item.get("index", item.get("slot", len(out))))
-        if index < 0 or index >= MAX_REFERENCE_AUDIOS:
+        # Stored id, not a model slot — see _MAX_REF_SLOT_ID.
+        if index < 0 or index >= _MAX_REF_SLOT_ID:
             continue
         audio = load_reference_audio_item(item)
         if audio is None:
@@ -207,7 +223,8 @@ def _load_ref_videos(
         if not isinstance(item, dict) or not _ref_video_entry_has_file(item):
             continue
         index = int(item.get("index", item.get("slot", len(out))))
-        if index < 0 or index >= MAX_REFERENCE_VIDEOS:
+        # Stored id, not a model slot — see _MAX_REF_SLOT_ID.
+        if index < 0 or index >= _MAX_REF_SLOT_ID:
             continue
         try:
             tensor = load_reference_video_clip(item, timeline, num_frames, start_frame=0)

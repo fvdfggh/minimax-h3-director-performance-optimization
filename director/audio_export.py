@@ -438,6 +438,7 @@ def source_audio_report_note(
     used_generated_audio: bool = False,
     audio_mode: str | None = None,
     source_fallback: str | None = None,
+    retained_segments: int = 0,
 ) -> str:
     mode = audio_mode or resolve_audio_mode(plan)
     if mode == AUDIO_MODE_MUTE:
@@ -466,6 +467,24 @@ def source_audio_report_note(
             "(frame-aligned PCM cut, length = picture / timeline fps)."
         )
     if used_generated_audio and any(_audio_has_samples(a) for a in audio_out):
+        # 「保留音频」segments never reach the AV-latent audio decode — Phase 3
+        # muxes their extracted clip verbatim. Saying "decoded from AV latent"
+        # for those made a correct run look like it regenerated the audio.
+        total = len(getattr(plan, "segments", None) or [])
+        kept = max(0, int(retained_segments or 0))
+        if kept:
+            if total:
+                kept = min(kept, total)
+            generated = max(0, total - kept) if total else 0
+            if generated == 0:
+                return (
+                    f"\n\nAudio: 保留音频 — {kept} 段直接复用提取音轨"
+                    "（采样时锁定，输出为原音，未重新生成音频）。"
+                )
+            return (
+                f"\n\nAudio: 保留音频 {kept} 段直接复用提取音轨（输出为原音）；"
+                f"其余 {generated} 段为 MiniMax H3 AV latent 解码的生成音频。"
+            )
         return (
             "\n\nGenerated audio: decoded from MiniMax H3 AV latent "
             "(frame-aligned to picture / timeline fps)."

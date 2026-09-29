@@ -206,7 +206,10 @@ def execute_director_batch(
     elif audio_mode == AUDIO_MODE_SOURCE:
         reports.append("Audio: source — extract source PCM once in Phase 1, reuse in Phase 3.")
     else:
-        reports.append("Audio: generate — encode → sample → decode model audio.")
+        reports.append(
+            "Audio: generate — encode → sample → decode model audio"
+            "（勾了「保留音频」的段除外：那些段直接复用提取音轨）。"
+        )
 
     # ===================================================================
     # SOURCE MODE: pre-extract the source PCM for every running segment
@@ -245,6 +248,12 @@ def execute_director_batch(
             f"Audio: 保留音频 — {len(retain_audio_cache)} 段使用提取音频"
             "（采样时锁定，输出直接复用原音频）"
         )
+        # Handed to the final audio summary: only segments whose PCM actually
+        # loaded count as retained (a missing entry falls back to generate).
+        try:
+            plan.retained_segment_count = len(retain_audio_cache)
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     cache_dir = _batch_cache_dir(node_id, workflow_name)
 

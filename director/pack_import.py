@@ -282,6 +282,50 @@ def _assemble_timeline(extracted: Path, pack_meta: dict) -> dict:
     return timeline
 
 
+def _merge_scanned_media(timeline: dict, extracted: Path) -> int:
+    """Register media that exists on disk but is missing from an imported ``timeline.json``.
+
+    The json is **not** authoritative about which slots exist. A pack exported by a
+    UI that only offered 9 picture slots — or one edited by hand — can carry
+    ``shared_params/Picture10.png …`` (and per-group files) that the json never
+    lists. Reading the json alone silently dropped them: the files were imported,
+    but no page (the asset grid included) could ever show them.
+
+    Scanned files win on a shared id, so a slot the json named differently still
+    resolves to the media actually shipped in the pack.
+
+    Returns how many slots the json was missing.
+    """
+    added = 0
+    global_block = timeline.get("global")
+    if not isinstance(global_block, dict):
+        global_block = {}
+        timeline["global"] = global_block
+
+    def merge_into(target: dict, scanned: dict) -> None:
+        nonlocal added
+        for key in ("refs", "refAudios", "refVideos"):
+            before = target.get(key) or []
+            merged = _merge_refs(before, scanned.get(key) or [])
+            added += max(0, len(merged) - len(before))
+            target[key] = merged
+
+    merge_into(global_block, _scan_slot_files(extracted / "shared_params"))
+
+    groups_root = extracted / "asset_groups"
+    group_dirs = (
+        sorted((p for p in groups_root.iterdir() if p.is_dir()), key=lambda p: p.name)
+        if groups_root.is_dir() else []
+    )
+    segments = timeline.get("segments")
+    if isinstance(segments, list):
+        # Same pairing rule as _assemble_timeline: group folders in name order.
+        for seg, gdir in zip(segments, group_dirs):
+            if isinstance(seg, dict):
+                merge_into(seg, _scan_slot_files(gdir))
+    return added
+
+
 def _prefix_pack_paths(obj: Any, prefix: str) -> None:
     if isinstance(obj, list):
         for item in obj:
@@ -382,6 +426,14 @@ def import_extracted_pack(extracted: Path) -> dict[str, Any]:
         timeline = _read_json(timeline_path)
         if not isinstance(timeline, dict):
             raise ValueError("timeline.json is invalid.")
+        # The pack may ship more media than the json lists（导出端只有 9 个图片槽，
+        # 或别人手工补了 Picture10+）: register what is actually on disk.
+        added = _merge_scanned_media(timeline, extracted)
+        if added:
+            log.info(
+                "Pack import: registered %d media slot(s) present on disk but missing "
+                "from timeline.json.", added,
+            )
     else:
         timeline = _assemble_timeline(extracted, pack_meta)
 
